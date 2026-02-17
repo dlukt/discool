@@ -1,0 +1,137 @@
+# generated: 2026-02-17
+# project: discool
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog -> in-progress: Automatically when first story is created (via create-story)
+#   - in-progress -> done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - SM typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+
+generated: 2026-02-17
+project: discool
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+
+development_status:
+  # Epic 1: Project Foundation & Instance Deployment
+  epic-1: in-progress
+  1-1-initialize-project-scaffold-and-serve-spa: done
+  1-2-configuration-system-and-structured-logging: ready-for-dev
+  1-3-database-connection-and-migration-system: backlog
+  1-4-health-check-and-metrics-endpoints: backlog
+  1-5-first-run-admin-setup-screen: backlog
+  1-6-instance-health-dashboard: backlog
+  1-7-data-export-and-backup: backlog
+  1-8-docker-and-deployment-pipeline: backlog
+  epic-1-retrospective: optional
+
+  # Epic 2: Identity & Authentication
+  epic-2: backlog
+  2-1-client-side-keypair-generation-and-identity-creation: backlog
+  2-2-challenge-response-authentication-and-session-management: backlog
+  2-3-identity-persistence-and-auto-login: backlog
+  2-4-display-name-and-avatar-management: backlog
+  2-5-cross-instance-identity-verification: backlog
+  2-6-optional-email-association: backlog
+  2-7-email-based-identity-recovery: backlog
+  epic-2-retrospective: optional
+
+  # Epic 3: P2P Discovery & Federation Foundation
+  epic-3: backlog
+  3-1-libp2p-node-bootstrap-and-instance-identity: backlog
+  3-2-kademlia-dht-instance-discovery: backlog
+  3-3-gossipsub-inter-instance-communication: backlog
+  3-4-sybil-resistance-and-network-health: backlog
+  3-5-private-instance-and-discovery-opt-out: backlog
+  epic-3-retrospective: optional
+
+  # Epic 4: Guilds, Channels & Invites
+  epic-4: backlog
+  4-1-spa-navigation-shell-and-routing: backlog
+  4-2-guild-creation-and-settings: backlog
+  4-3-text-and-voice-channel-management: backlog
+  4-4-channel-categories: backlog
+  4-5-invite-link-generation-and-management: backlog
+  4-6-join-guild-via-invite-link: backlog
+  4-7-guild-navigation-and-activity-indicators: backlog
+  epic-4-retrospective: optional
+
+  # Epic 5: Roles, Permissions & Member Management
+  epic-5: backlog
+  5-1-role-crud-and-default-roles: backlog
+  5-2-permission-assignment-and-bitflag-engine: backlog
+  5-3-role-hierarchy-and-ordering: backlog
+  5-4-role-assignment-to-members: backlog
+  5-5-channel-level-permission-overrides: backlog
+  5-6-role-management-delegation: backlog
+  5-7-member-list-with-presence: backlog
+  epic-5-retrospective: optional
+
+  # Epic 6: Real-Time Text Communication
+  epic-6: backlog
+  6-1-websocket-gateway-and-connection-management: backlog
+  6-2-send-and-display-text-messages: backlog
+  6-3-message-history-and-virtual-scrolling: backlog
+  6-4-edit-and-delete-own-messages: backlog
+  6-5-emoji-reactions: backlog
+  6-6-file-upload-and-sharing: backlog
+  6-7-rich-embeds-and-markdown-rendering: backlog
+  6-8-typing-indicators-and-channel-activity: backlog
+  6-9-direct-messages: backlog
+  6-10-user-blocking-complete-erasure: backlog
+  6-11-error-handling-and-status-communication: backlog
+  6-12-quick-switcher: backlog
+  epic-6-retrospective: optional
+
+  # Epic 7: Voice Communication
+  epic-7: backlog
+  7-1-webrtc-signaling-and-peer-connection: backlog
+  7-2-voice-bar-and-basic-controls: backlog
+  7-3-voice-channel-participants-display: backlog
+  7-4-individual-volume-control: backlog
+  7-5-voice-channel-switching: backlog
+  7-6-voice-auto-reconnect: backlog
+  7-7-mobile-voice-controls: backlog
+  epic-7-retrospective: optional
+
+  # Epic 8: Moderation, Reporting & Data Privacy
+  epic-8: backlog
+  8-1-mute-user-timed-and-permanent: backlog
+  8-2-kick-user-from-guild: backlog
+  8-3-ban-user-from-guild: backlog
+  8-4-kick-user-from-voice-channel: backlog
+  8-5-moderation-log: backlog
+  8-6-message-deletion-by-moderators: backlog
+  8-7-view-user-message-history-moderator: backlog
+  8-8-user-content-reporting: backlog
+  8-9-report-queue-and-lifecycle: backlog
+  8-10-personal-data-export-gdpr: backlog
+  8-11-account-deletion-gdpr: backlog
+  epic-8-retrospective: optional

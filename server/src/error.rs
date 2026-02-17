@@ -1,0 +1,31 @@
+use axum::{
+    Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+use serde_json::json;
+
+#[derive(Debug)]
+pub enum AppError {
+    NotFound,
+    Internal(String),
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let (status, code, message) = match self {
+            AppError::NotFound => (StatusCode::NOT_FOUND, "NOT_FOUND", "Resource not found"),
+            AppError::Internal(msg) => {
+                tracing::error!(%msg, "Internal error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "An internal error occurred",
+                )
+            }
+        };
+
+        let body = json!({ "error": { "code": code, "message": message, "details": {} } });
+        (status, Json(body)).into_response()
+    }
+}

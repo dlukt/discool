@@ -1,0 +1,1607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Discool - UX Design Directions</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #000;
+            color: #fff;
+            line-height: 1.5;
+        }
+
+        /* Tab Navigation */
+        .tab-container {
+            background: #0a0a0a;
+            border-bottom: 1px solid #27272a;
+            padding: 20px 40px 0;
+        }
+
+        .tab-nav {
+            display: flex;
+            gap: 8px;
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        .tab-button {
+            background: transparent;
+            border: none;
+            color: #71717a;
+            padding: 12px 24px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            font-family: 'Inter', sans-serif;
+        }
+
+        .tab-button:hover {
+            color: #a1a1aa;
+        }
+
+        .tab-button.active {
+            color: #fff;
+            border-bottom-color: #3b82f6;
+        }
+
+        /* Tab Content */
+        .tab-content {
+            display: none;
+            padding: 40px;
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .direction-description {
+            margin-bottom: 24px;
+            padding: 20px;
+            background: #18181b;
+            border-radius: 8px;
+            border-left: 4px solid var(--accent-primary);
+        }
+
+        .direction-description h2 {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: var(--accent-primary);
+        }
+
+        .direction-description p {
+            color: #a1a1aa;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+
+        /* Main Layout */
+        .app-layout {
+            display: flex;
+            height: 900px;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+
+        /* Guild Rail */
+        .guild-rail {
+            width: 72px;
+            background: var(--bg-guild-rail);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 12px 0;
+            gap: 8px;
+            border-right: 1px solid var(--border-subtle);
+        }
+
+        .guild-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            background: var(--bg-guild-icon);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 18px;
+            color: var(--text-primary);
+            cursor: pointer;
+            transition: all 0.2s;
+            position: relative;
+        }
+
+        .guild-icon:hover {
+            border-radius: 16px;
+            background: var(--accent-primary);
+            color: #fff;
+        }
+
+        .guild-icon.active {
+            border-radius: 16px;
+            background: var(--accent-primary);
+            color: #fff;
+        }
+
+        .guild-icon.active::before {
+            content: '';
+            position: absolute;
+            left: -12px;
+            width: 4px;
+            height: 40px;
+            background: #fff;
+            border-radius: 0 4px 4px 0;
+        }
+
+        .guild-separator {
+            width: 32px;
+            height: 2px;
+            background: var(--border-subtle);
+            border-radius: 1px;
+        }
+
+        /* Channel List */
+        .channel-list {
+            width: 240px;
+            background: var(--bg-channel-list);
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid var(--border-subtle);
+        }
+
+        .server-header {
+            height: 48px;
+            padding: 0 16px;
+            display: flex;
+            align-items: center;
+            font-weight: 600;
+            font-size: 15px;
+            border-bottom: 1px solid var(--border-subtle);
+            color: var(--text-primary);
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .server-header:hover {
+            background: var(--bg-hover);
+        }
+
+        .channels-scroll {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px 8px;
+        }
+
+        .channel-category {
+            margin-bottom: 16px;
+        }
+
+        .category-header {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 8px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            letter-spacing: 0.5px;
+            cursor: pointer;
+        }
+
+        .category-header:hover {
+            color: var(--text-secondary);
+        }
+
+        .channel-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            margin: 1px 0;
+            border-radius: 4px;
+            cursor: pointer;
+            color: var(--text-secondary);
+            font-size: 14px;
+            transition: all 0.15s;
+            position: relative;
+        }
+
+        .channel-item:hover {
+            background: var(--bg-hover);
+            color: var(--text-primary);
+        }
+
+        .channel-item.active {
+            background: var(--bg-active);
+            color: var(--text-active);
+        }
+
+        .channel-icon {
+            font-size: 16px;
+            opacity: 0.6;
+        }
+
+        .channel-item.active .channel-icon {
+            opacity: 1;
+        }
+
+        .channel-name {
+            flex: 1;
+        }
+
+        .unread-indicator {
+            width: 8px;
+            height: 8px;
+            background: var(--text-primary);
+            border-radius: 50%;
+        }
+
+        .voice-users {
+            display: flex;
+            gap: 4px;
+            margin-left: 4px;
+        }
+
+        .voice-avatar {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            font-size: 9px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+        }
+
+        .voice-bar {
+            padding: 12px;
+            background: var(--bg-voice-bar);
+            border-top: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .voice-info {
+            flex: 1;
+            font-size: 12px;
+        }
+
+        .voice-status {
+            color: var(--text-muted);
+            font-size: 11px;
+        }
+
+        .voice-channel-name {
+            color: var(--text-primary);
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .voice-controls {
+            display: flex;
+            gap: 8px;
+        }
+
+        .voice-button {
+            width: 32px;
+            height: 32px;
+            border-radius: 4px;
+            background: var(--bg-button);
+            border: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            color: var(--text-secondary);
+        }
+
+        .voice-button:hover {
+            background: var(--bg-button-hover);
+            color: var(--text-primary);
+        }
+
+        .voice-button.disconnect {
+            background: var(--accent-destructive);
+            color: #fff;
+        }
+
+        .voice-button.disconnect:hover {
+            background: var(--accent-destructive-hover);
+        }
+
+        /* Message Area */
+        .message-area {
+            flex: 1;
+            background: var(--bg-message-area);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .channel-header {
+            height: 48px;
+            padding: 0 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .channel-hash {
+            font-size: 20px;
+            color: var(--text-muted);
+        }
+
+        .channel-title {
+            font-weight: 600;
+            font-size: 16px;
+            color: var(--text-primary);
+        }
+
+        .messages-scroll {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+        }
+
+        .message {
+            display: flex;
+            gap: 16px;
+            padding: 8px 16px;
+            margin: 0 -16px;
+            transition: background 0.15s;
+        }
+
+        .message:hover {
+            background: var(--bg-message-hover);
+        }
+
+        .message-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            font-weight: 600;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .message-content {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .message-header {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            margin-bottom: 2px;
+        }
+
+        .message-author {
+            font-weight: 600;
+            font-size: 15px;
+            color: var(--text-primary);
+        }
+
+        .message-timestamp {
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .message-text {
+            color: var(--text-primary);
+            font-size: 15px;
+            line-height: 1.5;
+        }
+
+        .message-text a {
+            color: var(--accent-link);
+            text-decoration: none;
+        }
+
+        .message-text a:hover {
+            text-decoration: underline;
+        }
+
+        .code-block {
+            background: var(--bg-code);
+            border: 1px solid var(--border-subtle);
+            border-radius: 4px;
+            padding: 12px;
+            margin-top: 8px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+            overflow-x: auto;
+            color: var(--text-code);
+        }
+
+        .image-attachment {
+            margin-top: 8px;
+            max-width: 400px;
+            height: 200px;
+            background: var(--bg-attachment);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+
+        .message-input-container {
+            padding: 16px;
+        }
+
+        .message-input {
+            background: var(--bg-input);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            padding: 12px 16px;
+            color: var(--text-primary);
+            font-size: 15px;
+            font-family: 'Inter', sans-serif;
+            width: 100%;
+            resize: none;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .message-input:focus {
+            border-color: var(--accent-primary);
+        }
+
+        .message-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        /* Member List */
+        .member-list {
+            width: 240px;
+            background: var(--bg-member-list);
+            padding: 16px 8px;
+            overflow-y: auto;
+            border-left: 1px solid var(--border-subtle);
+        }
+
+        .member-section {
+            margin-bottom: 20px;
+        }
+
+        .member-section-header {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            letter-spacing: 0.5px;
+            padding: 4px 8px;
+            margin-bottom: 4px;
+        }
+
+        .member-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 6px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .member-item:hover {
+            background: var(--bg-hover);
+        }
+
+        .member-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            font-weight: 600;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+
+        .member-status {
+            position: absolute;
+            bottom: -2px;
+            right: -2px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            border: 2px solid var(--bg-member-list);
+        }
+
+        .member-status.online {
+            background: #22c55e;
+        }
+
+        .member-status.offline {
+            background: #71717a;
+        }
+
+        .member-name {
+            flex: 1;
+            font-size: 14px;
+            color: var(--text-primary);
+        }
+
+        /* Color Themes */
+        /* Direction 1: Deep Freeze */
+        .direction-1 {
+            --bg-guild-rail: #09090b;
+            --bg-channel-list: #0a0a0c;
+            --bg-message-area: #0d0d0f;
+            --bg-member-list: #0a0a0c;
+            --bg-guild-icon: #18181b;
+            --bg-hover: #18181b;
+            --bg-active: #1c1c1f;
+            --bg-voice-bar: #09090b;
+            --bg-button: #18181b;
+            --bg-button-hover: #27272a;
+            --bg-message-hover: #18181b;
+            --bg-input: #18181b;
+            --bg-code: #0a0a0c;
+            --bg-attachment: #18181b;
+            --border-subtle: #18181b;
+            --text-primary: #fafafa;
+            --text-secondary: #a1a1aa;
+            --text-muted: #52525b;
+            --text-active: #e0f2fe;
+            --text-code: #cbd5e1;
+            --accent-primary: #0ea5e9;
+            --accent-link: #0ea5e9;
+            --accent-destructive: #ef4444;
+            --accent-destructive-hover: #dc2626;
+        }
+
+        /* Direction 2: Glacier */
+        .direction-2 {
+            --bg-guild-rail: #0a0a0f;
+            --bg-channel-list: #0f0f15;
+            --bg-message-area: #12121a;
+            --bg-member-list: #0f0f15;
+            --bg-guild-icon: #1a1a24;
+            --bg-hover: #1a1a24;
+            --bg-active: #0ea5e9;
+            --bg-voice-bar: #0a0a0f;
+            --bg-button: #1a1a24;
+            --bg-button-hover: #27272f;
+            --bg-message-hover: #1a1a24;
+            --bg-input: #1a1a24;
+            --bg-code: #0f0f15;
+            --bg-attachment: #1a1a24;
+            --border-subtle: #27272a;
+            --text-primary: #fafafa;
+            --text-secondary: #a1a1aa;
+            --text-muted: #52525b;
+            --text-active: #fff;
+            --text-code: #cbd5e1;
+            --accent-primary: #06b6d4;
+            --accent-link: #22d3ee;
+            --accent-destructive: #ef4444;
+            --accent-destructive-hover: #dc2626;
+        }
+
+        /* Direction 3: Ember Glow */
+        .direction-3 {
+            --bg-guild-rail: #18181b;
+            --bg-channel-list: #1c1c1f;
+            --bg-message-area: #1f1f23;
+            --bg-member-list: #1c1c1f;
+            --bg-guild-icon: #27272a;
+            --bg-hover: #27272a;
+            --bg-active: #fb923c;
+            --bg-voice-bar: #18181b;
+            --bg-button: #27272a;
+            --bg-button-hover: #3f3f46;
+            --bg-message-hover: #27272a;
+            --bg-input: #27272a;
+            --bg-code: #1c1c1f;
+            --bg-attachment: #27272a;
+            --border-subtle: #27272a;
+            --text-primary: #fafafa;
+            --text-secondary: #a1a1aa;
+            --text-muted: #71717a;
+            --text-active: #fff;
+            --text-code: #cbd5e1;
+            --accent-primary: #f97316;
+            --accent-link: #fb923c;
+            --accent-destructive: #dc2626;
+            --accent-destructive-hover: #b91c1c;
+        }
+
+        /* Direction 4: Dual Core */
+        .direction-4 {
+            --bg-guild-rail: #111113;
+            --bg-channel-list: #16161a;
+            --bg-message-area: #1a1a1f;
+            --bg-member-list: #16161a;
+            --bg-guild-icon: #25252a;
+            --bg-hover: #25252a;
+            --bg-active: #0ea5e9;
+            --bg-voice-bar: #111113;
+            --bg-button: #f97316;
+            --bg-button-hover: #ea580c;
+            --bg-message-hover: #25252a;
+            --bg-input: #25252a;
+            --bg-code: #16161a;
+            --bg-attachment: #25252a;
+            --border-subtle: #27272a;
+            --text-primary: #fafafa;
+            --text-secondary: #a1a1aa;
+            --text-muted: #71717a;
+            --text-active: #fff;
+            --text-code: #cbd5e1;
+            --accent-primary: #0ea5e9;
+            --accent-link: #f97316;
+            --accent-destructive: #dc2626;
+            --accent-destructive-hover: #b91c1c;
+        }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #27272a;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #3f3f46;
+        }
+    </style>
+</head>
+<body>
+    <div class="tab-container">
+        <div class="tab-nav">
+            <button class="tab-button active" data-tab="1">Direction 1: Deep Freeze</button>
+            <button class="tab-button" data-tab="2">Direction 2: Glacier</button>
+            <button class="tab-button" data-tab="3">Direction 3: Ember Glow</button>
+            <button class="tab-button" data-tab="4">Direction 4: Dual Core</button>
+        </div>
+    </div>
+
+    <!-- Direction 1: Deep Freeze -->
+    <div class="tab-content active" data-content="1">
+        <div class="direction-description">
+            <h2>Direction 1: Deep Freeze</h2>
+            <p>
+                <strong>Personality:</strong> Minimal, stark, professional. The darkest theme with near-black backgrounds and subtle ice blue accents.
+                Panels are distinguished by slight shade differences rather than visible borders. This direction feels like a polished terminal —
+                clean, focused, and uncluttered. Fire red appears only for destructive actions, maintaining a cool and controlled atmosphere.
+                Best for users who prefer maximum focus and minimal visual noise.
+            </p>
+        </div>
+        <div class="app-layout direction-1">
+            <!-- Guild Rail -->
+            <div class="guild-rail">
+                <div class="guild-icon active" style="background: linear-gradient(135deg, #0ea5e9, #06b6d4);">DC</div>
+                <div class="guild-separator"></div>
+                <div class="guild-icon" style="background: #7c3aed;">FD</div>
+                <div class="guild-icon" style="background: #ec4899;">GS</div>
+                <div class="guild-icon" style="background: #10b981;">TM</div>
+                <div class="guild-icon" style="background: #f59e0b;">PR</div>
+            </div>
+
+            <!-- Channel List -->
+            <div class="channel-list">
+                <div class="server-header">
+                    Discool HQ ▾
+                </div>
+                <div class="channels-scroll">
+                    <div class="channel-category">
+                        <div class="category-header">
+                            ▼ GENERAL
+                        </div>
+                        <div class="channel-item active">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">general</span>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">announcements</span>
+                            <div class="unread-indicator"></div>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">🔊</span>
+                            <span class="channel-name">General Voice</span>
+                            <div class="voice-users">
+                                <div class="voice-avatar" style="background: #7c3aed;">JD</div>
+                                <div class="voice-avatar" style="background: #ec4899;">SK</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="channel-category">
+                        <div class="category-header">
+                            ▼ DEVELOPMENT
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">frontend</span>
+                            <div class="unread-indicator"></div>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">backend</span>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">design</span>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">🔊</span>
+                            <span class="channel-name">Dev Sync</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="voice-bar">
+                    <div class="voice-info">
+                        <div class="voice-channel-name">
+                            🔊 General Voice
+                        </div>
+                        <div class="voice-status">Voice Connected</div>
+                    </div>
+                    <div class="voice-controls">
+                        <button class="voice-button" title="Mute">🎤</button>
+                        <button class="voice-button" title="Deafen">🎧</button>
+                        <button class="voice-button disconnect" title="Disconnect">✕</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Message Area -->
+            <div class="message-area">
+                <div class="channel-header">
+                    <span class="channel-hash">#</span>
+                    <span class="channel-title">general</span>
+                </div>
+                <div class="messages-scroll">
+                    <div class="message">
+                        <div class="message-avatar" style="background: #7c3aed;">JD</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">john_dev</span>
+                                <span class="message-timestamp">Today at 10:30 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Hey team! Just pushed the new authentication system. Check out the PR when you get a chance.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #ec4899;">SK</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">sarah_k</span>
+                                <span class="message-timestamp">Today at 10:32 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Looking at it now! The implementation looks solid. One question about the token refresh logic:
+                            </div>
+                            <div class="code-block">const refreshToken = async () => {
+  const newToken = await api.refresh();
+  setAuthToken(newToken);
+};</div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #10b981;">MR</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">mike_r</span>
+                                <span class="message-timestamp">Today at 10:35 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Great work! I'll review this afternoon. Also, here's the updated design mockup:
+                            </div>
+                            <div class="image-attachment">[Image: auth-flow-mockup.png]</div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #f59e0b;">AL</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">alex_lead</span>
+                                <span class="message-timestamp">Today at 10:38 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Nice! Don't forget to add tests for the edge cases we discussed yesterday.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #7c3aed;">JD</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">john_dev</span>
+                                <span class="message-timestamp">Today at 10:40 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Already on it! Test coverage is at 92% for the auth module 🎯
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="message-input-container">
+                    <textarea class="message-input" rows="1" placeholder="Message #general"></textarea>
+                </div>
+            </div>
+
+            <!-- Member List -->
+            <div class="member-list">
+                <div class="member-section">
+                    <div class="member-section-header">ONLINE — 4</div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #7c3aed;">
+                            JD
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">john_dev</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #ec4899;">
+                            SK
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">sarah_k</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #10b981;">
+                            MR
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">mike_r</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #f59e0b;">
+                            AL
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">alex_lead</div>
+                    </div>
+                </div>
+                <div class="member-section">
+                    <div class="member-section-header">OFFLINE — 2</div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #06b6d4;">
+                            EM
+                            <div class="member-status offline"></div>
+                        </div>
+                        <div class="member-name">emma_m</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #8b5cf6;">
+                            TC
+                            <div class="member-status offline"></div>
+                        </div>
+                        <div class="member-name">tom_c</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Direction 2: Glacier -->
+    <div class="tab-content" data-content="2">
+        <div class="direction-description">
+            <h2>Direction 2: Glacier</h2>
+            <p>
+                <strong>Personality:</strong> Cool and inviting with prominent ice blue accents. This direction uses a slightly lighter dark theme
+                with a blue undertone. Selected channels, active states, and the guild selection indicator all feature visible ice blue, creating
+                a more engaging and warmer feeling despite the "ice" theme. Borders are subtle but present, providing clearer visual separation.
+                Active voice channels have a gentle ice blue glow. Best for users who want clear visual hierarchy and a distinctive brand presence.
+            </p>
+        </div>
+        <div class="app-layout direction-2">
+            <!-- Guild Rail -->
+            <div class="guild-rail">
+                <div class="guild-icon active" style="background: linear-gradient(135deg, #0ea5e9, #06b6d4);">DC</div>
+                <div class="guild-separator"></div>
+                <div class="guild-icon" style="background: #7c3aed;">FD</div>
+                <div class="guild-icon" style="background: #ec4899;">GS</div>
+                <div class="guild-icon" style="background: #10b981;">TM</div>
+                <div class="guild-icon" style="background: #f59e0b;">PR</div>
+            </div>
+
+            <!-- Channel List -->
+            <div class="channel-list">
+                <div class="server-header">
+                    Discool HQ ▾
+                </div>
+                <div class="channels-scroll">
+                    <div class="channel-category">
+                        <div class="category-header">
+                            ▼ GENERAL
+                        </div>
+                        <div class="channel-item active">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">general</span>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">announcements</span>
+                            <div class="unread-indicator"></div>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">🔊</span>
+                            <span class="channel-name">General Voice</span>
+                            <div class="voice-users">
+                                <div class="voice-avatar" style="background: #7c3aed;">JD</div>
+                                <div class="voice-avatar" style="background: #ec4899;">SK</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="channel-category">
+                        <div class="category-header">
+                            ▼ DEVELOPMENT
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">frontend</span>
+                            <div class="unread-indicator"></div>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">backend</span>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">design</span>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">🔊</span>
+                            <span class="channel-name">Dev Sync</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="voice-bar">
+                    <div class="voice-info">
+                        <div class="voice-channel-name">
+                            🔊 General Voice
+                        </div>
+                        <div class="voice-status">Voice Connected</div>
+                    </div>
+                    <div class="voice-controls">
+                        <button class="voice-button" title="Mute">🎤</button>
+                        <button class="voice-button" title="Deafen">🎧</button>
+                        <button class="voice-button disconnect" title="Disconnect">✕</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Message Area -->
+            <div class="message-area">
+                <div class="channel-header">
+                    <span class="channel-hash">#</span>
+                    <span class="channel-title">general</span>
+                </div>
+                <div class="messages-scroll">
+                    <div class="message">
+                        <div class="message-avatar" style="background: #7c3aed;">JD</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">john_dev</span>
+                                <span class="message-timestamp">Today at 10:30 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Hey team! Just pushed the new authentication system. Check out the PR when you get a chance.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #ec4899;">SK</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">sarah_k</span>
+                                <span class="message-timestamp">Today at 10:32 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Looking at it now! The implementation looks solid. One question about the token refresh logic:
+                            </div>
+                            <div class="code-block">const refreshToken = async () => {
+  const newToken = await api.refresh();
+  setAuthToken(newToken);
+};</div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #10b981;">MR</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">mike_r</span>
+                                <span class="message-timestamp">Today at 10:35 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Great work! I'll review this afternoon. Also, here's the updated design mockup:
+                            </div>
+                            <div class="image-attachment">[Image: auth-flow-mockup.png]</div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #f59e0b;">AL</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">alex_lead</span>
+                                <span class="message-timestamp">Today at 10:38 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Nice! Don't forget to add tests for the edge cases we discussed yesterday.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #7c3aed;">JD</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">john_dev</span>
+                                <span class="message-timestamp">Today at 10:40 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Already on it! Test coverage is at 92% for the auth module 🎯
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="message-input-container">
+                    <textarea class="message-input" rows="1" placeholder="Message #general"></textarea>
+                </div>
+            </div>
+
+            <!-- Member List -->
+            <div class="member-list">
+                <div class="member-section">
+                    <div class="member-section-header">ONLINE — 4</div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #7c3aed;">
+                            JD
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">john_dev</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #ec4899;">
+                            SK
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">sarah_k</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #10b981;">
+                            MR
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">mike_r</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #f59e0b;">
+                            AL
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">alex_lead</div>
+                    </div>
+                </div>
+                <div class="member-section">
+                    <div class="member-section-header">OFFLINE — 2</div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #06b6d4;">
+                            EM
+                            <div class="member-status offline"></div>
+                        </div>
+                        <div class="member-name">emma_m</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #8b5cf6;">
+                            TC
+                            <div class="member-status offline"></div>
+                        </div>
+                        <div class="member-name">tom_c</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Direction 3: Ember Glow -->
+    <div class="tab-content" data-content="3">
+        <div class="direction-description">
+            <h2>Direction 3: Ember Glow</h2>
+            <p>
+                <strong>Personality:</strong> Bold, energetic, and warm. This direction inverts the fire/ice relationship by using fire orange
+                as the primary accent for interactive elements, links, and hover states. Ice blue is reserved for informational and passive states
+                like online status and unread indicators. The standard dark zinc background provides a neutral canvas that makes the orange accents
+                pop with energy. Best for users who want a more vibrant, action-oriented interface that feels warm and inviting.
+            </p>
+        </div>
+        <div class="app-layout direction-3">
+            <!-- Guild Rail -->
+            <div class="guild-rail">
+                <div class="guild-icon active" style="background: linear-gradient(135deg, #f97316, #fb923c);">DC</div>
+                <div class="guild-separator"></div>
+                <div class="guild-icon" style="background: #7c3aed;">FD</div>
+                <div class="guild-icon" style="background: #ec4899;">GS</div>
+                <div class="guild-icon" style="background: #10b981;">TM</div>
+                <div class="guild-icon" style="background: #f59e0b;">PR</div>
+            </div>
+
+            <!-- Channel List -->
+            <div class="channel-list">
+                <div class="server-header">
+                    Discool HQ ▾
+                </div>
+                <div class="channels-scroll">
+                    <div class="channel-category">
+                        <div class="category-header">
+                            ▼ GENERAL
+                        </div>
+                        <div class="channel-item active">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">general</span>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">announcements</span>
+                            <div class="unread-indicator"></div>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">🔊</span>
+                            <span class="channel-name">General Voice</span>
+                            <div class="voice-users">
+                                <div class="voice-avatar" style="background: #7c3aed;">JD</div>
+                                <div class="voice-avatar" style="background: #ec4899;">SK</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="channel-category">
+                        <div class="category-header">
+                            ▼ DEVELOPMENT
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">frontend</span>
+                            <div class="unread-indicator"></div>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">backend</span>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">design</span>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">🔊</span>
+                            <span class="channel-name">Dev Sync</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="voice-bar">
+                    <div class="voice-info">
+                        <div class="voice-channel-name">
+                            🔊 General Voice
+                        </div>
+                        <div class="voice-status">Voice Connected</div>
+                    </div>
+                    <div class="voice-controls">
+                        <button class="voice-button" title="Mute">🎤</button>
+                        <button class="voice-button" title="Deafen">🎧</button>
+                        <button class="voice-button disconnect" title="Disconnect">✕</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Message Area -->
+            <div class="message-area">
+                <div class="channel-header">
+                    <span class="channel-hash">#</span>
+                    <span class="channel-title">general</span>
+                </div>
+                <div class="messages-scroll">
+                    <div class="message">
+                        <div class="message-avatar" style="background: #7c3aed;">JD</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">john_dev</span>
+                                <span class="message-timestamp">Today at 10:30 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Hey team! Just pushed the new authentication system. Check out the PR when you get a chance.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #ec4899;">SK</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">sarah_k</span>
+                                <span class="message-timestamp">Today at 10:32 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Looking at it now! The implementation looks solid. One question about the token refresh logic:
+                            </div>
+                            <div class="code-block">const refreshToken = async () => {
+  const newToken = await api.refresh();
+  setAuthToken(newToken);
+};</div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #10b981;">MR</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">mike_r</span>
+                                <span class="message-timestamp">Today at 10:35 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Great work! I'll review this afternoon. Also, here's the updated design mockup:
+                            </div>
+                            <div class="image-attachment">[Image: auth-flow-mockup.png]</div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #f59e0b;">AL</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">alex_lead</span>
+                                <span class="message-timestamp">Today at 10:38 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Nice! Don't forget to add tests for the edge cases we discussed yesterday.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #7c3aed;">JD</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">john_dev</span>
+                                <span class="message-timestamp">Today at 10:40 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Already on it! Test coverage is at 92% for the auth module 🎯
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="message-input-container">
+                    <textarea class="message-input" rows="1" placeholder="Message #general"></textarea>
+                </div>
+            </div>
+
+            <!-- Member List -->
+            <div class="member-list">
+                <div class="member-section">
+                    <div class="member-section-header">ONLINE — 4</div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #7c3aed;">
+                            JD
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">john_dev</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #ec4899;">
+                            SK
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">sarah_k</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #10b981;">
+                            MR
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">mike_r</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #f59e0b;">
+                            AL
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">alex_lead</div>
+                    </div>
+                </div>
+                <div class="member-section">
+                    <div class="member-section-header">OFFLINE — 2</div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #06b6d4;">
+                            EM
+                            <div class="member-status offline"></div>
+                        </div>
+                        <div class="member-name">emma_m</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #8b5cf6;">
+                            TC
+                            <div class="member-status offline"></div>
+                        </div>
+                        <div class="member-name">tom_c</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Direction 4: Dual Core -->
+    <div class="tab-content" data-content="4">
+        <div class="direction-description">
+            <h2>Direction 4: Dual Core</h2>
+            <p>
+                <strong>Personality:</strong> Balanced and distinctive. This direction prominently uses both fire and ice — ice blue for navigation
+                and selection states, fire orange for action buttons and CTAs. Creates intentional visual tension between cool navigation areas and
+                warm action elements. The sidebar leans ice, the message area stays neutral, and interactive elements lean fire. This is the most
+                visually distinctive direction, clearly expressing the "Fire & Ice" brand duality. Best for users who want a bold, memorable interface
+                that fully embraces both brand colors.
+            </p>
+        </div>
+        <div class="app-layout direction-4">
+            <!-- Guild Rail -->
+            <div class="guild-rail">
+                <div class="guild-icon active" style="background: linear-gradient(135deg, #0ea5e9, #06b6d4);">DC</div>
+                <div class="guild-separator"></div>
+                <div class="guild-icon" style="background: #7c3aed;">FD</div>
+                <div class="guild-icon" style="background: #ec4899;">GS</div>
+                <div class="guild-icon" style="background: #10b981;">TM</div>
+                <div class="guild-icon" style="background: #f59e0b;">PR</div>
+            </div>
+
+            <!-- Channel List -->
+            <div class="channel-list">
+                <div class="server-header">
+                    Discool HQ ▾
+                </div>
+                <div class="channels-scroll">
+                    <div class="channel-category">
+                        <div class="category-header">
+                            ▼ GENERAL
+                        </div>
+                        <div class="channel-item active">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">general</span>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">announcements</span>
+                            <div class="unread-indicator"></div>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">🔊</span>
+                            <span class="channel-name">General Voice</span>
+                            <div class="voice-users">
+                                <div class="voice-avatar" style="background: #7c3aed;">JD</div>
+                                <div class="voice-avatar" style="background: #ec4899;">SK</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="channel-category">
+                        <div class="category-header">
+                            ▼ DEVELOPMENT
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">frontend</span>
+                            <div class="unread-indicator"></div>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">backend</span>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">#</span>
+                            <span class="channel-name">design</span>
+                        </div>
+                        <div class="channel-item">
+                            <span class="channel-icon">🔊</span>
+                            <span class="channel-name">Dev Sync</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="voice-bar">
+                    <div class="voice-info">
+                        <div class="voice-channel-name">
+                            🔊 General Voice
+                        </div>
+                        <div class="voice-status">Voice Connected</div>
+                    </div>
+                    <div class="voice-controls">
+                        <button class="voice-button" title="Mute">🎤</button>
+                        <button class="voice-button" title="Deafen">🎧</button>
+                        <button class="voice-button disconnect" title="Disconnect">✕</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Message Area -->
+            <div class="message-area">
+                <div class="channel-header">
+                    <span class="channel-hash">#</span>
+                    <span class="channel-title">general</span>
+                </div>
+                <div class="messages-scroll">
+                    <div class="message">
+                        <div class="message-avatar" style="background: #7c3aed;">JD</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">john_dev</span>
+                                <span class="message-timestamp">Today at 10:30 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Hey team! Just pushed the new authentication system. Check out the PR when you get a chance.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #ec4899;">SK</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">sarah_k</span>
+                                <span class="message-timestamp">Today at 10:32 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Looking at it now! The implementation looks solid. One question about the token refresh logic:
+                            </div>
+                            <div class="code-block">const refreshToken = async () => {
+  const newToken = await api.refresh();
+  setAuthToken(newToken);
+};</div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #10b981;">MR</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">mike_r</span>
+                                <span class="message-timestamp">Today at 10:35 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Great work! I'll review this afternoon. Also, here's the updated design mockup:
+                            </div>
+                            <div class="image-attachment">[Image: auth-flow-mockup.png]</div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #f59e0b;">AL</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">alex_lead</span>
+                                <span class="message-timestamp">Today at 10:38 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Nice! Don't forget to add tests for the edge cases we discussed yesterday.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="message">
+                        <div class="message-avatar" style="background: #7c3aed;">JD</div>
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="message-author">john_dev</span>
+                                <span class="message-timestamp">Today at 10:40 AM</span>
+                            </div>
+                            <div class="message-text">
+                                Already on it! Test coverage is at 92% for the auth module 🎯
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="message-input-container">
+                    <textarea class="message-input" rows="1" placeholder="Message #general"></textarea>
+                </div>
+            </div>
+
+            <!-- Member List -->
+            <div class="member-list">
+                <div class="member-section">
+                    <div class="member-section-header">ONLINE — 4</div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #7c3aed;">
+                            JD
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">john_dev</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #ec4899;">
+                            SK
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">sarah_k</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #10b981;">
+                            MR
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">mike_r</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #f59e0b;">
+                            AL
+                            <div class="member-status online"></div>
+                        </div>
+                        <div class="member-name">alex_lead</div>
+                    </div>
+                </div>
+                <div class="member-section">
+                    <div class="member-section-header">OFFLINE — 2</div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #06b6d4;">
+                            EM
+                            <div class="member-status offline"></div>
+                        </div>
+                        <div class="member-name">emma_m</div>
+                    </div>
+                    <div class="member-item">
+                        <div class="member-avatar" style="background: #8b5cf6;">
+                            TC
+                            <div class="member-status offline"></div>
+                        </div>
+                        <div class="member-name">tom_c</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Tab switching functionality
+        const tabButtons = document.querySelectorAll('.tab-button');
+        const tabContents = document.querySelectorAll('.tab-content');
+
+        tabButtons.forEach(button => {
+            button.addEventListener('click', () => {
+                const tabId = button.getAttribute('data-tab');
+
+                // Remove active class from all buttons and contents
+                tabButtons.forEach(btn => btn.classList.remove('active'));
+                tabContents.forEach(content => content.classList.remove('active'));
+
+                // Add active class to clicked button and corresponding content
+                button.classList.add('active');
+                document.querySelector(`.tab-content[data-content="${tabId}"]`).classList.add('active');
+            });
+        });
+
+        // Smooth hover effects
+        document.querySelectorAll('.channel-item, .member-item, .message, .guild-icon').forEach(item => {
+            item.addEventListener('mouseenter', function() {
+                this.style.transform = 'translateX(2px)';
+            });
+            item.addEventListener('mouseleave', function() {
+                this.style.transform = 'translateX(0)';
+            });
+        });
+    </script>
+</body>
+</html>

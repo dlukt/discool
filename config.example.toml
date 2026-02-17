@@ -1,0 +1,7 @@
+# Discool example configuration
+#
+# Story 1.2 will introduce a real configuration system. This file exists as a
+# placeholder to establish the intended location and format.
+
+[server]
+bind_addr = "0.0.0.0:3000"
