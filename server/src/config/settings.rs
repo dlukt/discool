@@ -8,9 +8,15 @@ pub struct Config {
     pub log: LogConfig,
     #[serde(default)]
     pub database: Option<DatabaseConfig>,
+    #[serde(default)]
+    pub metrics: Option<MetricsConfig>,
 }
 
 impl Config {
+    pub fn metrics_enabled(&self) -> bool {
+        self.metrics.as_ref().is_some_and(|m| m.enabled)
+    }
+
     pub fn validate(&self) -> Result<(), ConfigValidationError> {
         if self.server.host.trim().is_empty() {
             return Err(ConfigValidationError::new(
@@ -81,6 +87,12 @@ impl Config {
             "Configuration loaded"
         );
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MetricsConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -256,6 +268,11 @@ mod tests {
         assert_eq!(cfg.log.level, "info");
         assert_eq!(cfg.log.format, LogFormat::Json);
         assert!(cfg.database.is_none());
+    }
+
+    #[test]
+    fn metrics_config_defaults_disabled() {
+        assert!(!MetricsConfig::default().enabled);
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub mod static_files;
 pub use error::AppError;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use sqlx::AnyPool;
 
@@ -16,4 +17,5 @@ use crate::config::Config;
 pub struct AppState {
     pub config: Arc<Config>,
     pub pool: AnyPool,
+    pub start_time: Instant,
 }

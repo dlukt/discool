@@ -20,6 +20,7 @@
 #   DISCOOL_LOG__LEVEL=debug
 #   DISCOOL_LOG__FORMAT=pretty
 #   DISCOOL_DATABASE__URL=sqlite::memory:
+#   DISCOOL_METRICS__ENABLED=true
 #
 # Note: For log filtering, the standard Rust `RUST_LOG` env var overrides
 # `log.level` (debugging escape hatch).
@@ -52,3 +53,9 @@
 #
 # Connection pool max connections (default: 5)
 # max_connections = 5
+
+# ---------------------------------------------------------------------------
+# [metrics]
+# ---------------------------------------------------------------------------
+# Expose Prometheus metrics at GET /metrics (default: false)
+# enabled = false

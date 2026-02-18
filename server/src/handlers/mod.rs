@@ -9,8 +9,11 @@ use axum::{
     response::Response,
     routing::get,
 };
+use axum_prometheus::PrometheusMetricLayer;
 
 use crate::AppState;
+
+mod health;
 
 // Keep `connect-src` strict until we have a safe, non-Host-header-derived allow-list for WebSockets.
 const DEFAULT_CSP: &str = "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data:; script-src 'self'; style-src 'self'; connect-src 'self';";
@@ -20,11 +23,45 @@ pub fn router(state: AppState) -> Router {
         .route("/ping", get(ping))
         .fallback(get(api_not_found));
 
-    Router::new()
+    let mut tracked = Router::new()
         .nest("/api/v1", api)
-        .route("/healthz", get(healthz))
         .route("/ws", get(ws_not_found))
-        .fallback(get(crate::static_files::handler))
+        .fallback(get(crate::static_files::handler));
+
+    // /metrics should not be tracked (it is scraped frequently like /healthz and /readyz).
+    let mut metrics = Router::new().route("/metrics", get(metrics_not_found));
+
+    if state.config.metrics_enabled() {
+        let start_time = state.start_time;
+        let pool = state.pool.clone();
+        let db_max_connections = state
+            .config
+            .database
+            .as_ref()
+            .map(|db| db.max_connections)
+            .unwrap_or(pool.size());
+
+        let (prometheus_layer, metric_handle) = PrometheusMetricLayer::pair();
+        health::register_custom_metrics();
+
+        tracked = tracked.layer(prometheus_layer);
+        metrics = Router::new().route(
+            "/metrics",
+            get(move || {
+                let pool = pool.clone();
+                async move {
+                    health::update_custom_metrics(&pool, start_time, db_max_connections);
+                    metric_handle.render()
+                }
+            }),
+        );
+    }
+
+    Router::new()
+        .route("/healthz", get(health::healthz))
+        .route("/readyz", get(health::readyz))
+        .merge(metrics)
+        .merge(tracked)
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
 }
@@ -33,8 +70,8 @@ async fn ping() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({ "data": { "status": "ok" } }))
 }
 
-async fn healthz() -> StatusCode {
-    StatusCode::OK
+async fn metrics_not_found() -> StatusCode {
+    StatusCode::NOT_FOUND
 }
 
 async fn security_headers(req: Request<Body>, next: Next) -> Response {

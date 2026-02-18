@@ -51,10 +51,6 @@ async fn main() {
         "Database connected and migrations complete"
     );
 
-    let state = AppState {
-        config: config.clone(),
-        pool: pool.clone(),
-    };
     let listener = match TcpListener::bind((config.server.host.as_str(), config.server.port)).await
     {
         Ok(listener) => listener,
@@ -70,6 +66,11 @@ async fn main() {
         }
     };
 
+    let state = AppState {
+        config: config.clone(),
+        pool: pool.clone(),
+        start_time: std::time::Instant::now(),
+    };
     let app = handlers::router(state.clone());
 
     let addr = if let Ok(ip) = config.server.host.parse::<std::net::IpAddr>() {
