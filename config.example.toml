@@ -1,7 +1,42 @@
-# Discool example configuration
+# Discool example configuration (TOML)
 #
-# Story 1.2 will introduce a real configuration system. This file exists as a
-# placeholder to establish the intended location and format.
-
-[server]
-bind_addr = "0.0.0.0:3000"
+# This file documents ALL supported config keys and their defaults.
+# You can keep it empty (or omit config files entirely) and the server will run
+# with defaults.
+#
+# Config load order (lowest → highest priority):
+#   1) /etc/discool/config.toml
+#   2) ./config.toml
+#   3) $DISCOOL_CONFIG (custom path; highest file priority)
+#   4) Environment variables (highest priority)
+#
+# Environment variable mapping:
+#   - Prefix: DISCOOL_
+#   - Nested separator: __ (double underscore)
+#
+# Examples:
+#   DISCOOL_SERVER__PORT=8080
+#   DISCOOL_SERVER__HOST=127.0.0.1
+#   DISCOOL_LOG__LEVEL=debug
+#   DISCOOL_LOG__FORMAT=pretty
+#
+# Note: For log filtering, the standard Rust `RUST_LOG` env var overrides
+# `log.level` (debugging escape hatch).
+#
+# ---------------------------------------------------------------------------
+# [server]
+# ---------------------------------------------------------------------------
+# Server bind host (default: "0.0.0.0")
+# host = "0.0.0.0"
+#
+# Server bind port (default: 3000)
+# port = 3000
+#
+# ---------------------------------------------------------------------------
+# [log]
+# ---------------------------------------------------------------------------
+# Log filter directive (default: "info")
+# level = "info"
+#
+# Log output format (default: "json")
+# format = "json" # json | pretty

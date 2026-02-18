@@ -1,24 +1,47 @@
-use std::net::SocketAddr;
-
 use discool_server::handlers;
 use tokio::net::TcpListener;
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[tokio::main]
 async fn main() {
-    init_tracing();
-
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-    let listener = match TcpListener::bind(addr).await {
-        Ok(listener) => listener,
+    let config = match discool_server::config::load() {
+        Ok(config) => config,
         Err(err) => {
-            tracing::error!(%err, %addr, "Failed to bind TCP listener");
+            eprintln!("ERROR: Failed to load configuration: {err}");
             std::process::exit(1);
         }
     };
 
-    let app = handlers::router();
+    if let Err(err) = config.validate() {
+        eprintln!("ERROR: Invalid configuration: {err}");
+        std::process::exit(1);
+    }
 
+    init_tracing(&config.log);
+    config.log_summary();
+
+    let config = std::sync::Arc::new(config);
+    let listener = match TcpListener::bind((config.server.host.as_str(), config.server.port)).await
+    {
+        Ok(listener) => listener,
+        Err(err) => {
+            tracing::error!(
+                %err,
+                host = %config.server.host,
+                port = config.server.port,
+                "Failed to bind TCP listener"
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let app = handlers::router(config.clone());
+
+    let addr = if let Ok(ip) = config.server.host.parse::<std::net::IpAddr>() {
+        std::net::SocketAddr::new(ip, config.server.port).to_string()
+    } else {
+        format!("{}:{}", config.server.host, config.server.port)
+    };
     tracing::info!(%addr, "Starting server");
 
     if let Err(err) = axum::serve(listener, app)
@@ -26,12 +49,30 @@ async fn main() {
         .await
     {
         tracing::error!(%err, "Server error");
+        std::process::exit(1);
     }
 }
 
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    fmt().with_env_filter(filter).json().init();
+fn init_tracing(log_config: &discool_server::config::LogConfig) {
+    // RUST_LOG always wins (debugging escape hatch).
+    let filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(&log_config.level))
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    match log_config.format {
+        discool_server::config::LogFormat::Json => {
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(fmt::layer().json().with_target(true))
+                .init();
+        }
+        discool_server::config::LogFormat::Pretty => {
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(fmt::layer().pretty().with_target(true))
+                .init();
+        }
+    }
 }
 
 async fn shutdown_signal() {

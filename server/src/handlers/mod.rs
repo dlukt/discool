@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     Router,
     body::Body,
@@ -10,7 +12,12 @@ use axum::{
     routing::get,
 };
 
-pub fn router() -> Router {
+use crate::config::Config;
+
+// Keep `connect-src` strict until we have a safe, non-Host-header-derived allow-list for WebSockets.
+const DEFAULT_CSP: &str = "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data:; script-src 'self'; style-src 'self'; connect-src 'self';";
+
+pub fn router(config: Arc<Config>) -> Router {
     let api = Router::new()
         .route("/ping", get(ping))
         .fallback(get(api_not_found));
@@ -20,6 +27,7 @@ pub fn router() -> Router {
         .route("/ws", get(ws_not_found))
         .fallback(get(crate::static_files::handler))
         .layer(middleware::from_fn(security_headers))
+        .with_state(config)
 }
 
 async fn ping() -> axum::Json<serde_json::Value> {
@@ -44,9 +52,7 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
     );
     headers.insert(
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static(
-            "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data:; script-src 'self'; style-src 'self'; connect-src 'self' ws: wss:;",
-        ),
+        HeaderValue::from_static(DEFAULT_CSP),
     );
 
     res

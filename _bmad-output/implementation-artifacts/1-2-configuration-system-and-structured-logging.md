@@ -1,6 +1,6 @@
 # Story 1.2: Configuration System and Structured Logging
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -38,68 +38,76 @@ So that I can customize settings for my deployment without modifying code.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add config-rs dependency (AC: #1, #2)
-  - [ ] 1.1 Add `config = { version = "0.15", features = ["toml"] }` to `server/Cargo.toml`
-  - [ ] 1.2 Verify the dependency resolves and compiles
+- [x] Task 1: Add config-rs dependency (AC: #1, #2)
+  - [x] 1.1 Add `config = { version = "0.15", features = ["toml"] }` to `server/Cargo.toml`
+  - [x] 1.2 Verify the dependency resolves and compiles
 
-- [ ] Task 2: Create config module with typed structs (AC: #1, #3)
-  - [ ] 2.1 Create `server/src/config/mod.rs` — module root, re-exports `Config` and `load()`
-  - [ ] 2.2 Create `server/src/config/settings.rs` — typed config structs with `serde::Deserialize`
-  - [ ] 2.3 Define `Config` struct with sections: `server` (ServerConfig), `log` (LogConfig)
-  - [ ] 2.4 Define `ServerConfig` with `host: String` (default `"0.0.0.0"`) and `port: u16` (default `3000`)
-  - [ ] 2.5 Define `LogConfig` with `level: String` (default `"info"`) and `format: LogFormat` enum (`json` | `pretty`, default `json`)
-  - [ ] 2.6 Implement `Default` for all config structs
+- [x] Task 2: Create config module with typed structs (AC: #1, #3)
+  - [x] 2.1 Create `server/src/config/mod.rs` — module root, re-exports `Config` and `load()`
+  - [x] 2.2 Create `server/src/config/settings.rs` — typed config structs with `serde::Deserialize`
+  - [x] 2.3 Define `Config` struct with sections: `server` (ServerConfig), `log` (LogConfig)
+  - [x] 2.4 Define `ServerConfig` with `host: String` (default `"0.0.0.0"`) and `port: u16` (default `3000`)
+  - [x] 2.5 Define `LogConfig` with `level: String` (default `"info"`) and `format: LogFormat` enum (`json` | `pretty`, default `json`)
+  - [x] 2.6 Implement `Default` for all config structs
 
-- [ ] Task 3: Implement config loading with file discovery + env overrides (AC: #1, #2)
-  - [ ] 3.1 Implement `config::load()` function using config-rs `Config::builder()`
-  - [ ] 3.2 Add config file sources: `./config.toml` (required: false), `/etc/discool/config.toml` (required: false)
-  - [ ] 3.3 Support `DISCOOL_CONFIG` env var to specify a custom config file path (loaded last among files, highest file priority)
-  - [ ] 3.4 Add environment variable source with prefix `DISCOOL` and `__` nested separator
-  - [ ] 3.5 Call `.try_deserialize::<Config>()` to produce typed config
+- [x] Task 3: Implement config loading with file discovery + env overrides (AC: #1, #2)
+  - [x] 3.1 Implement `config::load()` function using config-rs `Config::builder()`
+  - [x] 3.2 Add config file sources: `./config.toml` (required: false), `/etc/discool/config.toml` (required: false)
+  - [x] 3.3 Support `DISCOOL_CONFIG` env var to specify a custom config file path (loaded last among files, highest file priority)
+  - [x] 3.4 Add environment variable source with prefix `DISCOOL` and `__` nested separator
+  - [x] 3.5 Call `.try_deserialize::<Config>()` to produce typed config
 
-- [ ] Task 4: Implement config validation (AC: #3)
-  - [ ] 4.1 Add a `Config::validate()` method that checks semantic constraints (port range, valid log level, etc.)
-  - [ ] 4.2 On config load failure or validation failure in `main()`, print a clear error to stderr naming the missing/invalid field and exit with code 1
-  - [ ] 4.3 Do NOT use tracing for config errors (tracing isn't initialized yet at that point) — use `eprintln!`
+- [x] Task 4: Implement config validation (AC: #3)
+  - [x] 4.1 Add a `Config::validate()` method that checks semantic constraints (port range, valid log level, etc.)
+  - [x] 4.2 On config load failure or validation failure in `main()`, print a clear error to stderr naming the missing/invalid field and exit with code 1
+  - [x] 4.3 Do NOT use tracing for config errors (tracing isn't initialized yet at that point) — use `eprintln!`
 
-- [ ] Task 5: Wire config into main.rs (AC: #1, #4, #6)
-  - [ ] 5.1 Update `main.rs` to call `config::load()` before anything else
-  - [ ] 5.2 Pass loaded config to `init_tracing()` to set log level and format from config
-  - [ ] 5.3 Use `config.server.host` and `config.server.port` for `TcpListener::bind()` instead of hardcoded `0.0.0.0:3000`
-  - [ ] 5.4 Log the config summary after tracing is initialized (AC #6)
-  - [ ] 5.5 Pass config as `Arc<Config>` shared state to the Axum router via `.with_state()`
+- [x] Task 5: Wire config into main.rs (AC: #1, #4, #6)
+  - [x] 5.1 Update `main.rs` to call `config::load()` before anything else
+  - [x] 5.2 Pass loaded config to `init_tracing()` to set log level and format from config
+  - [x] 5.3 Use `config.server.host` and `config.server.port` for `TcpListener::bind()` instead of hardcoded `0.0.0.0:3000`
+  - [x] 5.4 Log the config summary after tracing is initialized (AC #6)
+  - [x] 5.5 Pass config as `Arc<Config>` shared state to the Axum router via `.with_state()`
 
-- [ ] Task 6: Update tracing initialization (AC: #4, #5)
-  - [ ] 6.1 Refactor `init_tracing()` to accept `&LogConfig` and configure level from `config.log.level`
-  - [ ] 6.2 Support `RUST_LOG` env var as highest-priority override for log level (existing behavior preserved)
-  - [ ] 6.3 Switch between JSON and pretty log format based on `config.log.format`
-  - [ ] 6.4 Ensure JSON logs include: timestamp, level, module path (target), message, and structured fields
+- [x] Task 6: Update tracing initialization (AC: #4, #5)
+  - [x] 6.1 Refactor `init_tracing()` to accept `&LogConfig` and configure level from `config.log.level`
+  - [x] 6.2 Support `RUST_LOG` env var as highest-priority override for log level (existing behavior preserved)
+  - [x] 6.3 Switch between JSON and pretty log format based on `config.log.format`
+  - [x] 6.4 Ensure JSON logs include: timestamp, level, module path (target), message, and structured fields
 
-- [ ] Task 7: Implement config summary logging with secret redaction (AC: #6)
-  - [ ] 7.1 Implement a `Config::log_summary()` method that logs each config section at `info` level
-  - [ ] 7.2 Redact any fields that contain secrets (database URLs, API keys) — replace with `"[REDACTED]"`
-  - [ ] 7.3 For this story, the only potentially sensitive field is the future `database.url` — establish the redaction pattern now
+- [x] Task 7: Implement config summary logging with secret redaction (AC: #6)
+  - [x] 7.1 Implement a `Config::log_summary()` method that logs each config section at `info` level
+  - [x] 7.2 Add `redact_secret()` helper for future sensitive fields (e.g., `database.url`)
+  - [x] 7.3 For this story, the only potentially sensitive field is the future `database.url` — establish the redaction pattern now
 
-- [ ] Task 8: Update config.example.toml (AC: #1)
-  - [ ] 8.1 Replace the placeholder `config.example.toml` with a fully documented example
-  - [ ] 8.2 Include all config sections with their defaults, commented out, with explanatory comments
+- [x] Task 8: Update config.example.toml (AC: #1)
+  - [x] 8.1 Replace the placeholder `config.example.toml` with a fully documented example
+  - [x] 8.2 Include all config sections with their defaults, commented out, with explanatory comments
 
-- [ ] Task 9: Update lib.rs and router for shared state (AC: #1)
-  - [ ] 9.1 Add `pub mod config;` to `server/src/lib.rs`
-  - [ ] 9.2 Update `handlers::router()` to accept and propagate `Arc<Config>` as Axum state (or make router generic over state for now)
+- [x] Task 9: Update lib.rs and router for shared state (AC: #1)
+  - [x] 9.1 Add `pub mod config;` to `server/src/lib.rs`
+  - [x] 9.2 Update `handlers::router()` to accept and propagate `Arc<Config>` as Axum state (or make router generic over state for now)
 
-- [ ] Task 10: Tests (AC: #1, #2, #3, #4)
-  - [ ] 10.1 Unit test: config loads from a TOML string with all defaults
-  - [ ] 10.2 Unit test: config validation rejects invalid port (0, or empty required fields when defined)
-  - [ ] 10.3 Unit test: LogFormat deserialization from string ("json", "pretty")
-  - [ ] 10.4 Unit test: config summary redacts sensitive fields
-  - [ ] 10.5 Integration test: server starts with a minimal config.toml and binds to the configured port
+- [x] Task 10: Tests (AC: #1, #2, #3, #4)
+  - [x] 10.1 Unit test: config loads from a TOML string with all defaults
+  - [x] 10.2 Unit test: config validation rejects invalid port (0, or empty required fields when defined)
+  - [x] 10.3 Unit test: LogFormat deserialization from string ("json", "pretty")
+  - [x] 10.4 Unit test: redaction helper hides sensitive fields (wired into config summary when sensitive fields exist)
+  - [x] 10.5 Integration test: server starts with a minimal config.toml and binds to the configured port
 
-- [ ] Task 11: Code quality (AC: all)
-  - [ ] 11.1 Run `cargo fmt` and fix any formatting issues
-  - [ ] 11.2 Run `cargo clippy -- -D warnings` and resolve all warnings
-  - [ ] 11.3 Run `cargo test` and verify all tests pass
-  - [ ] 11.4 Verify `cargo build --release` succeeds
+- [x] Task 11: Code quality (AC: all)
+  - [x] 11.1 Run `cargo fmt` and fix any formatting issues
+  - [x] 11.2 Run `cargo clippy -- -D warnings` and resolve all warnings
+  - [x] 11.3 Run `cargo test` and verify all tests pass
+  - [x] 11.4 Verify `cargo build --release` succeeds
+
+### Review Follow-ups (AI)
+
+- [x] [AI-Review][HIGH] Tighten CSP `connect-src`: allowing `ws:`/`wss:` permits WebSocket connections to any origin, weakening CSP's defense-in-depth. [server/src/handlers/mod.rs:18]
+- [x] [AI-Review][MEDIUM] Exit non-zero on `axum::serve(...)` error (currently logs and returns `0`). [server/src/main.rs:47-52]
+- [x] [AI-Review][MEDIUM] Integration tests can leak the spawned server process on panic/timeout; ensure `kill()`/`wait()` cleanup always runs (guard/Drop). [server/tests/server_binds_to_configured_port.rs]
+- [x] [AI-Review][LOW] Add coverage for `DISCOOL_CONFIG` (custom config file path) + precedence with env vars/files. [server/tests/server_binds_to_configured_port.rs]
+- [ ] [AI-Review][LOW] Wire `redact_secret()` into `Config::log_summary()` once any sensitive fields exist (or remove until needed). [server/src/config/settings.rs:34-45,123-125]
 
 ## Dev Notes
 
@@ -415,10 +423,61 @@ These files from Story 1.1 must be updated:
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+GitHub Copilot CLI 0.0.411
 
 ### Debug Log References
 
+N/A
+
 ### Completion Notes List
 
+1. Added `config` crate v0.15 and implemented typed TOML + env config loading via `server/src/config/` (`Config`, `ServerConfig`, `LogConfig`, `LogFormat`).
+2. Added startup config validation with clear `eprintln!` errors (pre-tracing) and a config summary log after tracing init.
+3. Refactored tracing initialization to use config-driven level/format (json|pretty) with `RUST_LOG` as the highest-priority override.
+4. Bound the server listener to configured `server.host`/`server.port` and wired `Arc<Config>` as Axum state for future handlers.
+5. Added unit + integration tests and validated `cargo fmt`, `cargo clippy -- -D warnings`, `cargo test`, and `cargo build --release`.
+6. Senior dev review: improved config-load error messaging for missing required fields and hardened integration tests (env override coverage, less flaky bind wait, better failure output).
+
 ### File List
+
+- config.example.toml
+- server/Cargo.toml
+- server/Cargo.lock
+- server/src/config/mod.rs
+- server/src/config/settings.rs
+- server/src/lib.rs
+- server/src/main.rs
+- server/src/handlers/mod.rs
+- server/tests/server_binds_to_configured_port.rs
+- _bmad-output/implementation-artifacts/sprint-status.yaml
+- _bmad-output/implementation-artifacts/1-2-configuration-system-and-structured-logging.md
+
+### Change Log
+
+- 2026-02-17: Completed Story 1.2 configuration + structured logging foundation (TOML + env overrides), added tests, and passed all quality gates.
+- 2026-02-18: Senior dev review fixes applied (simplified config-load error output; integration test improvements + env override coverage; CSP hardening to avoid Host header reflection).
+- 2026-02-18: Adversarial code review follow-ups added; status set to in-progress pending fixes.
+- 2026-02-18: Fixed adversarial code review issues (CSP tightened; non-zero exit on serve error; hardened integration test cleanup; DISCOOL_CONFIG precedence tests); status set back to done.
+- 2026-02-18: Small cleanup: make router state injection explicit and consolidate startup config summary into a single structured log event.
+
+## Senior Developer Review (AI)
+
+Reviewer: Darko
+Date: 2026-02-18
+
+### Fixes Applied
+
+- Simplified startup config-load error output (avoid brittle string matching) (`server/src/main.rs`).
+- Removed Host-header-derived CSP to avoid Host header injection; use static CSP (no request-derived host) (`server/src/handlers/mod.rs`).
+- Tightened CSP `connect-src` to `'self'` only (no broad `ws:`/`wss:`) (`server/src/handlers/mod.rs`).
+- Exit non-zero on `axum::serve(...)` error (`server/src/main.rs`).
+- Added integration test coverage proving `DISCOOL_*` env vars override TOML (`server/tests/server_binds_to_configured_port.rs`).
+- Added integration tests for `DISCOOL_CONFIG` precedence (config.toml < DISCOOL_CONFIG < DISCOOL_SERVER__PORT) (`server/tests/server_binds_to_configured_port.rs`).
+- Increased bind-wait timeout and stopped discarding server output on failures to reduce CI flakiness/debug time (`server/tests/server_binds_to_configured_port.rs`).
+- Ensure integration test cleanup (server kill + temp dir removal) runs even on panic/timeouts (`server/tests/server_binds_to_configured_port.rs`).
+- Make `handlers::router(...)` take `Arc<Config>` and attach state in one place (avoid placeholder state / double `.with_state(...)`) (`server/src/handlers/mod.rs`, `server/src/main.rs`).
+- Log the startup configuration summary as a single structured `tracing::info!` event (`server/src/config/settings.rs`).
+
+### Remaining Low-Priority Note
+
+- `redact_secret()` is present but not wired into `Config::log_summary()` yet; address when adding sensitive config fields (e.g., `database.url`) in Story 1.3.
