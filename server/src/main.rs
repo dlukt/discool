@@ -1,4 +1,4 @@
-use discool_server::handlers;
+use discool_server::{AppState, handlers};
 use tokio::net::TcpListener;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -21,6 +21,40 @@ async fn main() {
     config.log_summary();
 
     let config = std::sync::Arc::new(config);
+
+    let Some(db_config) = config.database.as_ref() else {
+        tracing::error!("Config validation bug: database section missing after validate()");
+        std::process::exit(1);
+    };
+    let pool = match discool_server::db::init_pool(db_config).await {
+        Ok(pool) => pool,
+        Err(err) => {
+            let err_msg = redact_db_url_in_error(&err, &db_config.url);
+            tracing::error!(error = %err_msg, "Failed to connect to database");
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(err) = discool_server::db::run_migrations(&pool).await {
+        let err_msg = redact_db_url_in_message(&err.to_string(), &db_config.url);
+        tracing::error!(error = %err_msg, "Failed to run database migrations");
+        std::process::exit(1);
+    }
+
+    let backend = discool_server::db::DatabaseBackend::from_url(&db_config.url)
+        .map(|b| format!("{b:?}"))
+        .unwrap_or_else(|e| e);
+    tracing::info!(
+        backend = %backend,
+        pool_size = pool.size(),
+        pool_idle = pool.num_idle(),
+        "Database connected and migrations complete"
+    );
+
+    let state = AppState {
+        config: config.clone(),
+        pool: pool.clone(),
+    };
     let listener = match TcpListener::bind((config.server.host.as_str(), config.server.port)).await
     {
         Ok(listener) => listener,
@@ -31,11 +65,12 @@ async fn main() {
                 port = config.server.port,
                 "Failed to bind TCP listener"
             );
+            pool.close().await;
             std::process::exit(1);
         }
     };
 
-    let app = handlers::router(config.clone());
+    let app = handlers::router(state.clone());
 
     let addr = if let Ok(ip) = config.server.host.parse::<std::net::IpAddr>() {
         std::net::SocketAddr::new(ip, config.server.port).to_string()
@@ -49,7 +84,23 @@ async fn main() {
         .await
     {
         tracing::error!(%err, "Server error");
+        pool.close().await;
         std::process::exit(1);
+    }
+
+    pool.close().await;
+    tracing::info!("Database pool closed");
+}
+
+fn redact_db_url_in_error(err: &sqlx::Error, db_url: &str) -> String {
+    redact_db_url_in_message(&err.to_string(), db_url)
+}
+
+fn redact_db_url_in_message(msg: &str, db_url: &str) -> String {
+    if msg.contains(db_url) {
+        msg.replace(db_url, "[REDACTED_DATABASE_URL]")
+    } else {
+        msg.to_string()
     }
 }
 

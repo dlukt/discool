@@ -44,7 +44,7 @@ development_status:
   epic-1: in-progress
   1-1-initialize-project-scaffold-and-serve-spa: done
   1-2-configuration-system-and-structured-logging: done
-  1-3-database-connection-and-migration-system: backlog
+  1-3-database-connection-and-migration-system: done
   1-4-health-check-and-metrics-endpoints: backlog
   1-5-first-run-admin-setup-screen: backlog
   1-6-instance-health-dashboard: backlog

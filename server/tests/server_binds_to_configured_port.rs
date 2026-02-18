@@ -6,7 +6,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use tokio::{net::TcpStream, time::sleep};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    time::sleep,
+};
 
 fn server_exe() -> &'static str {
     option_env!("CARGO_BIN_EXE_discool-server")
@@ -83,11 +87,29 @@ async fn wait_for_bind(child: &mut Child, addr: &str) {
     }
 }
 
+async fn http_status(addr: &str, path: &str) -> u16 {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    let res = String::from_utf8_lossy(&buf);
+
+    let status_line = res.lines().next().unwrap_or("");
+    status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0)
+}
+
 fn write_server_config(path: &Path, host: &str, port: u16) {
     fs::write(
         path,
         format!(
-            "[server]\nhost = \"{host}\"\nport = {port}\n\n[log]\nlevel = \"warn\"\nformat = \"json\"\n"
+            "[server]\nhost = \"{host}\"\nport = {port}\n\n[log]\nlevel = \"warn\"\nformat = \"json\"\n\n[database]\nurl = \"sqlite::memory:\"\nmax_connections = 1\n"
         ),
     )
     .unwrap();
@@ -104,6 +126,21 @@ async fn server_binds_to_port_from_config_toml() {
 
     let addr = format!("127.0.0.1:{port}");
     wait_for_bind(&mut server.child, &addr).await;
+}
+
+#[tokio::test]
+async fn healthz_returns_200() {
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port);
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_bind(&mut server.child, &addr).await;
+
+    assert_eq!(http_status(&addr, "/healthz").await, 200);
 }
 
 #[tokio::test]

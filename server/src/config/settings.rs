@@ -6,6 +6,8 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub log: LogConfig,
+    #[serde(default)]
+    pub database: Option<DatabaseConfig>,
 }
 
 impl Config {
@@ -28,18 +30,68 @@ impl Config {
             ConfigValidationError::new("log.level", format!("invalid filter: {err}"))
         })?;
 
+        let db = self.database.as_ref().ok_or_else(|| {
+            ConfigValidationError::new(
+                "database.url",
+                "required — set database.url in config or DISCOOL_DATABASE__URL env var",
+            )
+        })?;
+
+        if db.url.trim().is_empty() {
+            return Err(ConfigValidationError::new(
+                "database.url",
+                "must not be empty",
+            ));
+        }
+
+        if !db.url.starts_with("postgres://")
+            && !db.url.starts_with("postgresql://")
+            && !db.url.starts_with("sqlite://")
+            && !db.url.starts_with("sqlite:")
+        {
+            return Err(ConfigValidationError::new(
+                "database.url",
+                "must start with postgres://, postgresql://, sqlite://, or sqlite:",
+            ));
+        }
+
+        if db.max_connections == 0 {
+            return Err(ConfigValidationError::new(
+                "database.max_connections",
+                "must be >= 1",
+            ));
+        }
+
         Ok(())
     }
 
     pub fn log_summary(&self) {
+        let db_url = self
+            .database
+            .as_ref()
+            .map(|db| redact_secret(&db.url))
+            .unwrap_or("[not configured]");
+
         tracing::info!(
             host = %self.server.host,
             port = self.server.port,
             log_level = %self.log.level,
             log_format = %self.log.format,
+            database_url = %db_url,
             "Configuration loaded"
         );
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DatabaseConfig {
+    pub url: String, // Required — no default. Validation catches missing.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+}
+
+fn default_max_connections() -> u32 {
+    5
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -182,7 +234,11 @@ mod tests {
 
     #[test]
     fn default_config_validates() {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
         assert!(cfg.validate().is_ok());
     }
 
@@ -199,6 +255,7 @@ mod tests {
         assert_eq!(cfg.server.port, 3000);
         assert_eq!(cfg.log.level, "info");
         assert_eq!(cfg.log.format, LogFormat::Json);
+        assert!(cfg.database.is_none());
     }
 
     #[test]
@@ -214,6 +271,116 @@ mod tests {
         assert_eq!(
             redact_secret("postgres://user:pass@localhost/db"),
             "[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_missing_database() {
+        let cfg = Config::default();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("database.url"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_database_url() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "   ".to_string(),
+            max_connections: 5,
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("database.url"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_database_url_scheme() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "mysql://localhost/db".to_string(),
+            max_connections: 5,
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("database.url"));
+    }
+
+    #[test]
+    fn validate_accepts_postgres_and_sqlite_urls() {
+        for url in ["postgres://localhost/db", "sqlite::memory:"] {
+            let mut cfg = Config::default();
+            cfg.database = Some(DatabaseConfig {
+                url: url.to_string(),
+                max_connections: 5,
+            });
+            assert!(cfg.validate().is_ok(), "expected url to validate: {url}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_max_connections_0() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 0,
+        });
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("database.max_connections"));
+    }
+
+    #[test]
+    fn log_summary_redacts_database_url() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = BufGuard;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                BufGuard(self.0.clone())
+            }
+        }
+
+        struct BufGuard(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for BufGuard {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(Buf(buffer.clone()))
+                .with_filter(tracing_subscriber::filter::LevelFilter::INFO),
+        );
+
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "postgres://user:pass@localhost/db".to_string(),
+            max_connections: 5,
+        });
+
+        tracing::subscriber::with_default(subscriber, || {
+            cfg.log_summary();
+        });
+
+        let output = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("[REDACTED]"), "unexpected output: {output}");
+        assert!(
+            !output.contains("user:pass"),
+            "log output leaked secret: {output}"
         );
     }
 }

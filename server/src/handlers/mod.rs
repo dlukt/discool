@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 use axum::{
     Router,
     body::Body,
     http::{
-        Request,
+        Request, StatusCode,
         header::{HeaderName, HeaderValue},
     },
     middleware::{self, Next},
@@ -12,26 +10,31 @@ use axum::{
     routing::get,
 };
 
-use crate::config::Config;
+use crate::AppState;
 
 // Keep `connect-src` strict until we have a safe, non-Host-header-derived allow-list for WebSockets.
 const DEFAULT_CSP: &str = "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data:; script-src 'self'; style-src 'self'; connect-src 'self';";
 
-pub fn router(config: Arc<Config>) -> Router {
+pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/ping", get(ping))
         .fallback(get(api_not_found));
 
     Router::new()
         .nest("/api/v1", api)
+        .route("/healthz", get(healthz))
         .route("/ws", get(ws_not_found))
         .fallback(get(crate::static_files::handler))
         .layer(middleware::from_fn(security_headers))
-        .with_state(config)
+        .with_state(state)
 }
 
 async fn ping() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({ "data": { "status": "ok" } }))
+}
+
+async fn healthz() -> StatusCode {
+    StatusCode::OK
 }
 
 async fn security_headers(req: Request<Body>, next: Next) -> Response {

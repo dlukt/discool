@@ -2,7 +2,7 @@
 #
 # This file documents ALL supported config keys and their defaults.
 # You can keep it empty (or omit config files entirely) and the server will run
-# with defaults.
+# with defaults, except `database.url` which is required.
 #
 # Config load order (lowest → highest priority):
 #   1) /etc/discool/config.toml
@@ -19,6 +19,7 @@
 #   DISCOOL_SERVER__HOST=127.0.0.1
 #   DISCOOL_LOG__LEVEL=debug
 #   DISCOOL_LOG__FORMAT=pretty
+#   DISCOOL_DATABASE__URL=sqlite::memory:
 #
 # Note: For log filtering, the standard Rust `RUST_LOG` env var overrides
 # `log.level` (debugging escape hatch).
@@ -40,3 +41,14 @@
 #
 # Log output format (default: "json")
 # format = "json" # json | pretty
+
+# ---------------------------------------------------------------------------
+# [database]
+# ---------------------------------------------------------------------------
+# Database connection URL (required)
+# url = "postgres://user:pass@localhost:5432/discool"
+# url = "sqlite://./data/discool.db"
+# url = "sqlite::memory:" # useful for tests
+#
+# Connection pool max connections (default: 5)
+# max_connections = 5
