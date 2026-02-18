@@ -3,6 +3,7 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicU16, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -18,12 +19,15 @@ fn server_exe() -> &'static str {
         .expect("cargo should set CARGO_BIN_EXE_<bin-name> for integration tests")
 }
 
+static NEXT_PORT: AtomicU16 = AtomicU16::new(40_000);
+
 fn pick_free_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    loop {
+        let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 fn new_temp_dir() -> PathBuf {
@@ -70,6 +74,9 @@ async fn wait_for_bind(child: &mut Child, addr: &str) {
     loop {
         if let Ok(stream) = TcpStream::connect(addr).await {
             drop(stream);
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("server exited early with status {status}");
+            }
             break;
         }
 
@@ -109,6 +116,20 @@ async fn http_response(addr: &str, path: &str) -> String {
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
     let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    String::from_utf8_lossy(&buf).to_string()
+}
+
+async fn http_post(addr: &str, path: &str, json_body: &str) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
+        json_body.as_bytes().len(),
+    );
     stream.write_all(req.as_bytes()).await.unwrap();
 
     let mut buf = Vec::new();
@@ -398,4 +419,200 @@ async fn env_vars_override_discool_config() {
 
     let addr = format!("127.0.0.1:{env_port}");
     wait_for_bind(&mut server.child, &addr).await;
+}
+
+#[tokio::test]
+async fn instance_returns_uninitialized_on_fresh_server() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let res = http_response(&addr, "/api/v1/instance").await;
+    assert_eq!(response_status(&res), 200);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value, json!({ "data": { "initialized": false } }));
+}
+
+#[tokio::test]
+async fn instance_setup_then_get_returns_initialized() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let setup = json!({
+        "admin_username": "tomas",
+        "avatar_color": "#3399ff",
+        "instance_name": "My Instance",
+        "instance_description": "A cool place to hang out",
+        "discovery_enabled": true
+    })
+    .to_string();
+
+    let res = http_post(&addr, "/api/v1/instance/setup", &setup).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "data": {
+                "initialized": true,
+                "name": "My Instance",
+                "description": "A cool place to hang out",
+                "discovery_enabled": true,
+                "admin": {
+                    "username": "tomas",
+                    "avatar_color": "#3399ff"
+                }
+            }
+        })
+    );
+
+    let res = http_response(&addr, "/api/v1/instance").await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "data": {
+                "initialized": true,
+                "name": "My Instance",
+                "description": "A cool place to hang out",
+                "discovery_enabled": true,
+                "admin": {
+                    "username": "tomas",
+                    "avatar_color": "#3399ff"
+                }
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn instance_setup_conflicts_on_second_call() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let setup = json!({
+        "admin_username": "tomas",
+        "instance_name": "My Instance"
+    })
+    .to_string();
+
+    let res = http_post(&addr, "/api/v1/instance/setup", &setup).await;
+    assert_eq!(response_status(&res), 200);
+
+    let res = http_post(&addr, "/api/v1/instance/setup", &setup).await;
+    assert_eq!(response_status(&res), 409);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({ "error": { "code": "CONFLICT", "message": "Instance has already been initialized", "details": {} } })
+    );
+}
+
+#[tokio::test]
+async fn instance_setup_returns_409_when_initialized_even_with_invalid_body() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let setup = json!({
+        "admin_username": "tomas",
+        "instance_name": "My Instance"
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/instance/setup", &setup).await;
+    assert_eq!(response_status(&res), 200);
+
+    let res = http_post(&addr, "/api/v1/instance/setup", "{}").await;
+    assert_eq!(response_status(&res), 409);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({ "error": { "code": "CONFLICT", "message": "Instance has already been initialized", "details": {} } })
+    );
+}
+
+#[tokio::test]
+async fn instance_setup_returns_422_for_missing_admin_username() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let setup = json!({ "instance_name": "My Instance" }).to_string();
+    let res = http_post(&addr, "/api/v1/instance/setup", &setup).await;
+    assert_eq!(response_status(&res), 422);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({ "error": { "code": "VALIDATION_ERROR", "message": "admin_username is required", "details": {} } })
+    );
+}
+
+#[tokio::test]
+async fn instance_setup_returns_422_for_missing_instance_name() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let setup = json!({ "admin_username": "tomas" }).to_string();
+    let res = http_post(&addr, "/api/v1/instance/setup", &setup).await;
+    assert_eq!(response_status(&res), 422);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({ "error": { "code": "VALIDATION_ERROR", "message": "instance_name is required", "details": {} } })
+    );
 }

@@ -7,13 +7,14 @@ use axum::{
     },
     middleware::{self, Next},
     response::Response,
-    routing::get,
+    routing::{get, post},
 };
 use axum_prometheus::PrometheusMetricLayer;
 
 use crate::AppState;
 
 mod health;
+mod instance;
 
 // Keep `connect-src` strict until we have a safe, non-Host-header-derived allow-list for WebSockets.
 const DEFAULT_CSP: &str = "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data:; script-src 'self'; style-src 'self'; connect-src 'self';";
@@ -21,6 +22,8 @@ const DEFAULT_CSP: &str = "default-src 'self'; base-uri 'self'; object-src 'none
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/ping", get(ping))
+        .route("/instance", get(instance::get_instance))
+        .route("/instance/setup", post(instance::setup_instance))
         .fallback(get(api_not_found));
 
     let mut tracked = Router::new()
