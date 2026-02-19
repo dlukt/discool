@@ -38,10 +38,11 @@ pub async fn handler(uri: Uri) -> Response {
     }
 
     // A request that looks like a file path (has an extension) should 404 if missing.
-    if path
-        .rsplit('/')
-        .next()
-        .is_some_and(|name| name.contains('.'))
+    if path != "index.html"
+        && path
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.contains('.'))
     {
         return AppError::NotFound.into_response();
     }
