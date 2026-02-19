@@ -1,0 +1,5 @@
+[advisories]
+# RUSTSEC-2023-0071 (rsa Marvin Attack) has no fixed upgrade available.
+# It's pulled in via `sqlx-mysql` but Discool only supports Postgres + SQLite.
+ignore = ["RUSTSEC-2023-0071"]
+
