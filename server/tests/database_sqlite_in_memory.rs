@@ -29,22 +29,18 @@ async fn migrations_run_on_sqlite_in_memory() {
     db::run_migrations(&pool).await.unwrap();
 
     let value: String = match &pool {
-        db::DbPool::Postgres(pool) => {
-            sqlx::query_scalar(
-                "SELECT value FROM schema_metadata WHERE key = 'initialized_at' LIMIT 1",
-            )
-            .fetch_one(pool)
-            .await
-            .unwrap()
-        }
-        db::DbPool::Sqlite(pool) => {
-            sqlx::query_scalar(
-                "SELECT value FROM schema_metadata WHERE key = 'initialized_at' LIMIT 1",
-            )
-            .fetch_one(pool)
-            .await
-            .unwrap()
-        }
+        db::DbPool::Postgres(pool) => sqlx::query_scalar(
+            "SELECT value FROM schema_metadata WHERE key = 'initialized_at' LIMIT 1",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap(),
+        db::DbPool::Sqlite(pool) => sqlx::query_scalar(
+            "SELECT value FROM schema_metadata WHERE key = 'initialized_at' LIMIT 1",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap(),
     };
     assert!(!value.is_empty());
 }

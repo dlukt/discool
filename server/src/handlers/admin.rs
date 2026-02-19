@@ -260,23 +260,21 @@ async fn db_size_bytes(state: &AppState) -> u64 {
 
     let backend = crate::db::DatabaseBackend::from_url(&db.url).ok();
     match backend {
-        Some(crate::db::DatabaseBackend::Postgres) => {
-            match &state.pool {
-                DbPool::Postgres(pool) => match sqlx::query_scalar::<_, i64>(
-                    "SELECT pg_database_size(current_database())",
-                )
-                .fetch_one(pool)
-                .await
+        Some(crate::db::DatabaseBackend::Postgres) => match &state.pool {
+            DbPool::Postgres(pool) => {
+                match sqlx::query_scalar::<_, i64>("SELECT pg_database_size(current_database())")
+                    .fetch_one(pool)
+                    .await
                 {
-                Ok(v) => u64::try_from(v).unwrap_or(0),
-                Err(err) => {
-                    tracing::warn!(error = %err, "Failed to query postgres database size");
-                    0
+                    Ok(v) => u64::try_from(v).unwrap_or(0),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "Failed to query postgres database size");
+                        0
+                    }
                 }
-                },
-                DbPool::Sqlite(_) => 0,
             }
-        }
+            DbPool::Sqlite(_) => 0,
+        },
         Some(crate::db::DatabaseBackend::Sqlite) => sqlite_db_size_bytes(&db.url).await,
         None => 0,
     }
