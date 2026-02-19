@@ -137,6 +137,30 @@ async fn http_post(addr: &str, path: &str, json_body: &str) -> String {
     String::from_utf8_lossy(&buf).to_string()
 }
 
+async fn http_post_bytes(addr: &str, path: &str, json_body: &str) -> Vec<u8> {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
+        json_body.as_bytes().len(),
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    buf
+}
+
+fn response_header_and_body_bytes(res: &[u8]) -> (String, &[u8]) {
+    let header_end = res
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(res.len());
+    let header = String::from_utf8_lossy(&res[..header_end]).to_string();
+    let body = res.get((header_end + 4)..).unwrap_or_default();
+    (header, body)
+}
+
 async fn try_http_status(addr: &str, path: &str) -> std::io::Result<u16> {
     let mut stream = TcpStream::connect(addr).await?;
 
@@ -199,8 +223,18 @@ async fn wait_for_http_status(child: &mut Child, addr: &str, path: &str, expecte
 }
 
 fn write_server_config(path: &Path, host: &str, port: u16, metrics_enabled: Option<bool>) {
+    write_server_config_with_db_url(path, host, port, metrics_enabled, "sqlite::memory:");
+}
+
+fn write_server_config_with_db_url(
+    path: &Path,
+    host: &str,
+    port: u16,
+    metrics_enabled: Option<bool>,
+    db_url: &str,
+) {
     let mut cfg = format!(
-        "[server]\nhost = \"{host}\"\nport = {port}\n\n[log]\nlevel = \"warn\"\nformat = \"json\"\n\n[database]\nurl = \"sqlite::memory:\"\nmax_connections = 1\n"
+        "[server]\nhost = \"{host}\"\nport = {port}\n\n[log]\nlevel = \"warn\"\nformat = \"json\"\n\n[database]\nurl = \"{db_url}\"\nmax_connections = 1\n"
     );
 
     if let Some(enabled) = metrics_enabled {
@@ -671,4 +705,95 @@ async fn admin_health_returns_200_after_instance_setup() {
     assert_eq!(data.get("websocket_connections"), Some(&json!(0)));
     assert!(data.get("uptime_seconds").is_some());
     assert!(data.get("db_pool_max").is_some());
+}
+
+#[tokio::test]
+async fn admin_backup_returns_403_before_instance_setup() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let res = http_post(&addr, "/api/v1/admin/backup", "").await;
+    assert_eq!(response_status(&res), 403);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({ "error": { "code": "FORBIDDEN", "message": "Instance is not initialized", "details": {} } })
+    );
+}
+
+#[tokio::test]
+async fn admin_backup_returns_200_and_sqlite_magic_bytes_after_instance_setup() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let setup = json!({
+        "admin_username": "tomas",
+        "instance_name": "My Instance"
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/instance/setup", &setup).await;
+    assert_eq!(response_status(&res), 200);
+
+    let res = http_post_bytes(&addr, "/api/v1/admin/backup", "").await;
+    let (header, body) = response_header_and_body_bytes(&res);
+    assert_eq!(response_status(&header), 200);
+
+    let content_type = response_header(&header, "content-type").unwrap_or_default();
+    assert!(
+        content_type.starts_with("application/octet-stream"),
+        "unexpected content-type: {content_type}"
+    );
+
+    let cache_control = response_header(&header, "cache-control").unwrap_or_default();
+    assert_eq!(cache_control, "no-store");
+
+    let content_disposition = response_header(&header, "content-disposition").unwrap_or_default();
+    assert!(
+        content_disposition.contains("attachment"),
+        "unexpected content-disposition: {content_disposition}"
+    );
+    assert!(
+        content_disposition.contains(".db"),
+        "expected .db filename; content-disposition: {content_disposition}"
+    );
+
+    assert!(
+        body.starts_with(b"SQLite format 3\0"),
+        "expected sqlite magic bytes at start"
+    );
 }

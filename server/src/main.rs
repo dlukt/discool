@@ -12,12 +12,15 @@ async fn main() {
         }
     };
 
+    // Initialize tracing before validation so warn-level validation messages (e.g. backup output_dir)
+    // are actually visible.
+    init_tracing(&config.log);
+
     if let Err(err) = config.validate() {
         eprintln!("ERROR: Invalid configuration: {err}");
         std::process::exit(1);
     }
 
-    init_tracing(&config.log);
     config.log_summary();
 
     let config = std::sync::Arc::new(config);

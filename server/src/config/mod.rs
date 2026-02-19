@@ -1,6 +1,8 @@
 mod settings;
 
-pub use settings::{Config, DatabaseConfig, LogConfig, LogFormat, MetricsConfig, ServerConfig};
+pub use settings::{
+    BackupConfig, Config, DatabaseConfig, LogConfig, LogFormat, MetricsConfig, ServerConfig,
+};
 
 pub fn load() -> Result<Config, config::ConfigError> {
     use config::{Config as ConfigBuilder, Environment, File, FileFormat};

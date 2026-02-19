@@ -21,6 +21,7 @@
 #   DISCOOL_LOG__FORMAT=pretty
 #   DISCOOL_DATABASE__URL=sqlite::memory:
 #   DISCOOL_METRICS__ENABLED=true
+#   DISCOOL_BACKUP__OUTPUT_DIR=/var/backups/discool
 #
 # Note: For log filtering, the standard Rust `RUST_LOG` env var overrides
 # `log.level` (debugging escape hatch).
@@ -59,3 +60,9 @@
 # ---------------------------------------------------------------------------
 # Expose Prometheus metrics at GET /metrics (default: false)
 # enabled = false
+
+# ---------------------------------------------------------------------------
+# [backup]
+# ---------------------------------------------------------------------------
+# Optional directory to also save backups created via POST /api/v1/admin/backup.
+# output_dir = "/var/backups/discool"

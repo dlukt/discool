@@ -10,6 +10,8 @@ pub struct Config {
     pub database: Option<DatabaseConfig>,
     #[serde(default)]
     pub metrics: Option<MetricsConfig>,
+    #[serde(default)]
+    pub backup: Option<BackupConfig>,
 }
 
 impl Config {
@@ -68,6 +70,21 @@ impl Config {
             ));
         }
 
+        if let Some(output_dir) = self
+            .backup
+            .as_ref()
+            .and_then(|b| b.output_dir.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            && let Err(err) = std::fs::create_dir_all(output_dir)
+        {
+            tracing::warn!(
+                error = %err,
+                output_dir = %output_dir,
+                "Failed to create backup output directory"
+            );
+        }
+
         Ok(())
     }
 
@@ -93,6 +110,12 @@ impl Config {
 pub struct MetricsConfig {
     #[serde(default)]
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct BackupConfig {
+    #[serde(default)]
+    pub output_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

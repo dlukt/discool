@@ -1,6 +1,6 @@
 # Story 1.7: Data Export and Backup
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -39,57 +39,57 @@ So that I can restore my instance or migrate to new hardware without data loss.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add optional backup configuration (AC: #4)
-  - [ ] 1.1 Add `BackupConfig` struct to `server/src/config/settings.rs` with `output_dir: Option<String>` field
-  - [ ] 1.2 Add `backup: Option<BackupConfig>` field to `Config` struct with `#[serde(default)]`
-  - [ ] 1.3 In `Config::validate()`, if `backup.output_dir` is set, verify the directory exists or can be created (log a warning, do not fail startup)
+- [x] Task 1: Add optional backup configuration (AC: #4)
+  - [x] 1.1 Add `BackupConfig` struct to `server/src/config/settings.rs` with `output_dir: Option<String>` field
+  - [x] 1.2 Add `backup: Option<BackupConfig>` field to `Config` struct with `#[serde(default)]`
+  - [x] 1.3 In `Config::validate()`, if `backup.output_dir` is set, verify the directory exists or can be created (log a warning, do not fail startup)
 
-- [ ] Task 2: Backend backup endpoint (AC: #1, #2, #3, #4, #5)
-  - [ ] 2.1 Add `create_backup` async handler in `server/src/handlers/admin.rs`
-  - [ ] 2.2 Guard with pre-auth check: return 403 (`AppError::Forbidden`) if instance is not initialized (same pattern as `get_health`)
-  - [ ] 2.3 Detect database backend via `DatabaseBackend::from_url()` on the configured database URL
-  - [ ] 2.4 Generate a temp file path: `std::env::temp_dir().join(format!("discool-backup-{timestamp}.{ext}"))` where ext is `db` (SQLite) or `sql` (PostgreSQL)
-  - [ ] 2.5 SQLite backup: execute `VACUUM INTO '{temp_path}'` via `sqlx::query` — produces a consistent snapshot including WAL data
-  - [ ] 2.6 PostgreSQL backup: spawn `tokio::process::Command::new("pg_dump")` with `--dbname <url> --format=plain --file <temp_path>` — return `AppError::Internal` if `pg_dump` is not found or exits non-zero
-  - [ ] 2.7 Read the temp file into a `Vec<u8>` response body (acceptable for MVP database sizes)
-  - [ ] 2.8 Set response headers: `Content-Type: application/octet-stream` and `Content-Disposition: attachment; filename="discool-backup-{timestamp}.{ext}"`
-  - [ ] 2.9 If `config.backup.output_dir` is set: also copy the backup file to that directory (best-effort — log warning on failure, do not fail the response)
-  - [ ] 2.10 Clean up the temp file after response body is read (use `defer`-style cleanup or explicit `tokio::fs::remove_file`)
-  - [ ] 2.11 Generate filename with UTC timestamp: `discool-backup-2026-02-19-143022.db` or `.sql`
+- [x] Task 2: Backend backup endpoint (AC: #1, #2, #3, #4, #5)
+  - [x] 2.1 Add `create_backup` async handler in `server/src/handlers/admin.rs`
+  - [x] 2.2 Guard with pre-auth check: return 403 (`AppError::Forbidden`) if instance is not initialized (same pattern as `get_health`)
+  - [x] 2.3 Detect database backend via `DatabaseBackend::from_url()` on the configured database URL
+  - [x] 2.4 Generate a temp file path: `std::env::temp_dir().join(format!("discool-backup-{timestamp}.{ext}"))` where ext is `db` (SQLite) or `sql` (PostgreSQL)
+  - [x] 2.5 SQLite backup: execute `VACUUM INTO '{temp_path}'` via `sqlx::query` — produces a consistent snapshot including WAL data
+  - [x] 2.6 PostgreSQL backup: spawn `tokio::process::Command::new("pg_dump")` with `--dbname <url> --format=plain --file <temp_path>` — return `AppError::Internal` if `pg_dump` is not found or exits non-zero
+  - [x] 2.7 Read the temp file into a `Vec<u8>` response body (acceptable for MVP database sizes)
+  - [x] 2.8 Set response headers: `Content-Type: application/octet-stream` and `Content-Disposition: attachment; filename="discool-backup-{timestamp}.{ext}"`
+  - [x] 2.9 If `config.backup.output_dir` is set: also copy the backup file to that directory (best-effort — log warning on failure, do not fail the response)
+  - [x] 2.10 Clean up the temp file after response body is read (use `defer`-style cleanup or explicit `tokio::fs::remove_file`)
+  - [x] 2.11 Generate filename with UTC timestamp: `discool-backup-2026-02-19-143022.db` or `.sql`
 
-- [ ] Task 3: Wire backup route into router (AC: #1)
-  - [ ] 3.1 Add `.route("/admin/backup", post(admin::create_backup))` to the `/api/v1` router in `server/src/handlers/mod.rs`
-  - [ ] 3.2 Ensure the route is within the `tracked` router so metrics track it when enabled
+- [x] Task 3: Wire backup route into router (AC: #1)
+  - [x] 3.1 Add `.route("/admin/backup", post(admin::create_backup))` to the `/api/v1` router in `server/src/handlers/mod.rs`
+  - [x] 3.2 Ensure the route is within the `tracked` router so metrics track it when enabled
 
-- [ ] Task 4: Client-side backup API function (AC: #1, #4)
-  - [ ] 4.1 Add `downloadBackup()` async function to `client/src/lib/api.ts` that POSTs to `/api/v1/admin/backup`, receives the binary response, and triggers a browser file download via Blob URL + programmatic `<a>` click
-  - [ ] 4.2 Handle error responses (403, 500) by parsing the JSON error body and throwing `ApiError`
+- [x] Task 4: Client-side backup API function (AC: #1, #4)
+  - [x] 4.1 Add `downloadBackup()` async function to `client/src/lib/api.ts` that POSTs to `/api/v1/admin/backup`, receives the binary response, and triggers a browser file download via Blob URL + programmatic `<a>` click
+  - [x] 4.2 Handle error responses (403, 500) by parsing the JSON error body and throwing `ApiError`
 
-- [ ] Task 5: AdminPanel backup section (AC: #1, #4, #6)
-  - [ ] 5.1 Add a "Backup" card section in `client/src/lib/components/AdminPanel.svelte` below the existing health metrics
-  - [ ] 5.2 Add a "Download Backup" button styled as a fire CTA (primary action)
-  - [ ] 5.3 On click: disable the button, show "Creating backup..." status text
-  - [ ] 5.4 On success: trigger browser download, show brief "Backup complete" text, re-enable button
-  - [ ] 5.5 On error: show error message with "Retry" button (fire CTA), same pattern as health error state
-  - [ ] 5.6 Follow Dual Core design system: dark zinc background, ice blue for labels, fire for the CTA button
+- [x] Task 5: AdminPanel backup section (AC: #1, #4, #6)
+  - [x] 5.1 Add a "Backup" card section in `client/src/lib/components/AdminPanel.svelte` below the existing health metrics
+  - [x] 5.2 Add a "Download Backup" button styled as a fire CTA (primary action)
+  - [x] 5.3 On click: disable the button, show "Creating backup..." status text
+  - [x] 5.4 On success: trigger browser download, show brief "Backup complete" text, re-enable button
+  - [x] 5.5 On error: show error message with "Retry" button (fire CTA), same pattern as health error state
+  - [x] 5.6 Follow Dual Core design system: dark zinc background, ice blue for labels, fire for the CTA button
 
-- [ ] Task 6: Server tests (AC: #1, #2, #3, #5)
-  - [ ] 6.1 Unit test: `POST /api/v1/admin/backup` returns 403 when instance is not initialized
-  - [ ] 6.2 Unit test: `POST /api/v1/admin/backup` returns 200 with `Content-Type: application/octet-stream` on initialized instance
-  - [ ] 6.3 Unit test: response has `Content-Disposition` header with `attachment` and a `.db` filename
-  - [ ] 6.4 Unit test: response body starts with SQLite magic bytes (`SQLite format 3\0`) — 16 bytes
-  - [ ] 6.5 Unit test: backup of initialized instance contains `instance_settings` and `admin_users` data (open the backup bytes as a new SQLite connection, query tables)
-  - [ ] 6.6 Integration test: `POST /api/v1/admin/backup` before setup returns 403
-  - [ ] 6.7 Integration test: `POST /api/v1/admin/backup` after setup returns 200 with downloadable backup
-  - [ ] 6.8 Integration test: backup response body starts with SQLite magic bytes
+- [x] Task 6: Server tests (AC: #1, #2, #3, #5)
+  - [x] 6.1 Unit test: `POST /api/v1/admin/backup` returns 403 when instance is not initialized
+  - [x] 6.2 Unit test: `POST /api/v1/admin/backup` returns 200 with `Content-Type: application/octet-stream` on initialized instance
+  - [x] 6.3 Unit test: response has `Content-Disposition` header with `attachment` and a `.db` filename
+  - [x] 6.4 Unit test: response body starts with SQLite magic bytes (`SQLite format 3\0`) — 16 bytes
+  - [x] 6.5 Unit test: backup of initialized instance contains `instance_settings` and `admin_users` data (open the backup bytes as a new SQLite connection, query tables)
+  - [x] 6.6 Integration test: `POST /api/v1/admin/backup` before setup returns 403
+  - [x] 6.7 Integration test: `POST /api/v1/admin/backup` after setup returns 200 with downloadable backup
+  - [x] 6.8 Integration test: backup response body starts with SQLite magic bytes
 
-- [ ] Task 7: Code quality (AC: all)
-  - [ ] 7.1 Run `cargo fmt` and fix any formatting issues
-  - [ ] 7.2 Run `cargo clippy -- -D warnings` and resolve all warnings
-  - [ ] 7.3 Run `cargo test` and verify all tests pass
-  - [ ] 7.4 Run `cargo build --release` and verify it succeeds
-  - [ ] 7.5 Run `npx biome check .` in client directory and fix issues
-  - [ ] 7.6 Run `npx svelte-check --tsconfig ./tsconfig.app.json` in client directory and fix issues
+- [x] Task 7: Code quality (AC: all)
+  - [x] 7.1 Run `cargo fmt` and fix any formatting issues
+  - [x] 7.2 Run `cargo clippy -- -D warnings` and resolve all warnings
+  - [x] 7.3 Run `cargo test` and verify all tests pass
+  - [x] 7.4 Run `cargo build --release` and verify it succeeds
+  - [x] 7.5 Run `npx biome check .` in client directory and fix issues
+  - [x] 7.6 Run `npx svelte-check --tsconfig ./tsconfig.app.json` in client directory and fix issues
 
 ## Dev Notes
 
@@ -327,12 +327,88 @@ For integration tests, extend the existing test helpers. Use the `http_post` hel
 
 ### Agent Model Used
 
+GitHub Copilot CLI
+
 ### Debug Log References
+
+- `cd client && npm ci && npm run lint && npm run check && npm run build`
+- `cd server && cargo fmt && cargo clippy -- -D warnings && cargo test`
+- `cd server && cargo build --release`
 
 ### Completion Notes List
 
+- Added optional `[backup]` config section (`backup.output_dir`) with best-effort directory creation (warn-only).
+- Implemented `POST /api/v1/admin/backup` returning a binary download:
+  - SQLite: `VACUUM INTO` snapshot.
+  - PostgreSQL: `pg_dump` subprocess with 30s timeout and stderr capture/redaction.
+  - Best-effort copy to `backup.output_dir` when configured.
+- Added `downloadBackup()` client helper and a new Backup section in `AdminPanel.svelte` (fire CTA, slow-loading text after 2s, success/error UI).
+- Added unit + integration tests for the backup endpoint (403/200, headers, SQLite magic bytes, backup contains instance/admin data).
+- Follow-up hardening: make `pg_dump` non-interactive + more restore-portable, ensure config validation warnings are visible, and de-duplicate client error parsing.
+- Follow-up hardening: remove client inline styles so CSP can stay strict (no `style-src 'unsafe-inline'`).
+
 ### File List
+
+- config.example.toml
+- server/src/config/mod.rs
+- server/src/config/settings.rs
+- server/src/handlers/admin.rs
+- server/src/handlers/mod.rs
+ - server/tests/server_binds_to_configured_port.rs
+ - client/src/lib/api.ts
+ - client/src/lib/components/AdminPanel.svelte
+ - client/src/lib/components/SetupPage.svelte
+ - _bmad-output/implementation-artifacts/sprint-status.yaml
+ - _bmad-output/implementation-artifacts/1-7-data-export-and-backup.md
 
 ## Change Log
 
 - 2026-02-19: Story created from epics, architecture, UX design, and previous story intelligence.
+- 2026-02-19: Implemented admin backup/export endpoint + UI, added optional backup config, and added unit/integration test coverage.
+- 2026-02-19: Added `Cache-Control: no-store` to backup downloads to avoid caching sensitive backup data.
+- 2026-02-19: Senior dev code review: hardened temp backup file creation, improved pg_dump timeout cleanup, and added output_dir copy test; marked story done.
+- 2026-02-19: Senior dev code review follow-up: init tracing before config validation warnings, harden `pg_dump` invocation (`--no-password`, `--no-owner`, `--no-privileges`), and refactor client error parsing helper.
+- 2026-02-19: Senior dev code review follow-up: avoid leaking PostgreSQL passwords via `pg_dump` argv (use `PGPASSWORD` + password-stripped `--dbname`), strengthen backup content test to cover `schema_metadata` (AC #3), and harden client `Content-Disposition` filename parsing.
+- 2026-02-19: Senior dev code review follow-up: also strip PostgreSQL `password=` query params from `pg_dump --dbname`, abort stderr capture on `pg_dump` timeout to avoid hangs, and add regression tests for connection URI sanitization.
+- 2026-02-19: Senior dev code review follow-up: fix CSP blocking inline style attributes used by the SPA (avatar color preview / progress bar widths) and further harden `Content-Disposition` filename parsing + filename sanitization.
+- 2026-02-19: Senior dev code review follow-up: avoid redundant disk IO in backup handler, prevent output_dir overwrites on repeated backups, and delay browser object URL revocation to avoid canceled downloads.
+- 2026-02-19: Senior dev code review follow-up: remove client inline styles (SetupPage/AdminPanel/downloadBackup) and restore strict CSP (`style-src 'self'`); sync sprint-status to `done`.
+
+## Senior Developer Review (AI)
+
+_Reviewer: Darko on 2026-02-19_
+
+### Findings
+
+**HIGH**
+- `server/src/handlers/admin.rs`: Backup temp files were created with a predictable name in the shared temp dir (collision + symlink risk). **Fixed** by adding a UUID suffix for the temp path while keeping the downloaded filename stable.
+- `server/src/handlers/mod.rs`: CSP `style-src 'self'` blocked inline style attributes used in the SPA (e.g. avatar color preview and CPU bar width), causing incorrect UI rendering. **Fixed** by allowing inline styles (`style-src 'self' 'unsafe-inline'`).
+
+**MEDIUM**
+- `server/src/handlers/admin.rs`: `pg_dump` timeout path killed the process but didn’t explicitly reap it, risking zombies. **Fixed** by waiting (bounded) after kill.
+- `server/src/handlers/admin.rs`: No test coverage verified `backup.output_dir` copy behavior (AC #4). **Fixed** by adding a unit test that asserts the saved backup exists and is a valid SQLite file.
+- `server/src/main.rs`: `Config::validate()` can emit warnings (e.g. backup output_dir creation), but tracing was initialized after validation so those warns were invisible. **Fixed** by initializing tracing before validation.
+- `server/src/handlers/admin.rs`: `pg_dump` could block on password prompts and produced less-portable dumps. **Fixed** by setting stdin to null and passing `--no-password`, `--no-owner`, and `--no-privileges`.
+- `server/src/handlers/admin.rs`: `pg_dump` was invoked with the full PostgreSQL URL in argv, which can leak credentials via process listings. **Fixed** by stripping the password from `--dbname` and passing it via `PGPASSWORD` env.
+- `server/src/handlers/admin.rs`: `pg_dump` credential stripping did not remove `password=` query params, which could still leak credentials via process listings. **Fixed** by stripping query passwords and passing via `PGPASSWORD` env.
+- `server/src/handlers/admin.rs`: `pg_dump` timeout path could hang while awaiting stderr capture. **Fixed** by aborting stderr capture on timeout and enabling `kill_on_drop`.
+- `server/src/handlers/admin.rs` (tests): SQLite backup content test didn’t assert `schema_metadata` was included (AC #3). **Fixed** by asserting `schema_metadata.initialized_at` exists in the backup DB.
+- `server/src/handlers/admin.rs` (tests): No regression tests for Postgres connection URI sanitization (password stripping + percent-decoding). **Fixed** by adding unit tests for `postgres_dbname_and_password()`.
+- `client/src/lib/api.ts`: `downloadBackup()` duplicated JSON error envelope parsing logic. **Fixed** by sharing an `apiErrorFromPayload()` helper with `apiFetch()`.
+- `client/src/lib/api.ts`: `Content-Disposition` parsing didn’t support `filename*` or sanitize path separators. **Fixed** by supporting `filename*` and sanitizing the download filename.
+- `client/src/lib/api.ts`: `filename*` parsing didn’t handle quoted values / RFC5987 `charset'lang'...` form and allowed control-character filenames. **Fixed** by stripping quotes, supporting RFC5987 parsing, filtering control characters, and adding a safe fallback filename.
+
+### Outcome
+
+✅ Approved (issues fixed)
+
+### Follow-up Review (AI)
+
+_Reviewer: Darko on 2026-02-19_
+
+**MEDIUM**
+- `server/src/handlers/admin.rs`: Backup handler copied the temp backup to `backup.output_dir` and then read it into memory, doubling disk IO and adding latency. **Fixed** by reading once and writing the same bytes to `backup.output_dir`.
+- `server/src/handlers/admin.rs`: Saving to `backup.output_dir` could overwrite an existing backup if multiple backups were triggered within the same second. **Fixed** by using a UUID-suffixed filename when the target already exists.
+- `client/src/lib/api.ts`: Revoking the Blob object URL immediately after click can cancel downloads in some browsers. **Fixed** by revoking on the next tick via `setTimeout`.
+- `server/src/handlers/mod.rs`: CSP `style-src` previously required `'unsafe-inline'` due to inline styles in the client (avatar color preview, CPU bar). **Fixed** by removing inline styles (`SetupPage.svelte`, `AdminPanel.svelte`, `downloadBackup()`), allowing CSP to remain strict (`style-src 'self'`).
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`: Story tracking was stale (`ready-for-dev` while this story is `done`). **Fixed** by syncing `1-7-data-export-and-backup: done`.

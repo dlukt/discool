@@ -10,14 +10,14 @@ import {
 const dispatch = createEventDispatcher<{ complete: InstanceStatus }>()
 
 const avatarColors = [
-  { name: 'Blue', value: '#3b82f6' },
-  { name: 'Red', value: '#ef4444' },
-  { name: 'Green', value: '#22c55e' },
-  { name: 'Amber', value: '#f59e0b' },
-  { name: 'Purple', value: '#8b5cf6' },
-  { name: 'Pink', value: '#ec4899' },
-  { name: 'Cyan', value: '#06b6d4' },
-  { name: 'Orange', value: '#f97316' },
+  { name: 'Blue', value: '#3b82f6', className: 'bg-blue-500' },
+  { name: 'Red', value: '#ef4444', className: 'bg-red-500' },
+  { name: 'Green', value: '#22c55e', className: 'bg-green-500' },
+  { name: 'Amber', value: '#f59e0b', className: 'bg-amber-500' },
+  { name: 'Purple', value: '#8b5cf6', className: 'bg-violet-500' },
+  { name: 'Pink', value: '#ec4899', className: 'bg-pink-500' },
+  { name: 'Cyan', value: '#06b6d4', className: 'bg-cyan-500' },
+  { name: 'Orange', value: '#f97316', className: 'bg-orange-500' },
 ] as const
 
 type AvatarColorValue = (typeof avatarColors)[number]['value']
@@ -51,6 +51,11 @@ function setAvatarColorIndex(index: number) {
   const next = ((index % len) + len) % len
   avatarColor = avatarColors[next].value
   avatarButtons[next]?.focus()
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function avatarColorClass(value: AvatarColorValue): string {
+  return avatarColors.find((c) => c.value === value)?.className ?? 'bg-blue-500'
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
@@ -167,13 +172,12 @@ async function onSubmit() {
           <p class="text-sm font-medium">Avatar color</p>
           <div class="flex items-center gap-4">
             <div
-              class="flex h-10 w-10 items-center justify-center rounded-full text-sm font-semibold text-white"
-              style={`background-color: ${avatarColor}`}
+              class={`flex h-10 w-10 items-center justify-center rounded-full text-sm font-semibold text-white ${avatarColorClass(avatarColor)}`}
               role="img"
               aria-label="Avatar preview"
              >
-               {adminUsername.trim().slice(0, 1).toUpperCase() || '?'}
-             </div>
+                {adminUsername.trim().slice(0, 1).toUpperCase() || '?'}
+              </div>
 
               <div class="flex flex-wrap gap-2" role="radiogroup" aria-label="Avatar color picker">
                 {#each avatarColors as color, i}
@@ -186,8 +190,7 @@ async function onSubmit() {
                       avatarColor === color.value
                         ? 'border-fire ring-2 ring-fire'
                         : 'border-border'
-                    }`}
-                    style={`background-color: ${color.value}`}
+                    } ${color.className}`}
                     aria-label={`Select ${color.name}`}
                     bind:this={avatarButtons[i]}
                     on:click={() => (avatarColor = color.value)}

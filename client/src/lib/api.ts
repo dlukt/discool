@@ -126,6 +126,22 @@ function parseJson(text: string): unknown {
   }
 }
 
+function apiErrorFromPayload(payload: unknown): ApiError | undefined {
+  if (isRecord(payload) && 'error' in payload) {
+    const err = (payload as { error: unknown }).error
+    if (
+      isRecord(err) &&
+      typeof err.code === 'string' &&
+      typeof err.message === 'string'
+    ) {
+      const details =
+        isRecord(err.details) && !Array.isArray(err.details) ? err.details : {}
+      return new ApiError(err.code, err.message, details)
+    }
+  }
+  return undefined
+}
+
 export async function apiFetch<T>(
   path: string,
   init: RequestInit = {},
@@ -150,18 +166,8 @@ export async function apiFetch<T>(
     throw new ApiError('INVALID_RESPONSE', 'Invalid server response')
   }
 
-  if (isRecord(payload) && 'error' in payload) {
-    const err = (payload as { error: unknown }).error
-    if (
-      isRecord(err) &&
-      typeof err.code === 'string' &&
-      typeof err.message === 'string'
-    ) {
-      const details =
-        isRecord(err.details) && !Array.isArray(err.details) ? err.details : {}
-      throw new ApiError(err.code, err.message, details)
-    }
-  }
+  const apiErr = apiErrorFromPayload(payload)
+  if (apiErr) throw apiErr
 
   throw new ApiError('HTTP_ERROR', res.statusText || `HTTP ${res.status}`, {
     status: res.status,
@@ -181,4 +187,83 @@ export function submitSetup(data: SetupRequest): Promise<InstanceStatus> {
 
 export function getAdminHealth(): Promise<AdminHealth> {
   return apiFetch<AdminHealthWire>('/api/v1/admin/health').then(toAdminHealth)
+}
+
+function filenameFromContentDisposition(
+  header: string | null,
+): string | undefined {
+  if (!header) return undefined
+  const filenameStar = header.match(/filename\*=([^;]+)/i)
+  if (filenameStar?.[1]) {
+    let value = filenameStar[1].trim()
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1)
+    }
+
+    // RFC 5987 / RFC 6266: filename*=charset'lang'percent-encoded
+    const rfc5987 = value.match(/^([^']*)'[^']*'(.*)$/)
+    const encoded = rfc5987 ? rfc5987[2] : value
+    try {
+      return decodeURIComponent(encoded)
+    } catch {
+      return encoded
+    }
+  }
+  const quoted = header.match(/filename="([^"]+)"/)
+  if (quoted?.[1]) return quoted[1]
+  const unquoted = header.match(/filename=([^;]+)/)
+  return unquoted?.[1]?.trim()
+}
+
+function sanitizeDownloadFilename(name: string): string {
+  let file = name.split(/[/\\]/).pop() ?? name
+  file = file.trim()
+  file = file
+    .split('')
+    .filter((ch) => {
+      const code = ch.charCodeAt(0)
+      return !(code < 32 || code === 127)
+    })
+    .join('')
+  if (!file || file === '.' || file === '..') return 'discool-backup.bin'
+  return file
+}
+
+export async function downloadBackup(): Promise<void> {
+  const res = await fetch('/api/v1/admin/backup', { method: 'POST' })
+
+  if (!res.ok) {
+    const text = await res.text()
+    const payload = parseJson(text)
+
+    const apiErr = apiErrorFromPayload(payload)
+    if (apiErr) throw apiErr
+
+    throw new ApiError('HTTP_ERROR', res.statusText || `HTTP ${res.status}`, {
+      status: res.status,
+    })
+  }
+
+  const blob = await res.blob()
+  const filename = sanitizeDownloadFilename(
+    filenameFromContentDisposition(res.headers.get('content-disposition')) ??
+      'discool-backup.bin',
+  )
+
+  const url = URL.createObjectURL(blob)
+  try {
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.hidden = true
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  } finally {
+    // Some browsers can cancel the download if the object URL is revoked immediately.
+    setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
 }

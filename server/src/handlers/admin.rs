@@ -1,11 +1,21 @@
 use axum::{
     Json,
+    body::Body,
     extract::State,
-    http::StatusCode,
+    http::{
+        HeaderValue, StatusCode,
+        header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE},
+    },
     response::{IntoResponse, Response},
 };
+use chrono::Utc;
 use serde::Serialize;
 use serde_json::json;
+use uuid::Uuid;
+
+use std::io::ErrorKind;
+use std::process::Stdio;
+use std::time::Duration;
 
 use crate::{AppError, AppState};
 
@@ -59,6 +69,179 @@ pub async fn get_health(State(state): State<AppState>) -> Result<Response, AppEr
     };
 
     Ok((StatusCode::OK, Json(json!({ "data": health }))).into_response())
+}
+
+pub async fn create_backup(State(state): State<AppState>) -> Result<Response, AppError> {
+    // TODO(Epic 2): Replace this pre-auth guard with real admin authentication/authorization.
+    if !super::instance::is_initialized(&state.pool).await? {
+        return Err(AppError::Forbidden(
+            "Instance is not initialized".to_string(),
+        ));
+    }
+
+    let db = state
+        .config
+        .database
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Database is not configured".to_string()))?;
+
+    let backend = crate::db::DatabaseBackend::from_url(&db.url).map_err(AppError::Internal)?;
+
+    let timestamp = Utc::now().format("%Y-%m-%d-%H%M%S").to_string();
+    let backup_id = Uuid::new_v4();
+    let ext = match backend {
+        crate::db::DatabaseBackend::Sqlite => "db",
+        crate::db::DatabaseBackend::Postgres => "sql",
+    };
+    let filename = format!("discool-backup-{timestamp}.{ext}");
+    // Avoid predictable temp filenames in shared temp dirs (collision + symlink risk).
+    let temp_filename = format!("discool-backup-{timestamp}-{backup_id}.{ext}");
+    let temp_path = std::env::temp_dir().join(&temp_filename);
+
+    let result: Result<Response, AppError> = async {
+        match backend {
+            crate::db::DatabaseBackend::Sqlite => {
+                sqlx::query("VACUUM INTO ?1")
+                    .bind(temp_path.to_string_lossy().as_ref())
+                    .execute(&state.pool)
+                    .await
+                    .map_err(|err| AppError::Internal(err.to_string()))?;
+            }
+            crate::db::DatabaseBackend::Postgres => {
+                use tokio::io::AsyncReadExt;
+
+                let (pg_dump_dbname, pg_password) = postgres_dbname_and_password(&db.url);
+                let mut cmd = tokio::process::Command::new("pg_dump");
+                cmd.kill_on_drop(true);
+                if let Some(pg_password) = pg_password {
+                    cmd.env("PGPASSWORD", pg_password);
+                }
+
+                let mut child = cmd
+                    // Non-interactive: never prompt for passwords; fail fast instead.
+                    .arg("--no-password")
+                    // Improve restore portability on a fresh instance/user.
+                    .arg("--no-owner")
+                    .arg("--no-privileges")
+                    .arg("--dbname")
+                    .arg(&pg_dump_dbname)
+                    .arg("--format=plain")
+                    .arg("--file")
+                    .arg(&temp_path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .map_err(|err| {
+                        if err.kind() == ErrorKind::NotFound {
+                            AppError::Internal(
+                                "pg_dump not found. Install PostgreSQL client tools to enable backups.".to_string(),
+                            )
+                        } else {
+                            AppError::Internal(err.to_string())
+                        }
+                    })?;
+
+                let mut stderr = child.stderr.take().ok_or_else(|| {
+                    AppError::Internal("Failed to capture pg_dump stderr".to_string())
+                })?;
+                let stderr_task = tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let _ = stderr.read_to_end(&mut buf).await;
+                    buf
+                });
+
+                let status = match tokio::time::timeout(Duration::from_secs(30), child.wait()).await
+                {
+                    Ok(status) => status.map_err(|err| AppError::Internal(err.to_string()))?,
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+                        stderr_task.abort();
+                        let _ = stderr_task.await;
+                        return Err(AppError::Internal(
+                            "pg_dump timed out after 30 seconds".to_string(),
+                        ));
+                    }
+                };
+
+                let stderr_bytes = stderr_task.await.unwrap_or_default();
+
+                if !status.success() {
+                    let stderr = String::from_utf8_lossy(&stderr_bytes)
+                        .replace(&db.url, "[REDACTED]")
+                        .replace(&pg_dump_dbname, "[REDACTED]")
+                        .trim()
+                        .to_string();
+                    return Err(AppError::Internal(if stderr.is_empty() {
+                        "pg_dump failed".to_string()
+                    } else {
+                        format!("pg_dump failed: {stderr}")
+                    }));
+                }
+            }
+        }
+
+        let bytes = tokio::fs::read(&temp_path).await.map_err(|err| {
+            AppError::Internal(format!(
+                "Failed to read backup file {}: {err}",
+                temp_path.display()
+            ))
+        })?;
+
+        if let Some(output_dir) = state
+            .config
+            .backup
+            .as_ref()
+            .and_then(|b| b.output_dir.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let base = std::path::Path::new(output_dir);
+            let mut dst = base.join(&filename);
+            if tokio::fs::metadata(&dst).await.is_ok() {
+                dst = base.join(format!("discool-backup-{timestamp}-{backup_id}.{ext}"));
+            }
+            if let Err(err) = tokio::fs::write(&dst, &bytes).await {
+                tracing::warn!(
+                    error = %err,
+                    output_dir = %output_dir,
+                    "Failed to save backup to output directory"
+                );
+            }
+        }
+
+        let mut res = Response::new(Body::from(bytes));
+        *res.status_mut() = StatusCode::OK;
+        res.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        res.headers_mut()
+            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+
+        let content_disposition = format!("attachment; filename=\"{filename}\"");
+        res.headers_mut().insert(
+            CONTENT_DISPOSITION,
+            HeaderValue::from_str(&content_disposition)
+                .map_err(|err| AppError::Internal(err.to_string()))?,
+        );
+
+        Ok(res)
+    }
+    .await;
+
+    if let Err(err) = tokio::fs::remove_file(&temp_path).await
+        && err.kind() != ErrorKind::NotFound
+    {
+        tracing::warn!(
+            error = %err,
+            path = %temp_path.display(),
+            "Failed to remove temp backup file"
+        );
+    }
+
+    result
 }
 
 async fn db_size_bytes(state: &AppState) -> u64 {
@@ -289,7 +472,7 @@ fn parse_proc_stat(contents: &str) -> Option<(u64, u32)> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use axum::{body::to_bytes, extract::State, response::IntoResponse};
 
@@ -314,9 +497,201 @@ mod tests {
         }
     }
 
+    async fn test_state_file_db() -> (AppState, std::path::PathBuf) {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("discool-test-db-{nanos}.db"));
+        let _ = std::fs::File::create(&path).unwrap();
+
+        let mut cfg = crate::config::Config::default();
+        cfg.database = Some(crate::config::DatabaseConfig {
+            url: format!("sqlite://{}", path.display()),
+            max_connections: 1,
+        });
+
+        let pool = crate::db::init_pool(cfg.database.as_ref().unwrap())
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+
+        (
+            AppState {
+                config: Arc::new(cfg),
+                pool,
+                start_time: Instant::now() - Duration::from_secs(5),
+            },
+            path,
+        )
+    }
+
     async fn json_value(res: Response) -> serde_json::Value {
         let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_backup_returns_403_when_instance_is_not_initialized() {
+        let state = test_state().await;
+        let err = create_backup(State(state)).await.unwrap_err();
+
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        let value = json_value(res).await;
+        assert_eq!(
+            value,
+            json!({ "error": { "code": "FORBIDDEN", "message": "Instance is not initialized", "details": {} } })
+        );
+    }
+
+    #[tokio::test]
+    async fn create_backup_returns_sqlite_backup_with_expected_headers_and_data_when_initialized() {
+        use axum::http::header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE};
+
+        let (state, db_path) = test_state_file_db().await;
+        sqlx::query(
+            "INSERT INTO instance_settings (key, value)\nVALUES ('initialized_at', CURRENT_TIMESTAMP)",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO admin_users (id, username, avatar_color)\nVALUES ('admin-1', 'tomas', NULL)",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let res = create_backup(State(state)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let content_type = res
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(content_type, "application/octet-stream");
+
+        let cache_control = res
+            .headers()
+            .get(CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(cache_control, "no-store");
+
+        let content_disposition = res
+            .headers()
+            .get(CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            content_disposition.contains("attachment"),
+            "unexpected content-disposition: {content_disposition}"
+        );
+        assert!(
+            content_disposition.contains(".db"),
+            "expected .db filename; content-disposition: {content_disposition}"
+        );
+
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let bytes = body.to_vec();
+
+        assert!(
+            bytes.starts_with(b"SQLite format 3\0"),
+            "expected sqlite magic bytes at start"
+        );
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("discool-backup-test-{nanos}.db"));
+        tokio::fs::write(&path, &bytes).await.unwrap();
+
+        let url = format!("sqlite:{}", path.display());
+        let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+
+        let initialized_at: String = sqlx::query_scalar(
+            "SELECT value FROM instance_settings WHERE key = 'initialized_at' LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!initialized_at.is_empty());
+
+        let schema_initialized_at: String = sqlx::query_scalar(
+            "SELECT value FROM schema_metadata WHERE key = 'initialized_at' LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!schema_initialized_at.is_empty());
+
+        let username: String =
+            sqlx::query_scalar("SELECT username FROM admin_users WHERE username = 'tomas' LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(username, "tomas");
+
+        drop(pool);
+        tokio::fs::remove_file(&path).await.unwrap();
+
+        let _ = tokio::fs::remove_file(&db_path).await;
+        let _ = tokio::fs::remove_file(db_path.with_extension("db-wal")).await;
+        let _ = tokio::fs::remove_file(db_path.with_extension("db-shm")).await;
+    }
+
+    #[tokio::test]
+    async fn create_backup_copies_backup_to_output_dir_when_configured() {
+        use axum::http::header::CONTENT_DISPOSITION;
+
+        let (mut state, db_path) = test_state_file_db().await;
+        sqlx::query(
+            "INSERT INTO instance_settings (key, value)\nVALUES ('initialized_at', CURRENT_TIMESTAMP)",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap();
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let output_dir = std::env::temp_dir().join(format!("discool-backup-out-{nanos}"));
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+
+        let mut cfg = (*state.config).clone();
+        cfg.backup = Some(crate::config::BackupConfig {
+            output_dir: Some(output_dir.to_string_lossy().to_string()),
+        });
+        state.config = Arc::new(cfg);
+
+        let res = create_backup(State(state)).await.unwrap();
+        let content_disposition = res
+            .headers()
+            .get(CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let filename = content_disposition
+            .split("filename=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .expect("expected quoted filename in content-disposition");
+
+        let saved_path = output_dir.join(filename);
+        let bytes = tokio::fs::read(&saved_path).await.unwrap();
+        assert!(
+            bytes.starts_with(b"SQLite format 3\0"),
+            "expected sqlite magic bytes at start"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&output_dir).await;
+        let _ = tokio::fs::remove_file(&db_path).await;
+        let _ = tokio::fs::remove_file(db_path.with_extension("db-wal")).await;
+        let _ = tokio::fs::remove_file(db_path.with_extension("db-shm")).await;
     }
 
     #[tokio::test]
@@ -386,5 +761,144 @@ mod tests {
             data.get("db_size_bytes").and_then(|v| v.as_u64()).is_some(),
             "expected db_size_bytes to be a number"
         );
+    }
+
+    #[test]
+    fn postgres_dbname_and_password_strips_userinfo_password() {
+        let (dbname, password) =
+            super::postgres_dbname_and_password("postgres://user:secret@localhost:5432/discool");
+        assert_eq!(dbname, "postgres://user@localhost:5432/discool");
+        assert_eq!(password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn postgres_dbname_and_password_percent_decodes_password() {
+        let (dbname, password) = super::postgres_dbname_and_password(
+            "postgresql://user:s%40cr%23t@localhost:5432/discool",
+        );
+        assert_eq!(dbname, "postgresql://user@localhost:5432/discool");
+        assert_eq!(password.as_deref(), Some("s@cr#t"));
+    }
+
+    #[test]
+    fn postgres_dbname_and_password_strips_query_password() {
+        let (dbname, password) = super::postgres_dbname_and_password(
+            "postgres://user@localhost/discool?sslmode=require&PASSWORD=s%40cr%23t",
+        );
+        assert_eq!(dbname, "postgres://user@localhost/discool?sslmode=require");
+        assert_eq!(password.as_deref(), Some("s@cr#t"));
+    }
+
+    #[test]
+    fn postgres_dbname_and_password_prefers_userinfo_password_over_query_password() {
+        let (dbname, password) = super::postgres_dbname_and_password(
+            "postgres://user:fromuserinfo@localhost/discool?sslmode=require&password=fromquery",
+        );
+        assert_eq!(dbname, "postgres://user@localhost/discool?sslmode=require");
+        assert_eq!(password.as_deref(), Some("fromuserinfo"));
+    }
+
+    #[test]
+    fn postgres_dbname_and_password_omits_trailing_question_mark_when_query_only_contains_password()
+    {
+        let (dbname, password) =
+            super::postgres_dbname_and_password("postgres://localhost/discool?password=secret");
+        assert_eq!(dbname, "postgres://localhost/discool");
+        assert_eq!(password.as_deref(), Some("secret"));
+    }
+}
+
+fn postgres_dbname_and_password(db_url: &str) -> (String, Option<String>) {
+    let Some((scheme, rest)) = db_url.split_once("://") else {
+        return (db_url.to_string(), None);
+    };
+    if scheme != "postgres" && scheme != "postgresql" {
+        return (db_url.to_string(), None);
+    }
+
+    let (rest, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let (before_query, query) = rest.split_once('?').unwrap_or((rest, ""));
+
+    let (before_query, mut password) =
+        if let Some((userinfo, after_at)) = before_query.split_once('@') {
+            if let Some((user, password)) = userinfo.split_once(':') {
+                (format!("{user}@{after_at}"), Some(percent_decode(password)))
+            } else {
+                (before_query.to_string(), None)
+            }
+        } else {
+            (before_query.to_string(), None)
+        };
+
+    let (query, query_password) = strip_postgres_password_from_query(query);
+    if password.is_none() {
+        password = query_password;
+    }
+
+    let mut dbname = format!("{scheme}://{before_query}");
+    if !query.is_empty() {
+        dbname.push('?');
+        dbname.push_str(&query);
+    }
+    if !fragment.is_empty() {
+        dbname.push('#');
+        dbname.push_str(fragment);
+    }
+
+    (dbname, password)
+}
+
+fn strip_postgres_password_from_query(query: &str) -> (String, Option<String>) {
+    if query.is_empty() {
+        return (String::new(), None);
+    }
+
+    let mut parts = Vec::new();
+    let mut password: Option<String> = None;
+
+    for part in query.split('&') {
+        if part.is_empty() {
+            continue;
+        }
+
+        let (key, value) = part.split_once('=').unwrap_or((part, ""));
+        if key.eq_ignore_ascii_case("password") {
+            if !value.is_empty() {
+                password = Some(percent_decode(value));
+            }
+            continue;
+        }
+
+        parts.push(part);
+    }
+
+    (parts.join("&"), password)
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h1), Some(h2)) = (from_hex(bytes[i + 1]), from_hex(bytes[i + 2]))
+        {
+            out.push((h1 << 4) | h2);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn from_hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }

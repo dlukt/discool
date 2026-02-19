@@ -48,7 +48,7 @@ development_status:
   1-4-health-check-and-metrics-endpoints: done
   1-5-first-run-admin-setup-screen: done
   1-6-instance-health-dashboard: done
-  1-7-data-export-and-backup: ready-for-dev
+  1-7-data-export-and-backup: done
   1-8-docker-and-deployment-pipeline: backlog
   epic-1-retrospective: optional
 

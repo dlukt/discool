@@ -1,6 +1,11 @@
 <script lang="ts">
 import { onDestroy, onMount } from 'svelte'
-import { type AdminHealth, ApiError, getAdminHealth } from '$lib/api'
+import {
+  type AdminHealth,
+  ApiError,
+  downloadBackup,
+  getAdminHealth,
+} from '$lib/api'
 
 let health: AdminHealth | null = null
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
@@ -20,12 +25,64 @@ let refreshInterval: ReturnType<typeof setInterval> | null = null
 let clockInterval: ReturnType<typeof setInterval> | null = null
 let skeletonTimer: ReturnType<typeof setTimeout> | null = null
 let slowTimer: ReturnType<typeof setTimeout> | null = null
+let backupSlowTimer: ReturnType<typeof setTimeout> | null = null
+let backupSuccessTimer: ReturnType<typeof setTimeout> | null = null
 
 function clearTimers() {
   if (skeletonTimer) clearTimeout(skeletonTimer)
   if (slowTimer) clearTimeout(slowTimer)
   skeletonTimer = null
   slowTimer = null
+}
+
+function clearBackupTimers() {
+  if (backupSlowTimer) clearTimeout(backupSlowTimer)
+  if (backupSuccessTimer) clearTimeout(backupSuccessTimer)
+  backupSlowTimer = null
+  backupSuccessTimer = null
+}
+
+let backingUp = false
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let backupErrorMessage: string | null = null
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let backupStatusMessage: string | null = null
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let showBackupSlowLoadingText = false
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+async function runBackup() {
+  if (backingUp) return
+  backingUp = true
+  backupErrorMessage = null
+  backupStatusMessage = null
+
+  showBackupSlowLoadingText = false
+  clearBackupTimers()
+  backupSlowTimer = setTimeout(() => {
+    showBackupSlowLoadingText = true
+  }, 2000)
+
+  try {
+    await downloadBackup()
+    backupStatusMessage = 'Backup complete.'
+    backupSuccessTimer = setTimeout(() => {
+      backupStatusMessage = null
+    }, 4000)
+  } catch (err) {
+    if (err instanceof ApiError) {
+      backupErrorMessage = err.message
+    } else if (err instanceof Error) {
+      backupErrorMessage = err.message
+    } else {
+      backupErrorMessage = 'Could not create backup.'
+    }
+  } finally {
+    backingUp = false
+    if (backupSlowTimer) clearTimeout(backupSlowTimer)
+    backupSlowTimer = null
+    showBackupSlowLoadingText = false
+  }
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
@@ -98,6 +155,7 @@ onDestroy(() => {
   if (refreshInterval) clearInterval(refreshInterval)
   if (clockInterval) clearInterval(clockInterval)
   clearTimers()
+  clearBackupTimers()
 })
 </script>
 
@@ -160,12 +218,11 @@ onDestroy(() => {
           <div>
             <p class="text-xs text-muted-foreground">CPU</p>
             <div class="mt-1 flex items-center gap-3">
-              <div class="h-2 flex-1 rounded bg-muted">
-                <div
-                  class="h-2 rounded bg-primary"
-                  style={`width: ${Math.min(Math.max(health.cpuUsagePercent, 0), 100)}%`}
-                ></div>
-              </div>
+              <progress
+                class="h-2 flex-1 overflow-hidden rounded bg-muted [&::-webkit-progress-bar]:bg-muted [&::-webkit-progress-value]:bg-primary [&::-moz-progress-bar]:bg-primary"
+                max="100"
+                value={Math.min(Math.max(health.cpuUsagePercent, 0), 100)}
+              ></progress>
               <p class="w-16 text-right text-sm tabular-nums">
                 {health.cpuUsagePercent.toFixed(1)}%
               </p>
@@ -218,6 +275,53 @@ onDestroy(() => {
           {/if}
         </div>
       </div>
+    </div>
+
+    <div class="rounded-lg border border-border bg-card p-6">
+      <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div class="space-y-1">
+          <h3 class="text-sm font-medium text-primary">Backup</h3>
+          <p class="text-sm text-muted-foreground">
+            Download a full database backup for restore or migration.
+          </p>
+        </div>
+
+        <div class="flex flex-col items-start gap-2 md:items-end">
+          <button
+            type="button"
+            class="inline-flex items-center justify-center rounded-md bg-fire px-4 py-2 text-sm font-medium text-fire-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+            on:click={() => void runBackup()}
+            disabled={backingUp}
+          >
+            Download Backup
+          </button>
+
+          {#if showBackupSlowLoadingText && backingUp}
+            <p class="text-sm text-muted-foreground">Creating backup...</p>
+          {:else if backupStatusMessage}
+            <p class="text-sm text-muted-foreground">{backupStatusMessage}</p>
+          {/if}
+        </div>
+      </div>
+
+      {#if backupErrorMessage}
+        <div
+          class="mt-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive"
+          role="alert"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <p class="flex-1">{backupErrorMessage}</p>
+            <button
+              type="button"
+              class="inline-flex items-center justify-center rounded-md bg-fire px-3 py-1.5 text-xs font-medium text-fire-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+              on:click={() => void runBackup()}
+              disabled={backingUp}
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      {/if}
     </div>
   {/if}
 </div>
