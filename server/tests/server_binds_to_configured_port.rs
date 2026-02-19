@@ -616,3 +616,59 @@ async fn instance_setup_returns_422_for_missing_instance_name() {
         json!({ "error": { "code": "VALIDATION_ERROR", "message": "instance_name is required", "details": {} } })
     );
 }
+
+#[tokio::test]
+async fn admin_health_returns_403_before_instance_setup() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let res = http_response(&addr, "/api/v1/admin/health").await;
+    assert_eq!(response_status(&res), 403);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({ "error": { "code": "FORBIDDEN", "message": "Instance is not initialized", "details": {} } })
+    );
+}
+
+#[tokio::test]
+async fn admin_health_returns_200_after_instance_setup() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let setup = json!({
+        "admin_username": "tomas",
+        "instance_name": "My Instance"
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/instance/setup", &setup).await;
+    assert_eq!(response_status(&res), 200);
+
+    let res = http_response(&addr, "/api/v1/admin/health").await;
+    assert_eq!(response_status(&res), 200);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let data = value.get("data").and_then(|v| v.as_object()).unwrap();
+    assert_eq!(data.get("websocket_connections"), Some(&json!(0)));
+    assert!(data.get("uptime_seconds").is_some());
+    assert!(data.get("db_pool_max").is_some());
+}

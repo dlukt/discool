@@ -49,7 +49,7 @@ fn is_hex_color(value: &str) -> bool {
     bytes[1..].iter().all(|b| b.is_ascii_hexdigit())
 }
 
-async fn is_initialized(pool: &sqlx::AnyPool) -> Result<bool, AppError> {
+pub(super) async fn is_initialized(pool: &sqlx::AnyPool) -> Result<bool, AppError> {
     sqlx::query_scalar::<_, String>(
         "SELECT value FROM instance_settings WHERE key = 'initialized_at' LIMIT 1",
     )

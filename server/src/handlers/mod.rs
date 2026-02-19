@@ -13,6 +13,7 @@ use axum_prometheus::PrometheusMetricLayer;
 
 use crate::AppState;
 
+mod admin;
 mod health;
 mod instance;
 
@@ -22,6 +23,7 @@ const DEFAULT_CSP: &str = "default-src 'self'; base-uri 'self'; object-src 'none
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/ping", get(ping))
+        .route("/admin/health", get(admin::get_health))
         .route("/instance", get(instance::get_instance))
         .route("/instance/setup", post(instance::setup_instance))
         .fallback(get(api_not_found));

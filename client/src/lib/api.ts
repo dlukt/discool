@@ -21,6 +21,17 @@ export type SetupRequest = {
   discoveryEnabled?: boolean
 }
 
+export type AdminHealth = {
+  cpuUsagePercent: number
+  memoryRssBytes: number
+  uptimeSeconds: number
+  dbSizeBytes: number
+  dbPoolActive: number
+  dbPoolIdle: number
+  dbPoolMax: number
+  websocketConnections: number
+}
+
 type AdminInfoWire = {
   username: string
   avatar_color?: string
@@ -42,6 +53,17 @@ type SetupRequestWire = {
   discovery_enabled?: boolean
 }
 
+type AdminHealthWire = {
+  cpu_usage_percent: number
+  memory_rss_bytes: number
+  uptime_seconds: number
+  db_size_bytes: number
+  db_pool_active: number
+  db_pool_idle: number
+  db_pool_max: number
+  websocket_connections: number
+}
+
 function toInstanceStatus(wire: InstanceStatusWire): InstanceStatus {
   return {
     initialized: wire.initialized,
@@ -51,6 +73,19 @@ function toInstanceStatus(wire: InstanceStatusWire): InstanceStatus {
     admin: wire.admin
       ? { username: wire.admin.username, avatarColor: wire.admin.avatar_color }
       : undefined,
+  }
+}
+
+function toAdminHealth(wire: AdminHealthWire): AdminHealth {
+  return {
+    cpuUsagePercent: wire.cpu_usage_percent,
+    memoryRssBytes: wire.memory_rss_bytes,
+    uptimeSeconds: wire.uptime_seconds,
+    dbSizeBytes: wire.db_size_bytes,
+    dbPoolActive: wire.db_pool_active,
+    dbPoolIdle: wire.db_pool_idle,
+    dbPoolMax: wire.db_pool_max,
+    websocketConnections: wire.websocket_connections,
   }
 }
 
@@ -142,4 +177,8 @@ export function submitSetup(data: SetupRequest): Promise<InstanceStatus> {
     method: 'POST',
     body: JSON.stringify(toSetupRequestWire(data)),
   }).then(toInstanceStatus)
+}
+
+export function getAdminHealth(): Promise<AdminHealth> {
+  return apiFetch<AdminHealthWire>('/api/v1/admin/health').then(toAdminHealth)
 }

@@ -8,6 +8,7 @@ use serde_json::json;
 #[derive(Debug)]
 pub enum AppError {
     NotFound,
+    Forbidden(String),
     Conflict(String),
     ValidationError(String),
     Internal(String),
@@ -21,6 +22,7 @@ impl IntoResponse for AppError {
                 "NOT_FOUND",
                 "Resource not found".to_string(),
             ),
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, "FORBIDDEN", msg),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, "CONFLICT", msg),
             AppError::ValidationError(msg) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "VALIDATION_ERROR", msg)
