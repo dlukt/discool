@@ -41,7 +41,7 @@ story_location: _bmad-output/implementation-artifacts
 
 development_status:
   # Epic 1: Project Foundation & Instance Deployment
-  epic-1: in-progress
+  epic-1: done
   1-1-initialize-project-scaffold-and-serve-spa: done
   1-2-configuration-system-and-structured-logging: done
   1-3-database-connection-and-migration-system: done
@@ -53,8 +53,8 @@ development_status:
   epic-1-retrospective: optional
 
   # Epic 2: Identity & Authentication
-  epic-2: backlog
-  2-1-client-side-keypair-generation-and-identity-creation: backlog
+  epic-2: in-progress
+  2-1-client-side-keypair-generation-and-identity-creation: ready-for-dev
   2-2-challenge-response-authentication-and-session-management: backlog
   2-3-identity-persistence-and-auto-login: backlog
   2-4-display-name-and-avatar-management: backlog

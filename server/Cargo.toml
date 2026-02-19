@@ -8,7 +8,7 @@ axum = { version = "0.8", features = ["ws"] }
 axum-prometheus = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 config = { version = "0.15", features = ["toml"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "any", "postgres", "sqlite", "migrate", "uuid", "chrono", "json"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "macros", "postgres", "sqlite", "migrate", "uuid", "chrono", "json"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 rust-embed = "8"

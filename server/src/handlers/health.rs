@@ -5,7 +5,7 @@ use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use axum_prometheus::metrics::{describe_gauge, gauge};
 use serde_json::json;
 
-use crate::AppState;
+use crate::{AppState, db::DbPool};
 
 static CUSTOM_METRICS_REGISTERED: OnceLock<()> = OnceLock::new();
 
@@ -14,12 +14,24 @@ pub async fn healthz() -> StatusCode {
 }
 
 pub async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
-    match sqlx::query_scalar::<_, String>(
-        "SELECT value FROM schema_metadata WHERE key = 'initialized_at' LIMIT 1",
-    )
-    .fetch_optional(&state.pool)
-    .await
-    {
+    let res = match &state.pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_scalar::<_, String>(
+                "SELECT value FROM schema_metadata WHERE key = 'initialized_at' LIMIT 1",
+            )
+            .fetch_optional(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_scalar::<_, String>(
+                "SELECT value FROM schema_metadata WHERE key = 'initialized_at' LIMIT 1",
+            )
+            .fetch_optional(pool)
+            .await
+        }
+    };
+
+    match res {
         Ok(Some(_)) => (
             StatusCode::OK,
             Json(json!({
@@ -75,7 +87,7 @@ pub fn register_custom_metrics() {
     });
 }
 
-pub fn update_custom_metrics(pool: &sqlx::AnyPool, start_time: Instant, db_max_connections: u32) {
+pub fn update_custom_metrics(pool: &DbPool, start_time: Instant, db_max_connections: u32) {
     gauge!("discool_uptime_seconds").set(start_time.elapsed().as_secs_f64());
 
     let idle = pool.num_idle() as f64;
@@ -172,10 +184,20 @@ mod tests {
     #[tokio::test]
     async fn readyz_returns_503_when_migrations_pending_no_row() {
         let state = test_state().await;
-        sqlx::query("DELETE FROM schema_metadata WHERE key = 'initialized_at'")
-            .execute(&state.pool)
-            .await
-            .unwrap();
+        match &state.pool {
+            DbPool::Postgres(pool) => {
+                sqlx::query("DELETE FROM schema_metadata WHERE key = 'initialized_at'")
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+            DbPool::Sqlite(pool) => {
+                sqlx::query("DELETE FROM schema_metadata WHERE key = 'initialized_at'")
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+        }
 
         let res = readyz(State(state)).await.into_response();
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);

@@ -17,7 +17,7 @@ use std::io::ErrorKind;
 use std::process::Stdio;
 use std::time::Duration;
 
-use crate::{AppError, AppState};
+use crate::{AppError, AppState, db::DbPool};
 
 #[cfg(target_os = "linux")]
 use std::sync::{Mutex, OnceLock};
@@ -101,11 +101,20 @@ pub async fn create_backup(State(state): State<AppState>) -> Result<Response, Ap
     let result: Result<Response, AppError> = async {
         match backend {
             crate::db::DatabaseBackend::Sqlite => {
-                sqlx::query("VACUUM INTO ?1")
-                    .bind(temp_path.to_string_lossy().as_ref())
-                    .execute(&state.pool)
-                    .await
-                    .map_err(|err| AppError::Internal(err.to_string()))?;
+                match &state.pool {
+                    DbPool::Sqlite(pool) => {
+                        sqlx::query("VACUUM INTO ?1")
+                            .bind(temp_path.to_string_lossy().as_ref())
+                            .execute(pool)
+                            .await
+                            .map_err(|err| AppError::Internal(err.to_string()))?;
+                    }
+                    DbPool::Postgres(_) => {
+                        return Err(AppError::Internal(
+                            "Database backend mismatch (expected sqlite pool)".to_string(),
+                        ));
+                    }
+                }
             }
             crate::db::DatabaseBackend::Postgres => {
                 use tokio::io::AsyncReadExt;
@@ -252,15 +261,20 @@ async fn db_size_bytes(state: &AppState) -> u64 {
     let backend = crate::db::DatabaseBackend::from_url(&db.url).ok();
     match backend {
         Some(crate::db::DatabaseBackend::Postgres) => {
-            match sqlx::query_scalar::<_, i64>("SELECT pg_database_size(current_database())")
-                .fetch_one(&state.pool)
+            match &state.pool {
+                DbPool::Postgres(pool) => match sqlx::query_scalar::<_, i64>(
+                    "SELECT pg_database_size(current_database())",
+                )
+                .fetch_one(pool)
                 .await
-            {
+                {
                 Ok(v) => u64::try_from(v).unwrap_or(0),
                 Err(err) => {
                     tracing::warn!(error = %err, "Failed to query postgres database size");
                     0
                 }
+                },
+                DbPool::Sqlite(_) => 0,
             }
         }
         Some(crate::db::DatabaseBackend::Sqlite) => sqlite_db_size_bytes(&db.url).await,
@@ -551,18 +565,36 @@ mod tests {
         use axum::http::header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE};
 
         let (state, db_path) = test_state_file_db().await;
-        sqlx::query(
-            "INSERT INTO instance_settings (key, value)\nVALUES ('initialized_at', CURRENT_TIMESTAMP)",
-        )
-        .execute(&state.pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO admin_users (id, username, avatar_color)\nVALUES ('admin-1', 'tomas', NULL)",
-        )
-        .execute(&state.pool)
-        .await
-        .unwrap();
+        match &state.pool {
+            DbPool::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO instance_settings (key, value)\nVALUES ('initialized_at', CURRENT_TIMESTAMP)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "INSERT INTO admin_users (id, username, avatar_color)\nVALUES ('admin-1', 'tomas', NULL)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            DbPool::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO instance_settings (key, value)\nVALUES ('initialized_at', CURRENT_TIMESTAMP)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "INSERT INTO admin_users (id, username, avatar_color)\nVALUES ('admin-1', 'tomas', NULL)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
 
         let res = create_backup(State(state)).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -649,12 +681,24 @@ mod tests {
         use axum::http::header::CONTENT_DISPOSITION;
 
         let (mut state, db_path) = test_state_file_db().await;
-        sqlx::query(
-            "INSERT INTO instance_settings (key, value)\nVALUES ('initialized_at', CURRENT_TIMESTAMP)",
-        )
-        .execute(&state.pool)
-        .await
-        .unwrap();
+        match &state.pool {
+            DbPool::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO instance_settings (key, value)\nVALUES ('initialized_at', CURRENT_TIMESTAMP)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            DbPool::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO instance_settings (key, value)\nVALUES ('initialized_at', CURRENT_TIMESTAMP)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
 
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -712,12 +756,24 @@ mod tests {
     #[tokio::test]
     async fn get_health_returns_200_with_expected_json_shape_when_initialized() {
         let state = test_state().await;
-        sqlx::query(
-            "INSERT INTO instance_settings (key, value)\nVALUES ('initialized_at', CURRENT_TIMESTAMP)",
-        )
-        .execute(&state.pool)
-        .await
-        .unwrap();
+        match &state.pool {
+            DbPool::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO instance_settings (key, value)\nVALUES ('initialized_at', CURRENT_TIMESTAMP)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            DbPool::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO instance_settings (key, value)\nVALUES ('initialized_at', CURRENT_TIMESTAMP)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
 
         let res = get_health(State(state)).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);

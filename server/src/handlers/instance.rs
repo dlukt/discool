@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::{AppError, AppState};
+use crate::{AppError, AppState, db::DbPool};
 
 #[derive(Debug, Deserialize)]
 pub struct SetupRequest {
@@ -50,14 +50,26 @@ fn is_hex_color(value: &str) -> bool {
     bytes[1..].iter().all(|b| b.is_ascii_hexdigit())
 }
 
-pub(super) async fn is_initialized(pool: &sqlx::AnyPool) -> Result<bool, AppError> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT value FROM instance_settings WHERE key = 'initialized_at' LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
-    .map(|row| row.is_some())
-    .map_err(|err| AppError::Internal(err.to_string()))
+pub(super) async fn is_initialized(pool: &DbPool) -> Result<bool, AppError> {
+    let row = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_scalar::<_, String>(
+                "SELECT value FROM instance_settings WHERE key = 'initialized_at' LIMIT 1",
+            )
+            .fetch_optional(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_scalar::<_, String>(
+                "SELECT value FROM instance_settings WHERE key = 'initialized_at' LIMIT 1",
+            )
+            .fetch_optional(pool)
+            .await
+        }
+    };
+
+    row.map(|row| row.is_some())
+        .map_err(|err| AppError::Internal(err.to_string()))
 }
 
 pub async fn get_instance(State(state): State<AppState>) -> Result<Response, AppError> {
@@ -73,11 +85,22 @@ pub async fn get_instance(State(state): State<AppState>) -> Result<Response, App
         return Ok((StatusCode::OK, Json(json!({ "data": status }))).into_response());
     }
 
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT key, value FROM instance_settings WHERE key IN ('instance_name','instance_description','discovery_enabled')",
-    )
-    .fetch_all(&state.pool)
-    .await
+    let rows: Vec<(String, String)> = match &state.pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_as(
+                "SELECT key, value FROM instance_settings WHERE key IN ('instance_name','instance_description','discovery_enabled')",
+            )
+            .fetch_all(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_as(
+                "SELECT key, value FROM instance_settings WHERE key IN ('instance_name','instance_description','discovery_enabled')",
+            )
+            .fetch_all(pool)
+            .await
+        }
+    }
     .map_err(|err| AppError::Internal(err.to_string()))?;
 
     let mut name: Option<String> = None;
@@ -101,11 +124,19 @@ pub async fn get_instance(State(state): State<AppState>) -> Result<Response, App
         }
     }
 
-    let admin_row: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT username, avatar_color FROM admin_users LIMIT 1")
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|err| AppError::Internal(err.to_string()))?;
+    let admin_row: Option<(String, Option<String>)> = match &state.pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_as("SELECT username, avatar_color FROM admin_users LIMIT 1")
+                .fetch_optional(pool)
+                .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_as("SELECT username, avatar_color FROM admin_users LIMIT 1")
+                .fetch_optional(pool)
+                .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
     let admin = admin_row.map(|(username, avatar_color)| AdminInfo {
         username,
         avatar_color,
@@ -168,63 +199,124 @@ pub async fn setup_instance(
         .to_string();
     let discovery_enabled_value = req.discovery_enabled.unwrap_or(true);
 
-    let mut tx = state
-        .pool
-        .begin()
-        .await
-        .map_err(|err| AppError::Internal(err.to_string()))?;
+    match &state.pool {
+        DbPool::Postgres(pool) => {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
 
-    // Race-safe guard: if another request initializes between our initial check and now,
-    // this insert will be ignored and we can return 409.
-    // Store a string timestamp to keep the value TEXT-compatible across SQLite + Postgres.
-    let initialized_at = Utc::now().to_rfc3339();
-    let initialized = sqlx::query(
-        "INSERT INTO instance_settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO NOTHING",
-    )
-    .bind("initialized_at")
-    .bind(&initialized_at)
-    .execute(&mut *tx)
-    .await
-    .map_err(|err| AppError::Internal(err.to_string()))?
-    .rows_affected()
-        == 1;
-    if !initialized {
-        return Err(AppError::Conflict(
-            "Instance has already been initialized".to_string(),
-        ));
-    }
-
-    let admin_id = Uuid::new_v4().to_string();
-    // Use $n placeholders: valid in Postgres, and also accepted by SQLite.
-    sqlx::query("INSERT INTO admin_users (id, username, avatar_color) VALUES ($1, $2, $3)")
-        .bind(&admin_id)
-        .bind(admin_username)
-        .bind(avatar_color.as_deref())
-        .execute(&mut *tx)
-        .await
-        .map_err(|err| AppError::Internal(err.to_string()))?;
-
-    let discovery_enabled_str = if discovery_enabled_value {
-        "true"
-    } else {
-        "false"
-    };
-    for (key, value) in [
-        ("instance_name", instance_name),
-        ("instance_description", instance_description_value.as_str()),
-        ("discovery_enabled", discovery_enabled_str),
-    ] {
-        sqlx::query("INSERT INTO instance_settings (key, value) VALUES ($1, $2)")
-            .bind(key)
-            .bind(value)
+            // Race-safe guard: if another request initializes between our initial check and now,
+            // this insert will be ignored and we can return 409.
+            // Store a string timestamp to keep the value TEXT-compatible across SQLite + Postgres.
+            let initialized_at = Utc::now().to_rfc3339();
+            let initialized = sqlx::query(
+                "INSERT INTO instance_settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO NOTHING",
+            )
+            .bind("initialized_at")
+            .bind(&initialized_at)
             .execute(&mut *tx)
             .await
-            .map_err(|err| AppError::Internal(err.to_string()))?;
-    }
+            .map_err(|err| AppError::Internal(err.to_string()))?
+            .rows_affected()
+                == 1;
+            if !initialized {
+                return Err(AppError::Conflict(
+                    "Instance has already been initialized".to_string(),
+                ));
+            }
 
-    tx.commit()
-        .await
-        .map_err(|err| AppError::Internal(err.to_string()))?;
+            let admin_id = Uuid::new_v4().to_string();
+            // Use $n placeholders: valid in Postgres, and also accepted by SQLite.
+            sqlx::query("INSERT INTO admin_users (id, username, avatar_color) VALUES ($1, $2, $3)")
+                .bind(&admin_id)
+                .bind(admin_username)
+                .bind(avatar_color.as_deref())
+                .execute(&mut *tx)
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+
+            let discovery_enabled_str = if discovery_enabled_value {
+                "true"
+            } else {
+                "false"
+            };
+            for (key, value) in [
+                ("instance_name", instance_name),
+                ("instance_description", instance_description_value.as_str()),
+                ("discovery_enabled", discovery_enabled_str),
+            ] {
+                sqlx::query("INSERT INTO instance_settings (key, value) VALUES ($1, $2)")
+                    .bind(key)
+                    .bind(value)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|err| AppError::Internal(err.to_string()))?;
+            }
+
+            tx.commit()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+        }
+        DbPool::Sqlite(pool) => {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+
+            // Race-safe guard: if another request initializes between our initial check and now,
+            // this insert will be ignored and we can return 409.
+            // Store a string timestamp to keep the value TEXT-compatible across SQLite + Postgres.
+            let initialized_at = Utc::now().to_rfc3339();
+            let initialized = sqlx::query(
+                "INSERT INTO instance_settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO NOTHING",
+            )
+            .bind("initialized_at")
+            .bind(&initialized_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?
+            .rows_affected()
+                == 1;
+            if !initialized {
+                return Err(AppError::Conflict(
+                    "Instance has already been initialized".to_string(),
+                ));
+            }
+
+            let admin_id = Uuid::new_v4().to_string();
+            // Use $n placeholders: valid in Postgres, and also accepted by SQLite.
+            sqlx::query("INSERT INTO admin_users (id, username, avatar_color) VALUES ($1, $2, $3)")
+                .bind(&admin_id)
+                .bind(admin_username)
+                .bind(avatar_color.as_deref())
+                .execute(&mut *tx)
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+
+            let discovery_enabled_str = if discovery_enabled_value {
+                "true"
+            } else {
+                "false"
+            };
+            for (key, value) in [
+                ("instance_name", instance_name),
+                ("instance_description", instance_description_value.as_str()),
+                ("discovery_enabled", discovery_enabled_str),
+            ] {
+                sqlx::query("INSERT INTO instance_settings (key, value) VALUES ($1, $2)")
+                    .bind(key)
+                    .bind(value)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|err| AppError::Internal(err.to_string()))?;
+            }
+
+            tx.commit()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+        }
+    }
 
     tracing::info!(
         admin_username = %admin_username,
