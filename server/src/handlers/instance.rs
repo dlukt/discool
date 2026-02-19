@@ -5,6 +5,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
@@ -175,9 +176,13 @@ pub async fn setup_instance(
 
     // Race-safe guard: if another request initializes between our initial check and now,
     // this insert will be ignored and we can return 409.
+    // Store a string timestamp to keep the value TEXT-compatible across SQLite + Postgres.
+    let initialized_at = Utc::now().to_rfc3339();
     let initialized = sqlx::query(
-        "INSERT INTO instance_settings (key, value)\nVALUES ('initialized_at', CURRENT_TIMESTAMP)\nON CONFLICT(key) DO NOTHING",
+        "INSERT INTO instance_settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO NOTHING",
     )
+    .bind("initialized_at")
+    .bind(&initialized_at)
     .execute(&mut *tx)
     .await
     .map_err(|err| AppError::Internal(err.to_string()))?
@@ -190,44 +195,28 @@ pub async fn setup_instance(
     }
 
     let admin_id = Uuid::new_v4().to_string();
-    {
-        let mut qb = sqlx::QueryBuilder::<sqlx::Any>::new(
-            "INSERT INTO admin_users (id, username, avatar_color) ",
-        );
-        qb.push_values(
-            [(admin_id.as_str(), admin_username, avatar_color.as_deref())],
-            |mut b, (id, username, avatar_color)| {
-                b.push_bind(id).push_bind(username).push_bind(avatar_color);
-            },
-        );
+    // Use $n placeholders: valid in Postgres, and also accepted by SQLite.
+    sqlx::query("INSERT INTO admin_users (id, username, avatar_color) VALUES ($1, $2, $3)")
+        .bind(&admin_id)
+        .bind(admin_username)
+        .bind(avatar_color.as_deref())
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| AppError::Internal(err.to_string()))?;
 
-        qb.build()
-            .execute(&mut *tx)
-            .await
-            .map_err(|err| AppError::Internal(err.to_string()))?;
-    }
-
-    {
-        let discovery_enabled_str = if discovery_enabled_value {
-            "true"
-        } else {
-            "false"
-        };
-
-        let mut qb =
-            sqlx::QueryBuilder::<sqlx::Any>::new("INSERT INTO instance_settings (key, value) ");
-        qb.push_values(
-            [
-                ("instance_name", instance_name),
-                ("instance_description", instance_description_value.as_str()),
-                ("discovery_enabled", discovery_enabled_str),
-            ],
-            |mut b, (key, value)| {
-                b.push_bind(key).push_bind(value);
-            },
-        );
-
-        qb.build()
+    let discovery_enabled_str = if discovery_enabled_value {
+        "true"
+    } else {
+        "false"
+    };
+    for (key, value) in [
+        ("instance_name", instance_name),
+        ("instance_description", instance_description_value.as_str()),
+        ("discovery_enabled", discovery_enabled_str),
+    ] {
+        sqlx::query("INSERT INTO instance_settings (key, value) VALUES ($1, $2)")
+            .bind(key)
+            .bind(value)
             .execute(&mut *tx)
             .await
             .map_err(|err| AppError::Internal(err.to_string()))?;

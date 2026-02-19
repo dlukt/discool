@@ -1,0 +1,38 @@
+services:
+  discool:
+    image: ghcr.io/dlukt/discool:latest
+    build: .
+    ports:
+      - '3000:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Required: database connection URL
+      DISCOOL_DATABASE__URL: postgres://discool:discool@postgres:5432/discool
+
+      # Optional overrides (defaults shown)
+      DISCOOL_SERVER__HOST: 0.0.0.0
+      DISCOOL_SERVER__PORT: 3000
+
+    # Optional: mount a persistent config file (file precedence: /etc/discool/config.toml first)
+    # volumes:
+    #   - ./config.toml:/etc/discool/config.toml:ro
+
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: discool
+      POSTGRES_PASSWORD: discool
+      POSTGRES_DB: discool
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U discool -d discool']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+

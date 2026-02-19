@@ -49,7 +49,7 @@ development_status:
   1-5-first-run-admin-setup-screen: done
   1-6-instance-health-dashboard: done
   1-7-data-export-and-backup: done
-  1-8-docker-and-deployment-pipeline: backlog
+  1-8-docker-and-deployment-pipeline: done
   epic-1-retrospective: optional
 
   # Epic 2: Identity & Authentication

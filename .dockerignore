@@ -1,0 +1,24 @@
+# Rust / Cargo
+target/
+server/target/
+
+# Node / client
+client/node_modules/
+client/dist/
+
+# Git
+.git/
+
+# BMAD artifacts (not needed for builds)
+_bmad/
+_bmad-output/
+
+# Local tooling
+.claude/
+.agent/
+.opencode/
+
+# Misc
+*.log
+.DS_Store
+

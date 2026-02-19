@@ -1,0 +1,36 @@
+name: security
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * 1' # weekly (Mondays)
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit
+        run: cd server && cargo audit
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: npm ci
+        run: cd client && npm ci
+
+      - name: npm audit (high+)
+        run: cd client && npm audit --audit-level=high

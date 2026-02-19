@@ -1,0 +1,45 @@
+# Dev (SQLite) compose file.
+# Run standalone (no Postgres): `docker compose -f docker-compose.dev.yml up -d --build`
+# Or combine with production compose (also starts Postgres): `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build`
+
+services:
+  discool:
+    # Development override:
+    # - uses SQLite (no Postgres dependency)
+    # - mounts source for hot-reload
+    # - runs both backend (cargo watch) and frontend (vite dev server) in one container
+    image: discool-dev
+    build:
+      context: .
+      target: chef
+    environment:
+      DISCOOL_DATABASE__URL: sqlite:///data/discool.db
+      DISCOOL_SERVER__HOST: 0.0.0.0
+      DISCOOL_SERVER__PORT: 3000
+    volumes:
+      - ./server:/app/server
+      - ./client:/app/client
+      - discool-dev-data:/data
+      - discool-client-node_modules:/app/client/node_modules
+      - discool-server-target:/app/server/target
+    ports:
+      - '3000:3000'
+      - '5173:5173'
+    command:
+      - bash
+      - -lc
+      - |
+          set -euo pipefail
+
+          cd /app/client
+          if [ ! -d node_modules/.bin ]; then npm ci; fi
+          npm run dev -- --host 0.0.0.0 --port 5173 &
+
+          cd /app/server
+          if ! command -v cargo-watch >/dev/null 2>&1; then cargo install cargo-watch --locked; fi
+          cargo watch -x run
+
+volumes:
+  discool-dev-data:
+  discool-client-node_modules:
+  discool-server-target:

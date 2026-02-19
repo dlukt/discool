@@ -14,6 +14,10 @@
 #   - Prefix: DISCOOL_
 #   - Nested separator: __ (double underscore)
 #
+# Docker tip:
+# - In `docker-compose.yml`, set these under `services.discool.environment`.
+# - For a persistent config file, mount: `./config.toml:/etc/discool/config.toml:ro`
+#
 # Examples:
 #   DISCOOL_SERVER__PORT=8080
 #   DISCOOL_SERVER__HOST=127.0.0.1
@@ -49,6 +53,7 @@
 # ---------------------------------------------------------------------------
 # Database connection URL (required)
 # url = "postgres://user:pass@localhost:5432/discool"
+# url = "postgres://discool:discool@postgres:5432/discool" # docker-compose service name
 # url = "sqlite://./data/discool.db"
 # url = "sqlite::memory:" # useful for tests
 #

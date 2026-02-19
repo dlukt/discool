@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            server/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('server/Cargo.lock') }}
+
+      - name: cargo fmt
+        run: cd server && cargo fmt --check
+
+      - name: cargo clippy
+        run: cd server && cargo clippy -- -D warnings
+
+      - name: cargo test
+        run: cd server && cargo test
+
+  client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: npm ci
+        run: cd client && npm ci
+
+      - name: biome check
+        run: cd client && npx biome check .
+
+      - name: svelte-check
+        run: cd client && npx svelte-check --tsconfig ./tsconfig.app.json
+
+      - name: npm run build
+        run: cd client && npm run build
