@@ -54,7 +54,7 @@ development_status:
 
   # Epic 2: Identity & Authentication
   epic-2: in-progress
-  2-1-client-side-keypair-generation-and-identity-creation: ready-for-dev
+  2-1-client-side-keypair-generation-and-identity-creation: done
   2-2-challenge-response-authentication-and-session-management: backlog
   2-3-identity-persistence-and-auto-login: backlog
   2-4-display-name-and-avatar-management: backlog

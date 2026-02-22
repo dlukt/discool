@@ -2,6 +2,8 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod handlers;
+pub mod identity;
+pub mod models;
 pub mod static_files;
 
 pub use error::AppError;

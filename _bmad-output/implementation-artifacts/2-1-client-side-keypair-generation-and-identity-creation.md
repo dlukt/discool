@@ -1,6 +1,6 @@
 # Story 2.1: Client-Side Keypair Generation and Identity Creation
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -48,37 +48,37 @@ So that I can join a guild without a complex registration process.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Create database migration for `users` table (AC: #3)
-  - [ ] 1.1 Create `server/migrations/0003_create_users.sql` with `users` table: `id TEXT PRIMARY KEY`, `did_key TEXT NOT NULL UNIQUE`, `public_key_multibase TEXT NOT NULL`, `username TEXT NOT NULL UNIQUE`, `avatar_color TEXT`, `created_at TEXT NOT NULL`, `updated_at TEXT NOT NULL`
-  - [ ] 1.2 Add indexes: `idx_users_did_key` on `did_key`, `idx_users_username` on `username`
-  - [ ] 1.3 Verify migration runs on both SQLite and PostgreSQL (`cargo test`)
+- [x] Task 1: Create database migration for `users` table (AC: #3)
+  - [x] 1.1 Create `server/migrations/0003_create_users.sql` with `users` table: `id TEXT PRIMARY KEY`, `did_key TEXT NOT NULL UNIQUE`, `public_key_multibase TEXT NOT NULL`, `username TEXT NOT NULL UNIQUE`, `avatar_color TEXT`, `created_at TEXT NOT NULL`, `updated_at TEXT NOT NULL`
+  - [x] 1.2 Add indexes: `idx_users_did_key` on `did_key`, `idx_users_username` on `username`
+  - [x] 1.3 Verify migration runs on both SQLite and PostgreSQL (`cargo test`)
 
-- [ ] Task 2: Add server Cargo dependencies (AC: #3)
-  - [ ] 2.1 Add `ed25519-dalek = { version = "2", features = ["alloc"] }` to `Cargo.toml`
-  - [ ] 2.2 Add `bs58 = "0.5"` to `Cargo.toml`
+- [x] Task 2: Add server Cargo dependencies (AC: #3)
+  - [x] 2.1 Add `ed25519-dalek = { version = "2", features = ["alloc"] }` to `Cargo.toml`
+  - [x] 2.2 Add `bs58 = "0.5"` to `Cargo.toml`
 
-- [ ] Task 3: Create server identity module — DID validation + public key extraction (AC: #3)
-  - [ ] 3.1 Create `server/src/identity/mod.rs` exporting `did` and `keypair` submodules
-  - [ ] 3.2 Create `server/src/identity/did.rs`:
+- [x] Task 3: Create server identity module — DID validation + public key extraction (AC: #3)
+  - [x] 3.1 Create `server/src/identity/mod.rs` exporting `did` and `keypair` submodules
+  - [x] 3.2 Create `server/src/identity/did.rs`:
     - `parse_did_key(did: &str) -> Result<[u8; 32], DidError>` — validates `did:key:z6Mk...` prefix, decodes base58btc (after `z` multibase prefix), checks multicodec varint prefix `[0xed, 0x01]`, returns raw 32-byte public key
     - `DidError` enum: `InvalidPrefix`, `InvalidMultibase`, `InvalidMulticodec`, `InvalidKeyLength`
     - Unit tests: valid DID, wrong prefix, truncated key, invalid base58, wrong multicodec
-  - [ ] 3.3 Create `server/src/identity/keypair.rs`:
+  - [x] 3.3 Create `server/src/identity/keypair.rs`:
     - `validate_ed25519_public_key(bytes: &[u8; 32]) -> Result<(), KeyError>` — uses `ed25519_dalek::VerifyingKey::from_bytes()` to confirm the bytes are a valid Ed25519 point
     - `KeyError` enum: `InvalidPoint`
     - Unit tests: valid key, invalid all-zeros key, random invalid bytes
-  - [ ] 3.4 Register `identity` module in `server/src/lib.rs`
+  - [x] 3.4 Register `identity` module in `server/src/lib.rs`
 
-- [ ] Task 4: Create server user model (AC: #3)
-  - [ ] 4.1 Create `server/src/models/mod.rs` exporting `user` submodule
-  - [ ] 4.2 Create `server/src/models/user.rs`:
+- [x] Task 4: Create server user model (AC: #3)
+  - [x] 4.1 Create `server/src/models/mod.rs` exporting `user` submodule
+  - [x] 4.2 Create `server/src/models/user.rs`:
     - `User` struct: `id: String`, `did_key: String`, `public_key_multibase: String`, `username: String`, `avatar_color: Option<String>`, `created_at: String`, `updated_at: String`
     - Derive `sqlx::FromRow`, `serde::Serialize`
     - `UserResponse` struct (for API response): same fields minus `updated_at` (or include it, match team preference)
-  - [ ] 4.3 Register `models` module in `server/src/lib.rs`
+  - [x] 4.3 Register `models` module in `server/src/lib.rs`
 
-- [ ] Task 5: Create server registration handler (AC: #3, #5, #6)
-  - [ ] 5.1 Create `server/src/handlers/auth.rs`:
+- [x] Task 5: Create server registration handler (AC: #3, #5, #6)
+  - [x] 5.1 Create `server/src/handlers/auth.rs`:
     - `POST /api/v1/auth/register` handler
     - Wire type: `RegisterRequest { did_key: String, username: String, avatar_color: Option<String> }`
     - Validation: `username` required (1-32 chars, alphanumeric + underscore + hyphen, trimmed), `avatar_color` if present must be `#RRGGBB` hex, `did_key` must start with `did:key:z6Mk`
@@ -90,15 +90,15 @@ So that I can join a guild without a complex registration process.
     - Return 201 with `{ "data": { id, did_key, username, avatar_color, created_at } }`
     - Return 409 for duplicate DID or duplicate username (with distinguishable error messages)
     - Return 422 for validation errors
-  - [ ] 5.2 Register route in `server/src/handlers/mod.rs`: `POST /api/v1/auth/register => auth::register`
-  - [ ] 5.3 Unit tests: valid registration, duplicate DID, duplicate username, invalid DID format, invalid username chars, empty username, username too long, invalid avatar color
+  - [x] 5.2 Register route in `server/src/handlers/mod.rs`: `POST /api/v1/auth/register => auth::register`
+  - [x] 5.3 Unit tests: valid registration, duplicate DID, duplicate username, invalid DID format, invalid username chars, empty username, username too long, invalid avatar color
 
-- [ ] Task 6: Install client npm dependency (AC: #1)
-  - [ ] 6.1 Run `npm install @noble/ed25519` in `client/` directory
-  - [ ] 6.2 Verify the package is added to `package.json` dependencies (not devDependencies)
+- [x] Task 6: Install client npm dependency (AC: #1)
+  - [x] 6.1 Run `npm install @noble/ed25519` in `client/` directory
+  - [x] 6.2 Verify the package is added to `package.json` dependencies (not devDependencies)
 
-- [ ] Task 7: Create client crypto module — keypair generation, DID creation, key encryption (AC: #1, #2)
-  - [ ] 7.1 Create `client/src/lib/features/identity/crypto.ts`:
+- [x] Task 7: Create client crypto module — keypair generation, DID creation, key encryption (AC: #1, #2)
+  - [x] 7.1 Create `client/src/lib/features/identity/crypto.ts`:
     - `generateIdentity(): Promise<{ secretKey: Uint8Array, publicKey: Uint8Array, didKey: string }>` — calls `ed.keygenAsync()`, constructs DID:key string
     - `didKeyFromPublicKey(publicKey: Uint8Array): string` — multicodec prefix `[0xed, 0x01]` + publicKey → base58btc encode → `'z'` prefix → `'did:key:'` prefix
     - `base58btcEncode(bytes: Uint8Array): string` — Bitcoin alphabet base58 encoder (inline, ~20 lines)
@@ -108,11 +108,11 @@ So that I can join a guild without a complex registration process.
     - `clearStoredIdentity(): Promise<void>` — removes all identity data from IndexedDB
     - Internal: `openIdentityDb(): Promise<IDBDatabase>` — opens/creates `discool-identity` database with `keys` object store (version 1)
     - Type: `StoredIdentity { publicKey: Uint8Array, didKey: string, username: string, avatarColor: string | null, registeredAt: string }`
-  - [ ] 7.2 All IndexedDB operations use raw API wrapped in Promise helpers (no external IndexedDB library)
-  - [ ] 7.3 Zero the `secretKey` Uint8Array after encryption (fill with 0s) to minimize memory exposure window
+  - [x] 7.2 All IndexedDB operations use raw API wrapped in Promise helpers (no external IndexedDB library)
+  - [x] 7.3 Zero the `secretKey` Uint8Array after encryption (fill with 0s) to minimize memory exposure window
 
-- [ ] Task 8: Create client identity store (AC: #4)
-  - [ ] 8.1 Create `client/src/lib/features/identity/identityStore.svelte.ts`:
+- [x] Task 8: Create client identity store (AC: #4)
+  - [x] 8.1 Create `client/src/lib/features/identity/identityStore.svelte.ts`:
     - Uses Svelte 5 `$state` runes (NOT legacy `writable()` stores)
     - State: `identity: StoredIdentity | null`, `loading: boolean`, `error: string | null`
     - `initialize()` — calls `loadStoredIdentity()`, sets state
@@ -120,18 +120,18 @@ So that I can join a guild without a complex registration process.
     - `clear(): Promise<void>` — calls `clearStoredIdentity()`, resets state
     - Exported as reactive state object: `export const identityState = $state({ ... })`
 
-- [ ] Task 9: Create client identity API (AC: #3, #4)
-  - [ ] 9.1 Create `client/src/lib/features/identity/identityApi.ts`:
+- [x] Task 9: Create client identity API (AC: #3, #4)
+  - [x] 9.1 Create `client/src/lib/features/identity/identityApi.ts`:
     - Follow existing `api.ts` patterns: wire types (snake_case) + public types (camelCase) + mapper functions
     - `RegisterRequestWire { did_key: string, username: string, avatar_color?: string }`
     - `RegisteredUserWire { id: string, did_key: string, username: string, avatar_color?: string, created_at: string }`
     - `RegisteredUser { id: string, didKey: string, username: string, avatarColor: string | null, createdAt: string }` (public type)
     - `register(didKey: string, username: string, avatarColor?: string): Promise<RegisteredUser>` — calls `apiFetch<RegisteredUserWire>('/api/v1/auth/register', { method: 'POST', body: ... })`, maps response
     - Uses existing `apiFetch` from `$lib/api.ts` and `ApiError` for error handling
-  - [ ] 9.2 Create `client/src/lib/features/identity/types.ts` — shared type definitions used by crypto, store, and API modules
+  - [x] 9.2 Create `client/src/lib/features/identity/types.ts` — shared type definitions used by crypto, store, and API modules
 
-- [ ] Task 10: Create LoginView component — "Pick a username" UI (AC: #1, #7)
-  - [ ] 10.1 Create `client/src/lib/features/identity/LoginView.svelte`:
+- [x] Task 10: Create LoginView component — "Pick a username" UI (AC: #1, #7)
+  - [x] 10.1 Create `client/src/lib/features/identity/LoginView.svelte`:
     - Header: "Pick a username" (large, centered, no mention of crypto/identity/keypair)
     - Username input: required, auto-focus, validate on blur (1-32 chars, `^[a-zA-Z0-9_-]+$`), inline error message
     - Avatar color picker: reuse the exact pattern from `SetupPage.svelte` (8 preset hex colors, radio group, keyboard navigation with ArrowLeft/Right/Up/Down/Home/End)
@@ -141,20 +141,20 @@ So that I can join a guild without a complex registration process.
     - Follow existing form patterns from SetupPage: single-column layout, labels above inputs, validate on blur, fire CTA
     - Use Svelte 5 runes (`$state`, `$derived`, `$effect`) — NOT legacy `createEventDispatcher` or `on:event` syntax
     - Use `{@render children()}` or callback props for parent communication — NOT `dispatch('complete', ...)`
-  - [ ] 10.2 No mention of "keypair", "cryptography", "Ed25519", "DID", or "identity" in any user-facing text. The UI says "Pick a username" and "Create" / "Join".
+  - [x] 10.2 No mention of "keypair", "cryptography", "Ed25519", "DID", or "identity" in any user-facing text. The UI says "Pick a username" and "Create" / "Join".
 
-- [ ] Task 11: Integrate identity check into App.svelte (AC: #4)
-  - [ ] 11.1 Update `App.svelte` state machine:
+- [x] Task 11: Integrate identity check into App.svelte (AC: #4)
+  - [x] 11.1 Update `App.svelte` state machine:
     - On mount: existing `getInstanceStatus()` call stays
     - After instance status loaded (initialized): call `identityState.initialize()` to check IndexedDB for stored identity
     - New state: `initialized && !identity` → show `<LoginView oncomplete={handleIdentityCreated} />`
     - Existing state: `initialized && identity` → show main layout (home + admin sidebar)
     - Loading states: show spinner while checking instance status AND identity
-  - [ ] 11.2 The SetupPage flow remains unchanged — it runs first (instance must be initialized before identity creation)
-  - [ ] 11.3 After identity creation, transition to main layout immediately (no page reload)
+  - [x] 11.2 The SetupPage flow remains unchanged — it runs first (instance must be initialized before identity creation)
+  - [x] 11.3 After identity creation, transition to main layout immediately (no page reload)
 
-- [ ] Task 12: Server integration tests (AC: #3, #5, #6, #7)
-  - [ ] 12.1 Add to `server/tests/server_binds_to_configured_port.rs` (or create `server/tests/test_auth.rs` if separation preferred):
+- [x] Task 12: Server integration tests (AC: #3, #5, #6, #7)
+  - [x] 12.1 Add to `server/tests/server_binds_to_configured_port.rs` (or create `server/tests/test_auth.rs` if separation preferred):
     - Test: POST register with valid data → 201, response has correct fields
     - Test: POST register with same DID → 409 "Identity already registered"
     - Test: POST register with same username different DID → 409 "Username already taken"
@@ -163,9 +163,9 @@ So that I can join a guild without a complex registration process.
     - Test: POST register before instance setup → should still work (registration is independent of admin setup)
     - All tests use SQLite in-memory (existing pattern)
 
-- [ ] Task 13: Verify lint + existing tests pass (all ACs)
-  - [ ] 13.1 `cargo fmt --check && cargo clippy -- -D warnings && cargo test`
-  - [ ] 13.2 `cd client && npx biome check . && npx svelte-check --tsconfig ./tsconfig.app.json`
+- [x] Task 13: Verify lint + existing tests pass (all ACs)
+  - [x] 13.1 `cargo fmt --check && cargo clippy -- -D warnings && cargo test`
+  - [x] 13.2 `cd client && npx biome check . && npx svelte-check --tsconfig ./tsconfig.app.json`
 
 ## Dev Notes
 
@@ -472,14 +472,77 @@ Expected commit for this story: `feat: add client-side keypair generation and id
 
 ### Agent Model Used
 
-Claude Opus 4.6
+GitHub Copilot CLI 0.0.414
 
 ### Debug Log References
 
+- `cd server && cargo test -q`
+- `cd server && cargo fmt`
+- `cd server && cargo fmt --check`
+- `cd server && cargo clippy -- -D warnings`
+- `cd client && npm install @noble/ed25519`
+- `cd client && npx biome check .`
+- `cd client && npx svelte-check --tsconfig ./tsconfig.app.json`
+
 ### Completion Notes List
 
+- Added a `users` table migration (`0003_create_users.sql`) with unique constraints and indexes for `did_key` and `username`.
+- Added server-side DID:key parsing + Ed25519 public key validation in `server/src/identity/`.
+- Implemented `POST /api/v1/auth/register` with validation (username, avatar color, DID), conflict handling (duplicate DID vs username), and unit tests.
+- Added server integration tests for registration (201/409/422 cases) using SQLite in-memory.
+- Added client identity feature modules (keygen + DID:key, AES-GCM key wrapping + IndexedDB persistence, identity API + store).
+- Added `LoginView` (“Pick a username”) and updated `App.svelte` to show it when instance is initialized but no identity is registered.
+- Post-implementation polish: added a `did_key` length cap (DoS guard), hid crypto-ish validation errors from the UI, and reduced integration test port flakiness.
+
 ### File List
+
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` (status updated)
+- `_bmad-output/implementation-artifacts/2-1-client-side-keypair-generation-and-identity-creation.md` (tasks/status/record updated)
+- `server/migrations/0003_create_users.sql` (new)
+- `server/Cargo.toml`
+- `server/Cargo.lock`
+- `server/src/lib.rs`
+- `server/src/handlers/mod.rs`
+- `server/src/handlers/auth.rs` (new)
+- `server/src/identity/mod.rs` (new)
+- `server/src/identity/did.rs` (new)
+- `server/src/identity/keypair.rs` (new)
+- `server/src/models/mod.rs` (new)
+- `server/src/models/user.rs` (new)
+- `server/tests/server_binds_to_configured_port.rs`
+- `client/package.json`
+- `client/package-lock.json`
+- `client/src/App.svelte`
+- `client/src/lib/features/identity/crypto.ts` (new)
+- `client/src/lib/features/identity/identityApi.ts` (new)
+- `client/src/lib/features/identity/identityStore.svelte.ts` (new)
+- `client/src/lib/features/identity/LoginView.svelte` (new)
+- `client/src/lib/features/identity/types.ts` (new)
+
+## Senior Developer Review (AI)
+
+**Outcome:** Approved (after fixes)
+
+### Findings Fixed
+ 
+- **MEDIUM:** UI could surface server conflict message "Identity already registered on this instance" (violates "no identity/crypto terms in UI" requirement). Fixed by mapping to user-friendly copy in `LoginView.svelte`.
+- **MEDIUM:** "Username already taken" was shown only in a generic form banner. Fixed to show inline under the Username field (matches AC #5 intent).
+- **LOW:** Server existence-check helpers used `Option<i64>` for `SELECT 1` scalar; switched to `Option<i32>` to match the SQL literal type and avoid backend-specific decode surprises.
+- **LOW:** SQLite auth queries used Postgres-style `$1` placeholders; switched to SQLite `?1` placeholders for clarity (no behavior change).
+- **MEDIUM:** LoginView could surface raw internal error strings (e.g. IndexedDB failures or "No stored identity..."), leaking forbidden terms in the UI. Fixed by mapping non-API errors to user-friendly copy in `LoginView.svelte`.
+- **LOW:** `base58btcEncode()` returned incorrect output for empty/all-zero byte arrays (extra leading `1`). Fixed with explicit early returns in `crypto.ts`.
+- **LOW:** Added a unit test for DID strings missing the multibase `z` prefix in `server/src/identity/did.rs`.
+
+### Verification
+
+- `cd client && npm run build && npm run lint && npm run check`
+- `cd server && cargo fmt --check && cargo clippy -- -D warnings && cargo test -q`
 
 ## Change Log
 
 - 2026-02-19: Story created from epics, architecture, UX design spec, PRD, and previous story intelligence (Story 1.8). Includes comprehensive technical research on Ed25519 browser support, @noble/ed25519 API, DID:key specification, and IndexedDB key storage patterns.
+- 2026-02-22: Implemented client-side keypair generation + encrypted local storage, server registration endpoint + validation, wired SPA login view + identity store, added unit/integration tests, and ran full lint/test suite; marked story ready for review.
+- 2026-02-22: Post-implementation polish: guard against pathological `did_key` inputs, improve user-facing error messages, and stabilize integration test port selection; re-ran full checks.
+- 2026-02-22: Senior dev review: fixed LoginView conflict copy + inline username-taken error, hardened server existence checks, re-ran full checks; marked story done.
+- 2026-02-22: Review follow-up: normalized SQLite placeholder syntax in auth queries; re-ran server checks.
+- 2026-02-22: Review follow-up: avoid surfacing internal error strings in LoginView, fix base58btc edge case, and add missing DID multibase test; re-ran full checks.

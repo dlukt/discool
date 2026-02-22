@@ -6,12 +6,14 @@ import { ApiError, getInstanceStatus, type InstanceStatus } from '$lib/api'
 import AdminPanel from '$lib/components/AdminPanel.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import SetupPage from '$lib/components/SetupPage.svelte'
+import { identityState } from '$lib/features/identity/identityStore.svelte'
+// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
+import LoginView from '$lib/features/identity/LoginView.svelte'
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let loading = true
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let errorMessage: string | null = null
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let status: InstanceStatus | null = null
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let view: 'home' | 'admin' = 'home'
@@ -21,9 +23,14 @@ async function loadStatus() {
   errorMessage = null
   try {
     status = await getInstanceStatus()
+    if (status.initialized) {
+      await identityState.initialize()
+    }
   } catch (err) {
     status = null
     if (err instanceof ApiError) {
+      errorMessage = err.message
+    } else if (err instanceof Error) {
       errorMessage = err.message
     } else {
       errorMessage = 'Could not connect to the server. Is it running?'
@@ -57,6 +64,8 @@ onMount(() => {
   </main>
 {:else if status && !status.initialized}
   <SetupPage on:complete={() => void loadStatus()} />
+{:else if status && status.initialized && !identityState.identity}
+  <LoginView oncomplete={() => (view = 'home')} />
 {:else}
   <main class="min-h-screen bg-background">
     <div class="flex min-h-screen">

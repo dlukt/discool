@@ -19,7 +19,9 @@ fn server_exe() -> &'static str {
         .expect("cargo should set CARGO_BIN_EXE_<bin-name> for integration tests")
 }
 
-static NEXT_PORT: AtomicU16 = AtomicU16::new(40_000);
+// Avoid the default Linux ephemeral port range (often starts at 32768), since it can cause
+// rare test flakes when an outgoing connection grabs the port between "pick" and "bind".
+static NEXT_PORT: AtomicU16 = AtomicU16::new(20_000);
 
 fn pick_free_port() -> u16 {
     loop {
@@ -224,6 +226,16 @@ async fn wait_for_http_status(child: &mut Child, addr: &str, path: &str, expecte
 
 fn write_server_config(path: &Path, host: &str, port: u16, metrics_enabled: Option<bool>) {
     write_server_config_with_db_url(path, host, port, metrics_enabled, "sqlite::memory:");
+}
+
+fn did_for_signing_key(secret: [u8; 32]) -> String {
+    let signing = ed25519_dalek::SigningKey::from_bytes(&secret);
+    let public = signing.verifying_key().to_bytes();
+
+    let mut bytes = Vec::with_capacity(34);
+    bytes.extend_from_slice(&[0xed, 0x01]);
+    bytes.extend_from_slice(&public);
+    format!("did:key:z{}", bs58::encode(bytes).into_string())
 }
 
 fn write_server_config_with_db_url(
@@ -795,5 +807,159 @@ async fn admin_backup_returns_200_and_sqlite_magic_bytes_after_instance_setup() 
     assert!(
         body.starts_with(b"SQLite format 3\0"),
         "expected sqlite magic bytes at start"
+    );
+}
+
+#[tokio::test]
+async fn auth_register_returns_201_with_expected_json() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let did_key = did_for_signing_key([1u8; 32]);
+    let req = json!({
+        "did_key": did_key,
+        "username": "liam",
+        "avatar_color": "#3B82F6"
+    })
+    .to_string();
+
+    let res = http_post(&addr, "/api/v1/auth/register", &req).await;
+    assert_eq!(response_status(&res), 201);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["data"]["username"], json!("liam"));
+    assert_eq!(value["data"]["avatar_color"], json!("#3B82F6"));
+    assert!(value["data"]["id"].as_str().is_some());
+    assert!(value["data"]["created_at"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn auth_register_returns_409_for_duplicate_did() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let did_key = did_for_signing_key([1u8; 32]);
+    let req1 = json!({ "did_key": did_key, "username": "liam" }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &req1).await;
+    assert_eq!(response_status(&res), 201);
+
+    let req2 =
+        json!({ "did_key": did_for_signing_key([1u8; 32]), "username": "other" }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &req2).await;
+    assert_eq!(response_status(&res), 409);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({ "error": { "code": "CONFLICT", "message": "Identity already registered on this instance", "details": {} } })
+    );
+}
+
+#[tokio::test]
+async fn auth_register_returns_409_for_duplicate_username() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let req1 = json!({
+        "did_key": did_for_signing_key([1u8; 32]),
+        "username": "liam"
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &req1).await;
+    assert_eq!(response_status(&res), 201);
+
+    let req2 = json!({
+        "did_key": did_for_signing_key([2u8; 32]),
+        "username": "liam"
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &req2).await;
+    assert_eq!(response_status(&res), 409);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({ "error": { "code": "CONFLICT", "message": "Username already taken", "details": {} } })
+    );
+}
+
+#[tokio::test]
+async fn auth_register_returns_422_for_invalid_did_format() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let req = json!({ "did_key": "nope", "username": "liam" }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &req).await;
+    assert_eq!(response_status(&res), 422);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({ "error": { "code": "VALIDATION_ERROR", "message": "Invalid DID format: must start with did:key:z6Mk", "details": {} } })
+    );
+}
+
+#[tokio::test]
+async fn auth_register_returns_422_for_empty_username() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let req = json!({
+        "did_key": did_for_signing_key([1u8; 32]),
+        "username": "   "
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &req).await;
+    assert_eq!(response_status(&res), 422);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({ "error": { "code": "VALIDATION_ERROR", "message": "username is required", "details": {} } })
     );
 }
