@@ -113,6 +113,24 @@ export class ApiError extends Error {
 
 type ApiSuccess<T> = { data: T }
 
+let sessionToken: string | null = null
+let unauthorizedHandler: (() => void) | null = null
+
+export function setSessionToken(token: string | null) {
+  sessionToken = token
+}
+
+export function setUnauthorizedHandler(handler: (() => void) | null) {
+  unauthorizedHandler = handler
+}
+
+function handleUnauthorized() {
+  // Only trigger auto-re-auth when we actually had a session token in play.
+  if (!sessionToken) return
+  sessionToken = null
+  unauthorizedHandler?.()
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
@@ -147,6 +165,9 @@ export async function apiFetch<T>(
   init: RequestInit = {},
 ): Promise<T> {
   const headers = new Headers(init.headers)
+  if (sessionToken && !headers.has('authorization')) {
+    headers.set('authorization', `Bearer ${sessionToken}`)
+  }
   if (typeof init.body === 'string' && !headers.has('content-type')) {
     headers.set('content-type', 'application/json')
   }
@@ -160,6 +181,9 @@ export async function apiFetch<T>(
   const payload = parseJson(text)
 
   if (res.ok) {
+    if (res.status === 204) {
+      return undefined as T
+    }
     if (isRecord(payload) && 'data' in payload) {
       return (payload as ApiSuccess<T>).data
     }
@@ -167,6 +191,9 @@ export async function apiFetch<T>(
   }
 
   const apiErr = apiErrorFromPayload(payload)
+  if (res.status === 401) {
+    handleUnauthorized()
+  }
   if (apiErr) throw apiErr
 
   throw new ApiError('HTTP_ERROR', res.statusText || `HTTP ${res.status}`, {
@@ -233,7 +260,11 @@ function sanitizeDownloadFilename(name: string): string {
 }
 
 export async function downloadBackup(): Promise<void> {
-  const res = await fetch('/api/v1/admin/backup', { method: 'POST' })
+  const init: RequestInit = { method: 'POST' }
+  if (sessionToken) {
+    init.headers = { authorization: `Bearer ${sessionToken}` }
+  }
+  const res = await fetch('/api/v1/admin/backup', init)
 
   if (!res.ok) {
     const text = await res.text()

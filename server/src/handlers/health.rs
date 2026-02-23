@@ -116,6 +116,7 @@ mod tests {
     use std::sync::Arc;
 
     use axum::{body::to_bytes, extract::State, response::IntoResponse};
+    use dashmap::DashMap;
 
     use super::*;
 
@@ -135,6 +136,7 @@ mod tests {
             config: Arc::new(cfg),
             pool,
             start_time: Instant::now(),
+            challenges: Arc::new(DashMap::new()),
         }
     }
 
@@ -153,6 +155,7 @@ mod tests {
             config: Arc::new(cfg),
             pool,
             start_time: Instant::now(),
+            challenges: Arc::new(DashMap::new()),
         }
     }
 

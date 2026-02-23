@@ -13,3 +13,9 @@ export type RegisteredUser = {
   avatarColor: string | null
   createdAt: string
 }
+
+export type AuthSession = {
+  token: string
+  expiresAt: string
+  user: RegisteredUser
+}

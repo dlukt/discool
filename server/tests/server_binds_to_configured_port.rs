@@ -125,6 +125,19 @@ async fn http_response(addr: &str, path: &str) -> String {
     String::from_utf8_lossy(&buf).to_string()
 }
 
+async fn http_response_with_bearer(addr: &str, path: &str, token: &str) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    String::from_utf8_lossy(&buf).to_string()
+}
+
 async fn http_post(addr: &str, path: &str, json_body: &str) -> String {
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
@@ -139,11 +152,29 @@ async fn http_post(addr: &str, path: &str, json_body: &str) -> String {
     String::from_utf8_lossy(&buf).to_string()
 }
 
-async fn http_post_bytes(addr: &str, path: &str, json_body: &str) -> Vec<u8> {
+async fn http_delete_with_bearer(addr: &str, path: &str, token: &str) -> String {
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
     let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
+        "DELETE {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    String::from_utf8_lossy(&buf).to_string()
+}
+
+async fn http_post_bytes_with_bearer(
+    addr: &str,
+    path: &str,
+    json_body: &str,
+    token: &str,
+) -> Vec<u8> {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
         json_body.as_bytes().len(),
     );
     stream.write_all(req.as_bytes()).await.unwrap();
@@ -200,6 +231,16 @@ fn response_header(res: &str, header_name: &str) -> Option<String> {
 
 fn response_body(res: &str) -> &str {
     res.split("\r\n\r\n").nth(1).unwrap_or("")
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 async fn wait_for_http_status(child: &mut Child, addr: &str, path: &str, expected: u16) {
@@ -664,7 +705,7 @@ async fn instance_setup_returns_422_for_missing_instance_name() {
 }
 
 #[tokio::test]
-async fn admin_health_returns_403_before_instance_setup() {
+async fn admin_health_returns_401_before_instance_setup() {
     use serde_json::json;
 
     let port = pick_free_port();
@@ -678,17 +719,18 @@ async fn admin_health_returns_403_before_instance_setup() {
     wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
 
     let res = http_response(&addr, "/api/v1/admin/health").await;
-    assert_eq!(response_status(&res), 403);
+    assert_eq!(response_status(&res), 401);
 
     let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
     assert_eq!(
         value,
-        json!({ "error": { "code": "FORBIDDEN", "message": "Instance is not initialized", "details": {} } })
+        json!({ "error": { "code": "UNAUTHORIZED", "message": "Missing Authorization header", "details": {} } })
     );
 }
 
 #[tokio::test]
 async fn admin_health_returns_200_after_instance_setup() {
+    use ed25519_dalek::Signer;
     use serde_json::json;
 
     let port = pick_free_port();
@@ -709,7 +751,31 @@ async fn admin_health_returns_200_after_instance_setup() {
     let res = http_post(&addr, "/api/v1/instance/setup", &setup).await;
     assert_eq!(response_status(&res), 200);
 
-    let res = http_response(&addr, "/api/v1/admin/health").await;
+    let did_key = did_for_signing_key([1u8; 32]);
+    let register = json!({ "did_key": did_key, "username": "tomas" }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &register).await;
+    assert_eq!(response_status(&res), 201);
+
+    let challenge_req = json!({ "did_key": did_key }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/challenge", &challenge_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let challenge = value["data"]["challenge"].as_str().unwrap();
+
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+    let sig = signing.sign(challenge.as_bytes()).to_bytes();
+    let verify_req = json!({
+        "did_key": did_key,
+        "challenge": challenge,
+        "signature": bytes_to_hex(&sig),
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/auth/verify", &verify_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let token = value["data"]["token"].as_str().unwrap();
+
+    let res = http_response_with_bearer(&addr, "/api/v1/admin/health", token).await;
     assert_eq!(response_status(&res), 200);
 
     let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
@@ -720,7 +786,73 @@ async fn admin_health_returns_200_after_instance_setup() {
 }
 
 #[tokio::test]
-async fn admin_backup_returns_403_before_instance_setup() {
+async fn admin_health_returns_403_for_non_admin_user() {
+    use ed25519_dalek::Signer;
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let setup = json!({
+        "admin_username": "tomas",
+        "instance_name": "My Instance"
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/instance/setup", &setup).await;
+    assert_eq!(response_status(&res), 200);
+
+    // Register admin user.
+    let admin_did_key = did_for_signing_key([1u8; 32]);
+    let register = json!({ "did_key": admin_did_key, "username": "tomas" }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &register).await;
+    assert_eq!(response_status(&res), 201);
+
+    // Register non-admin user (same instance).
+    let did_key = did_for_signing_key([2u8; 32]);
+    let register = json!({ "did_key": did_key, "username": "liam" }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &register).await;
+    assert_eq!(response_status(&res), 201);
+
+    // Authenticate non-admin user.
+    let challenge_req = json!({ "did_key": did_key }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/challenge", &challenge_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let challenge = value["data"]["challenge"].as_str().unwrap();
+
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]);
+    let sig = signing.sign(challenge.as_bytes()).to_bytes();
+    let verify_req = json!({
+        "did_key": did_key,
+        "challenge": challenge,
+        "signature": bytes_to_hex(&sig),
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/auth/verify", &verify_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let token = value["data"]["token"].as_str().unwrap();
+
+    // Non-admin should get 403 Forbidden.
+    let res = http_response_with_bearer(&addr, "/api/v1/admin/health", token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({ "error": { "code": "FORBIDDEN", "message": "Admin access required", "details": {} } })
+    );
+}
+
+#[tokio::test]
+async fn admin_backup_returns_401_when_missing_auth() {
     use serde_json::json;
 
     let port = pick_free_port();
@@ -742,17 +874,18 @@ async fn admin_backup_returns_403_before_instance_setup() {
     wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
 
     let res = http_post(&addr, "/api/v1/admin/backup", "").await;
-    assert_eq!(response_status(&res), 403);
+    assert_eq!(response_status(&res), 401);
 
     let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
     assert_eq!(
         value,
-        json!({ "error": { "code": "FORBIDDEN", "message": "Instance is not initialized", "details": {} } })
+        json!({ "error": { "code": "UNAUTHORIZED", "message": "Missing Authorization header", "details": {} } })
     );
 }
 
 #[tokio::test]
 async fn admin_backup_returns_200_and_sqlite_magic_bytes_after_instance_setup() {
+    use ed25519_dalek::Signer;
     use serde_json::json;
 
     let port = pick_free_port();
@@ -781,7 +914,31 @@ async fn admin_backup_returns_200_and_sqlite_magic_bytes_after_instance_setup() 
     let res = http_post(&addr, "/api/v1/instance/setup", &setup).await;
     assert_eq!(response_status(&res), 200);
 
-    let res = http_post_bytes(&addr, "/api/v1/admin/backup", "").await;
+    let did_key = did_for_signing_key([1u8; 32]);
+    let register = json!({ "did_key": did_key, "username": "tomas" }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &register).await;
+    assert_eq!(response_status(&res), 201);
+
+    let challenge_req = json!({ "did_key": did_key }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/challenge", &challenge_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let challenge = value["data"]["challenge"].as_str().unwrap().to_string();
+
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+    let sig = signing.sign(challenge.as_bytes()).to_bytes();
+    let verify_req = json!({
+        "did_key": did_key,
+        "challenge": challenge,
+        "signature": bytes_to_hex(&sig),
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/auth/verify", &verify_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let token = value["data"]["token"].as_str().unwrap();
+
+    let res = http_post_bytes_with_bearer(&addr, "/api/v1/admin/backup", "", token).await;
     let (header, body) = response_header_and_body_bytes(&res);
     assert_eq!(response_status(&header), 200);
 
@@ -962,4 +1119,336 @@ async fn auth_register_returns_422_for_empty_username() {
         value,
         json!({ "error": { "code": "VALIDATION_ERROR", "message": "username is required", "details": {} } })
     );
+}
+
+#[tokio::test]
+async fn auth_challenge_returns_200_for_registered_did() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let did_key = did_for_signing_key([1u8; 32]);
+    let register = json!({ "did_key": did_key, "username": "tomas" }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &register).await;
+    assert_eq!(response_status(&res), 201);
+
+    let challenge_req = json!({ "did_key": did_key }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/challenge", &challenge_req).await;
+    assert_eq!(response_status(&res), 200);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let challenge = value["data"]["challenge"].as_str().unwrap_or("");
+    assert_eq!(challenge.len(), 64);
+    assert!(challenge.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+#[tokio::test]
+async fn auth_challenge_returns_404_for_unregistered_did() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let challenge_req = json!({ "did_key": did_for_signing_key([1u8; 32]) }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/challenge", &challenge_req).await;
+    assert_eq!(response_status(&res), 404);
+}
+
+#[tokio::test]
+async fn auth_verify_returns_200_for_valid_signature() {
+    use ed25519_dalek::Signer;
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let did_key = did_for_signing_key([1u8; 32]);
+    let register = json!({ "did_key": did_key, "username": "tomas" }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &register).await;
+    assert_eq!(response_status(&res), 201);
+
+    let challenge_req = json!({ "did_key": did_key }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/challenge", &challenge_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let challenge = value["data"]["challenge"].as_str().unwrap();
+
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+    let sig = signing.sign(challenge.as_bytes()).to_bytes();
+
+    let verify_req = json!({
+        "did_key": did_key,
+        "challenge": challenge,
+        "signature": bytes_to_hex(&sig),
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/auth/verify", &verify_req).await;
+    assert_eq!(response_status(&res), 200);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert!(value["data"]["token"].as_str().is_some());
+    assert!(value["data"]["expires_at"].as_str().is_some());
+    assert!(value["data"]["user"]["id"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn auth_verify_returns_401_for_invalid_signature() {
+    use ed25519_dalek::Signer;
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let did_key = did_for_signing_key([1u8; 32]);
+    let register = json!({ "did_key": did_key, "username": "liam" }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &register).await;
+    assert_eq!(response_status(&res), 201);
+
+    let challenge_req = json!({ "did_key": did_key }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/challenge", &challenge_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let challenge = value["data"]["challenge"].as_str().unwrap();
+
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]); // wrong key
+    let sig = signing.sign(challenge.as_bytes()).to_bytes();
+
+    let verify_req = json!({
+        "did_key": did_key,
+        "challenge": challenge,
+        "signature": bytes_to_hex(&sig),
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/auth/verify", &verify_req).await;
+    assert_eq!(response_status(&res), 401);
+}
+
+#[tokio::test]
+async fn auth_verify_returns_401_for_expired_challenge() {
+    use ed25519_dalek::Signer;
+    use serde_json::json;
+    use std::io::Write;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+
+    // Override the challenge TTL to make expiry test fast.
+    let cfg_path = dir.join("config.toml");
+    write_server_config(&cfg_path, "127.0.0.1", port, None);
+    let mut f = fs::OpenOptions::new().append(true).open(&cfg_path).unwrap();
+    f.write_all(b"\n[auth]\nchallenge_ttl_seconds = 1\n")
+        .unwrap();
+
+    let mut server = spawn_server(&dir, |_| {});
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let did_key = did_for_signing_key([1u8; 32]);
+    let register = json!({ "did_key": did_key, "username": "liam" }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &register).await;
+    assert_eq!(response_status(&res), 201);
+
+    let challenge_req = json!({ "did_key": did_key }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/challenge", &challenge_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let challenge = value["data"]["challenge"].as_str().unwrap();
+
+    sleep(Duration::from_secs(2)).await;
+
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+    let sig = signing.sign(challenge.as_bytes()).to_bytes();
+
+    let verify_req = json!({
+        "did_key": did_key,
+        "challenge": challenge,
+        "signature": bytes_to_hex(&sig),
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/auth/verify", &verify_req).await;
+    assert_eq!(response_status(&res), 401);
+}
+
+#[tokio::test]
+async fn auth_verify_rejects_replay() {
+    use ed25519_dalek::Signer;
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let did_key = did_for_signing_key([1u8; 32]);
+    let register = json!({ "did_key": did_key, "username": "liam" }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &register).await;
+    assert_eq!(response_status(&res), 201);
+
+    let challenge_req = json!({ "did_key": did_key }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/challenge", &challenge_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let challenge = value["data"]["challenge"].as_str().unwrap();
+
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+    let sig = signing.sign(challenge.as_bytes()).to_bytes();
+    let verify_req = json!({
+        "did_key": did_key,
+        "challenge": challenge,
+        "signature": bytes_to_hex(&sig),
+    })
+    .to_string();
+
+    let res = http_post(&addr, "/api/v1/auth/verify", &verify_req).await;
+    assert_eq!(response_status(&res), 200);
+
+    let res = http_post(&addr, "/api/v1/auth/verify", &verify_req).await;
+    assert_eq!(response_status(&res), 401);
+}
+
+#[tokio::test]
+async fn auth_logout_invalidates_token_for_protected_routes() {
+    use ed25519_dalek::Signer;
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let setup = json!({
+        "admin_username": "tomas",
+        "instance_name": "My Instance"
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/instance/setup", &setup).await;
+    assert_eq!(response_status(&res), 200);
+
+    let did_key = did_for_signing_key([1u8; 32]);
+    let register = json!({ "did_key": did_key, "username": "tomas" }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &register).await;
+    assert_eq!(response_status(&res), 201);
+
+    let challenge_req = json!({ "did_key": did_key }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/challenge", &challenge_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let challenge = value["data"]["challenge"].as_str().unwrap();
+
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+    let sig = signing.sign(challenge.as_bytes()).to_bytes();
+    let verify_req = json!({
+        "did_key": did_key,
+        "challenge": challenge,
+        "signature": bytes_to_hex(&sig),
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/auth/verify", &verify_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let token = value["data"]["token"].as_str().unwrap();
+
+    let res = http_response_with_bearer(&addr, "/api/v1/admin/health", token).await;
+    assert_eq!(response_status(&res), 200);
+
+    let res = http_delete_with_bearer(&addr, "/api/v1/auth/logout", token).await;
+    assert_eq!(response_status(&res), 204);
+
+    let res = http_response_with_bearer(&addr, "/api/v1/admin/health", token).await;
+    assert_eq!(response_status(&res), 401);
+}
+
+#[tokio::test]
+async fn expired_session_returns_401() {
+    use ed25519_dalek::Signer;
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+
+    let mut server = spawn_server(&dir, |_| {});
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let setup = json!({
+        "admin_username": "tomas",
+        "instance_name": "My Instance"
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/instance/setup", &setup).await;
+    assert_eq!(response_status(&res), 200);
+
+    let did_key = did_for_signing_key([1u8; 32]);
+    let register = json!({ "did_key": did_key, "username": "tomas" }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/register", &register).await;
+    assert_eq!(response_status(&res), 201);
+
+    let challenge_req = json!({ "did_key": did_key }).to_string();
+    let res = http_post(&addr, "/api/v1/auth/challenge", &challenge_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let challenge = value["data"]["challenge"].as_str().unwrap();
+
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+    let sig = signing.sign(challenge.as_bytes()).to_bytes();
+    let verify_req = json!({
+        "did_key": did_key,
+        "challenge": challenge,
+        "signature": bytes_to_hex(&sig),
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/auth/verify", &verify_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let token = value["data"]["token"].as_str().unwrap();
+
+    let url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    sqlx::query("UPDATE sessions SET expires_at = ?1 WHERE token = ?2")
+        .bind("2000-01-01T00:00:00Z")
+        .bind(token)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drop(pool);
+
+    let res = http_response_with_bearer(&addr, "/api/v1/admin/health", token).await;
+    assert_eq!(response_status(&res), 401);
 }

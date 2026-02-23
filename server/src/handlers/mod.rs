@@ -7,7 +7,7 @@ use axum::{
     },
     middleware::{self, Next},
     response::Response,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use axum_prometheus::PrometheusMetricLayer;
 
@@ -26,6 +26,9 @@ pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/ping", get(ping))
         .route("/auth/register", post(auth::register))
+        .route("/auth/challenge", post(auth::challenge))
+        .route("/auth/verify", post(auth::verify))
+        .route("/auth/logout", delete(auth::logout))
         .route("/admin/health", get(admin::get_health))
         .route("/admin/backup", post(admin::create_backup))
         .route("/instance", get(instance::get_instance))

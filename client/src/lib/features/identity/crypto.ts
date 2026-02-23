@@ -155,6 +155,60 @@ export async function decryptSecretKey(): Promise<Uint8Array> {
   return new Uint8Array(decrypted)
 }
 
+function fromHexChar(code: number): number | null {
+  if (code >= 48 && code <= 57) return code - 48 // 0-9
+  if (code >= 97 && code <= 102) return code - 97 + 10 // a-f
+  if (code >= 65 && code <= 70) return code - 65 + 10 // A-F
+  return null
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const value = hex.trim()
+  if (!value || value.length % 2 !== 0) {
+    throw new Error('Invalid hex string')
+  }
+
+  const out = new Uint8Array(value.length / 2)
+  for (let i = 0; i < out.length; i++) {
+    const h1 = fromHexChar(value.charCodeAt(i * 2))
+    const h2 = fromHexChar(value.charCodeAt(i * 2 + 1))
+    if (h1 === null || h2 === null) {
+      throw new Error('Invalid hex string')
+    }
+    out[i] = (h1 << 4) | h2
+  }
+  return out
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  const alphabet = '0123456789abcdef'
+  let out = ''
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i]
+    out += alphabet[(b >> 4) & 0xf]
+    out += alphabet[b & 0xf]
+  }
+  return out
+}
+
+export async function signChallenge(challengeHex: string): Promise<string> {
+  const challenge = challengeHex.trim()
+  if (challenge.length !== 64) {
+    throw new Error('Invalid challenge')
+  }
+  // Validate that we were given a hex challenge without changing what we sign.
+  hexToBytes(challenge)
+
+  const secretKey = await decryptSecretKey()
+  try {
+    const message = new TextEncoder().encode(challenge)
+    const signature = await ed.signAsync(message, secretKey)
+    return bytesToHex(signature)
+  } finally {
+    secretKey.fill(0)
+  }
+}
+
 export async function clearStoredIdentity(): Promise<void> {
   const db = await openIdentityDb()
   try {

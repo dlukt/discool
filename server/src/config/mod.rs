@@ -1,7 +1,8 @@
 mod settings;
 
 pub use settings::{
-    BackupConfig, Config, DatabaseConfig, LogConfig, LogFormat, MetricsConfig, ServerConfig,
+    AuthConfig, BackupConfig, Config, DatabaseConfig, LogConfig, LogFormat, MetricsConfig,
+    ServerConfig,
 };
 
 pub fn load() -> Result<Config, config::ConfigError> {

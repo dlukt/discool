@@ -13,8 +13,9 @@ use uuid::Uuid;
 use crate::{
     AppError, AppState,
     db::DbPool,
-    identity::{did, keypair},
+    identity::{challenge, did, keypair},
     models::user::UserResponse,
+    services::auth_service,
 };
 
 const MAX_USERNAME_LEN: usize = 32;
@@ -25,6 +26,18 @@ pub struct RegisterRequest {
     pub did_key: Option<String>,
     pub username: Option<String>,
     pub avatar_color: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChallengeRequest {
+    pub did_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VerifyRequest {
+    pub did_key: Option<String>,
+    pub challenge: Option<String>,
+    pub signature: Option<String>,
 }
 
 fn is_hex_color(value: &str) -> bool {
@@ -45,6 +58,65 @@ fn is_valid_username(username: &str) -> bool {
     username
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn validate_did_key_for_auth(did_key: &str) -> Result<[u8; 32], AppError> {
+    let did_key = did_key.trim();
+    if did_key.is_empty() {
+        return Err(AppError::ValidationError("did_key is required".to_string()));
+    }
+    if did_key.len() > MAX_DID_KEY_LEN {
+        return Err(AppError::ValidationError("did_key is too long".to_string()));
+    }
+    if !did_key.starts_with("did:key:z6Mk") {
+        return Err(AppError::ValidationError(
+            "Invalid DID format: must start with did:key:z6Mk".to_string(),
+        ));
+    }
+
+    let public_key = did::parse_did_key(did_key)
+        .map_err(|_| AppError::ValidationError("Invalid DID format".to_string()))?;
+    keypair::validate_ed25519_public_key(&public_key)
+        .map_err(|_| AppError::ValidationError("Invalid Ed25519 public key".to_string()))?;
+
+    Ok(public_key)
+}
+
+fn api_error_response(status: StatusCode, code: &str, message: &str) -> Response {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
+    )
+        .into_response()
+}
+
+fn from_hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn decode_hex_64(value: &str) -> Result<[u8; 64], AppError> {
+    let value = value.trim();
+    if value.len() != 128 {
+        return Err(AppError::ValidationError(
+            "signature must be a 64-byte hex string".to_string(),
+        ));
+    }
+
+    let bytes = value.as_bytes();
+    let mut out = [0u8; 64];
+    for i in 0..64 {
+        let h1 = from_hex(bytes[i * 2])
+            .ok_or_else(|| AppError::ValidationError("signature must be hex".to_string()))?;
+        let h2 = from_hex(bytes[i * 2 + 1])
+            .ok_or_else(|| AppError::ValidationError("signature must be hex".to_string()))?;
+        out[i] = (h1 << 4) | h2;
+    }
+    Ok(out)
 }
 
 async fn user_exists_by_did(pool: &DbPool, did_key: &str) -> Result<bool, AppError> {
@@ -202,14 +274,172 @@ pub async fn register(
     Ok((StatusCode::CREATED, Json(json!({ "data": user }))).into_response())
 }
 
+pub async fn challenge(
+    State(state): State<AppState>,
+    payload: Result<Json<ChallengeRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+
+    let did_key = req.did_key.as_deref().unwrap_or("").trim();
+    let _ = validate_did_key_for_auth(did_key)?;
+
+    let user = auth_service::fetch_user_by_did(&state.pool, did_key).await;
+    if matches!(user, Err(AppError::NotFound)) {
+        return Ok(api_error_response(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "Identity not found on this instance",
+        ));
+    }
+    user?;
+
+    let ttl = state.config.auth.challenge_ttl_seconds;
+    let challenge = auth_service::create_challenge(state.challenges.as_ref(), did_key);
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "data": { "challenge": challenge, "expires_in": ttl } })),
+    )
+        .into_response())
+}
+
+pub async fn verify(
+    State(state): State<AppState>,
+    payload: Result<Json<VerifyRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+
+    let did_key = req.did_key.as_deref().unwrap_or("").trim();
+    let public_key = validate_did_key_for_auth(did_key)?;
+
+    let challenge_str = req.challenge.as_deref().unwrap_or("").trim();
+    if challenge_str.is_empty() {
+        return Err(AppError::ValidationError(
+            "challenge is required".to_string(),
+        ));
+    }
+    if challenge_str.len() != 64 || !challenge_str.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::ValidationError(
+            "challenge must be a 32-byte hex string".to_string(),
+        ));
+    }
+
+    let signature_hex = req.signature.as_deref().unwrap_or("").trim();
+    if signature_hex.is_empty() {
+        return Err(AppError::ValidationError(
+            "signature is required".to_string(),
+        ));
+    }
+
+    let user = match auth_service::fetch_user_by_did(&state.pool, did_key).await {
+        Ok(user) => user,
+        Err(AppError::NotFound) => {
+            return Ok(api_error_response(
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                "Identity not found on this instance",
+            ));
+        }
+        Err(err) => return Err(err),
+    };
+
+    let signature_bytes = decode_hex_64(signature_hex)?;
+
+    // Avoid doing expensive crypto verification if there is no pending challenge (or it already expired).
+    match auth_service::check_challenge(
+        state.challenges.as_ref(),
+        did_key,
+        challenge_str,
+        state.config.auth.challenge_ttl_seconds,
+    ) {
+        Ok(()) => {}
+        Err(
+            auth_service::AuthError::ChallengeNotFound | auth_service::AuthError::ChallengeExpired,
+        ) => {
+            return Err(AppError::Unauthorized(
+                "Challenge expired or not found".to_string(),
+            ));
+        }
+        Err(auth_service::AuthError::ChallengeMismatch) => {
+            return Err(AppError::Unauthorized("Challenge mismatch".to_string()));
+        }
+    }
+
+    match challenge::verify_signature(&public_key, challenge_str, &signature_bytes) {
+        Ok(()) => {}
+        Err(challenge::VerifyError::InvalidSignature) => {
+            return Err(AppError::Unauthorized("Invalid signature".to_string()));
+        }
+        Err(challenge::VerifyError::InvalidPublicKey) => {
+            return Err(AppError::ValidationError(
+                "Invalid Ed25519 public key".to_string(),
+            ));
+        }
+    }
+
+    match auth_service::validate_challenge(
+        state.challenges.as_ref(),
+        did_key,
+        challenge_str,
+        state.config.auth.challenge_ttl_seconds,
+    ) {
+        Ok(()) => {}
+        Err(
+            auth_service::AuthError::ChallengeNotFound | auth_service::AuthError::ChallengeExpired,
+        ) => {
+            return Err(AppError::Unauthorized(
+                "Challenge expired or not found".to_string(),
+            ));
+        }
+        Err(auth_service::AuthError::ChallengeMismatch) => {
+            return Err(AppError::Unauthorized("Challenge mismatch".to_string()));
+        }
+    }
+
+    let session =
+        auth_service::create_session(&state.pool, &user.id, state.config.auth.session_ttl_hours)
+            .await?;
+
+    let response = json!({
+        "token": session.token,
+        "expires_at": session.expires_at,
+        "user": UserResponse::from(user),
+    });
+
+    Ok((StatusCode::OK, Json(json!({ "data": response }))).into_response())
+}
+
+pub async fn logout(
+    State(state): State<AppState>,
+    user: crate::middleware::auth::AuthenticatedUser,
+) -> Result<Response, AppError> {
+    auth_service::delete_session_by_id(&state.pool, &user.session_id).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
     use std::time::Instant;
 
     use axum::{Json, body::to_bytes, extract::State, response::IntoResponse};
+    use dashmap::DashMap;
+    use ed25519_dalek::Signer;
 
     use super::*;
+
+    fn bytes_to_hex(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for &b in bytes {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        out
+    }
 
     async fn test_state() -> AppState {
         let mut cfg = crate::config::Config::default();
@@ -227,6 +457,7 @@ mod tests {
             config: Arc::new(cfg),
             pool,
             start_time: Instant::now(),
+            challenges: Arc::new(DashMap::new()),
         }
     }
 
@@ -470,5 +701,225 @@ mod tests {
             value,
             json!({ "error": { "code": "VALIDATION_ERROR", "message": "avatar_color must be a hex color like #3399ff", "details": {} } })
         );
+    }
+
+    #[tokio::test]
+    async fn challenge_then_verify_returns_session() {
+        let state = test_state().await;
+        let secret = [1u8; 32];
+        let did_key = did_for_signing_key(secret);
+
+        let _ = register(
+            State(state.clone()),
+            Ok(Json(RegisterRequest {
+                did_key: Some(did_key.clone()),
+                username: Some("liam".to_string()),
+                avatar_color: None,
+            })),
+        )
+        .await
+        .unwrap();
+
+        let res = challenge(
+            State(state.clone()),
+            Ok(Json(ChallengeRequest {
+                did_key: Some(did_key.clone()),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let value = json_value(res).await;
+        let challenge_hex = value["data"]["challenge"].as_str().unwrap().to_string();
+
+        let signing = ed25519_dalek::SigningKey::from_bytes(&secret);
+        let sig = signing.sign(challenge_hex.as_bytes()).to_bytes();
+        let signature = bytes_to_hex(&sig);
+
+        let res = verify(
+            State(state),
+            Ok(Json(VerifyRequest {
+                did_key: Some(did_key),
+                challenge: Some(challenge_hex),
+                signature: Some(signature),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let value = json_value(res).await;
+        assert!(value["data"]["token"].as_str().is_some());
+        assert!(value["data"]["expires_at"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn challenge_returns_404_for_unregistered_did() {
+        let state = test_state().await;
+        let did_key = did_for_signing_key([1u8; 32]);
+
+        let res = challenge(
+            State(state),
+            Ok(Json(ChallengeRequest {
+                did_key: Some(did_key),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn verify_returns_401_for_invalid_signature() {
+        let state = test_state().await;
+        let secret = [1u8; 32];
+        let did_key = did_for_signing_key(secret);
+
+        let _ = register(
+            State(state.clone()),
+            Ok(Json(RegisterRequest {
+                did_key: Some(did_key.clone()),
+                username: Some("liam".to_string()),
+                avatar_color: None,
+            })),
+        )
+        .await
+        .unwrap();
+
+        let res = challenge(
+            State(state.clone()),
+            Ok(Json(ChallengeRequest {
+                did_key: Some(did_key.clone()),
+            })),
+        )
+        .await
+        .unwrap();
+        let value = json_value(res).await;
+        let challenge_hex = value["data"]["challenge"].as_str().unwrap().to_string();
+
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]); // wrong key
+        let sig = signing.sign(challenge_hex.as_bytes()).to_bytes();
+
+        let err = verify(
+            State(state),
+            Ok(Json(VerifyRequest {
+                did_key: Some(did_key),
+                challenge: Some(challenge_hex),
+                signature: Some(bytes_to_hex(&sig)),
+            })),
+        )
+        .await
+        .unwrap_err();
+
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn verify_returns_401_for_expired_challenge() {
+        let state = test_state().await;
+        let secret = [1u8; 32];
+        let did_key = did_for_signing_key(secret);
+
+        let _ = register(
+            State(state.clone()),
+            Ok(Json(RegisterRequest {
+                did_key: Some(did_key.clone()),
+                username: Some("liam".to_string()),
+                avatar_color: None,
+            })),
+        )
+        .await
+        .unwrap();
+
+        let res = challenge(
+            State(state.clone()),
+            Ok(Json(ChallengeRequest {
+                did_key: Some(did_key.clone()),
+            })),
+        )
+        .await
+        .unwrap();
+        let value = json_value(res).await;
+        let challenge_hex = value["data"]["challenge"].as_str().unwrap().to_string();
+
+        // Force expiry.
+        if let Some(mut record) = state.challenges.get_mut(did_key.as_str()) {
+            record.created_at = Instant::now() - Duration::from_secs(301);
+        }
+
+        let signing = ed25519_dalek::SigningKey::from_bytes(&secret);
+        let sig = signing.sign(challenge_hex.as_bytes()).to_bytes();
+
+        let err = verify(
+            State(state),
+            Ok(Json(VerifyRequest {
+                did_key: Some(did_key),
+                challenge: Some(challenge_hex),
+                signature: Some(bytes_to_hex(&sig)),
+            })),
+        )
+        .await
+        .unwrap_err();
+
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_replay() {
+        let state = test_state().await;
+        let secret = [1u8; 32];
+        let did_key = did_for_signing_key(secret);
+
+        let _ = register(
+            State(state.clone()),
+            Ok(Json(RegisterRequest {
+                did_key: Some(did_key.clone()),
+                username: Some("liam".to_string()),
+                avatar_color: None,
+            })),
+        )
+        .await
+        .unwrap();
+
+        let res = challenge(
+            State(state.clone()),
+            Ok(Json(ChallengeRequest {
+                did_key: Some(did_key.clone()),
+            })),
+        )
+        .await
+        .unwrap();
+        let value = json_value(res).await;
+        let challenge_hex = value["data"]["challenge"].as_str().unwrap().to_string();
+
+        let signing = ed25519_dalek::SigningKey::from_bytes(&secret);
+        let sig = signing.sign(challenge_hex.as_bytes()).to_bytes();
+        let signature = bytes_to_hex(&sig);
+
+        let _ = verify(
+            State(state.clone()),
+            Ok(Json(VerifyRequest {
+                did_key: Some(did_key.clone()),
+                challenge: Some(challenge_hex.clone()),
+                signature: Some(signature.clone()),
+            })),
+        )
+        .await
+        .unwrap();
+
+        let err = verify(
+            State(state),
+            Ok(Json(VerifyRequest {
+                did_key: Some(did_key),
+                challenge: Some(challenge_hex),
+                signature: Some(signature),
+            })),
+        )
+        .await
+        .unwrap_err();
+
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 }

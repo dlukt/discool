@@ -12,6 +12,8 @@ pub struct Config {
     pub metrics: Option<MetricsConfig>,
     #[serde(default)]
     pub backup: Option<BackupConfig>,
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 impl Config {
@@ -70,6 +72,19 @@ impl Config {
             ));
         }
 
+        if self.auth.session_ttl_hours == 0 {
+            return Err(ConfigValidationError::new(
+                "auth.session_ttl_hours",
+                "must be >= 1",
+            ));
+        }
+        if self.auth.challenge_ttl_seconds == 0 {
+            return Err(ConfigValidationError::new(
+                "auth.challenge_ttl_seconds",
+                "must be >= 1",
+            ));
+        }
+
         if let Some(output_dir) = self
             .backup
             .as_ref()
@@ -119,6 +134,23 @@ pub struct BackupConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default = "default_session_ttl_hours")]
+    pub session_ttl_hours: u64,
+    #[serde(default = "default_challenge_ttl_seconds")]
+    pub challenge_ttl_seconds: u64,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            session_ttl_hours: default_session_ttl_hours(),
+            challenge_ttl_seconds: default_challenge_ttl_seconds(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub url: String, // Required — no default. Validation catches missing.
     #[serde(default = "default_max_connections")]
@@ -127,6 +159,14 @@ pub struct DatabaseConfig {
 
 fn default_max_connections() -> u32 {
     5
+}
+
+fn default_session_ttl_hours() -> u64 {
+    168
+}
+
+fn default_challenge_ttl_seconds() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Deserialize)]

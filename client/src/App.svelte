@@ -11,12 +11,24 @@ import { identityState } from '$lib/features/identity/identityStore.svelte'
 import LoginView from '$lib/features/identity/LoginView.svelte'
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
-let loading = true
+let loading = $state(true)
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
-let errorMessage: string | null = null
-let status: InstanceStatus | null = null
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
-let view: 'home' | 'admin' = 'home'
+let errorMessage = $state<string | null>(null)
+let status = $state<InstanceStatus | null>(null)
+let view = $state<'home' | 'admin'>('home')
+
+$effect(() => {
+  const adminUsername = status?.admin?.username
+  const currentUsername = identityState.session?.user.username
+  if (
+    view === 'admin' &&
+    adminUsername &&
+    currentUsername &&
+    adminUsername !== currentUsername
+  ) {
+    view = 'home'
+  }
+})
 
 async function loadStatus() {
   loading = true
@@ -56,7 +68,7 @@ onMount(() => {
       <button
         type="button"
         class="inline-flex w-full items-center justify-center rounded-md bg-fire px-4 py-2 text-sm font-medium text-fire-foreground transition-opacity hover:opacity-90"
-        on:click={() => void loadStatus()}
+        onclick={() => void loadStatus()}
       >
         Retry
       </button>
@@ -66,7 +78,29 @@ onMount(() => {
   <SetupPage on:complete={() => void loadStatus()} />
 {:else if status && status.initialized && !identityState.identity}
   <LoginView oncomplete={() => (view = 'home')} />
-{:else}
+{:else if status && status.initialized && identityState.identity && identityState.authenticating}
+  <main class="min-h-screen bg-background p-8">
+    <div class="mx-auto w-full max-w-md space-y-4 rounded-lg border border-border bg-card p-6">
+      <p class="text-center text-sm text-muted-foreground">Signing in...</p>
+      <div class="h-2 w-full animate-pulse rounded bg-muted"></div>
+      <div class="h-2 w-5/6 animate-pulse rounded bg-muted"></div>
+      <div class="h-2 w-2/3 animate-pulse rounded bg-muted"></div>
+    </div>
+  </main>
+{:else if status && status.initialized && identityState.identity && identityState.authError}
+  <main class="min-h-screen bg-background p-8">
+    <div class="mx-auto w-full max-w-md space-y-4 rounded-lg border border-border bg-card p-6">
+      <p class="text-sm text-destructive">{identityState.authError}</p>
+      <button
+        type="button"
+        class="inline-flex w-full items-center justify-center rounded-md bg-fire px-4 py-2 text-sm font-medium text-fire-foreground transition-opacity hover:opacity-90"
+        onclick={() => void identityState.authenticate()}
+      >
+        Try again
+      </button>
+    </div>
+  </main>
+{:else if status && status.initialized && identityState.session}
   <main class="min-h-screen bg-background">
     <div class="flex min-h-screen">
       <aside class="w-56 border-r border-border bg-sidebar p-4">
@@ -79,21 +113,23 @@ onMount(() => {
                 ? 'bg-sidebar-accent text-sidebar-accent-foreground'
                 : 'text-muted-foreground hover:bg-muted'
             }`}
-            on:click={() => (view = 'home')}
+            onclick={() => (view = 'home')}
           >
             Home
           </button>
-          <button
-            type="button"
-            class={`w-full rounded-md px-3 py-2 text-left text-sm transition-colors ${
-              view === 'admin'
-                ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                : 'text-muted-foreground hover:bg-muted'
-            }`}
-            on:click={() => (view = 'admin')}
-          >
-            Admin
-          </button>
+          {#if status.admin && status.admin.username === identityState.session.user.username}
+            <button
+              type="button"
+              class={`w-full rounded-md px-3 py-2 text-left text-sm transition-colors ${
+                view === 'admin'
+                  ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                  : 'text-muted-foreground hover:bg-muted'
+              }`}
+              onclick={() => (view = 'admin')}
+            >
+              Admin
+            </button>
+          {/if}
         </nav>
       </aside>
 
@@ -141,5 +177,9 @@ onMount(() => {
         {/if}
       </section>
     </div>
+  </main>
+{:else}
+  <main class="min-h-screen bg-background p-8">
+    <p class="text-center text-sm text-muted-foreground">Signing in...</p>
   </main>
 {/if}

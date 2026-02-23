@@ -71,3 +71,12 @@
 # ---------------------------------------------------------------------------
 # Optional directory to also save backups created via POST /api/v1/admin/backup.
 # output_dir = "/var/backups/discool"
+
+# ---------------------------------------------------------------------------
+# [auth]
+# ---------------------------------------------------------------------------
+# Session TTL in hours (default: 168 = 7 days)
+# session_ttl_hours = 168
+#
+# Challenge TTL in seconds (default: 300 = 5 minutes)
+# challenge_ttl_seconds = 300

@@ -1,3 +1,4 @@
+use dashmap::DashMap;
 use discool_server::{AppState, handlers};
 use tokio::net::TcpListener;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -73,6 +74,7 @@ async fn main() {
         config: config.clone(),
         pool: pool.clone(),
         start_time: std::time::Instant::now(),
+        challenges: std::sync::Arc::new(DashMap::new()),
     };
     let app = handlers::router(state.clone());
 

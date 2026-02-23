@@ -1,7 +1,12 @@
+use std::str::FromStr;
 use std::time::Duration;
 use std::{io, io::ErrorKind};
 
-use sqlx::{PgPool, SqlitePool, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
+use sqlx::{
+    PgPool, SqlitePool,
+    postgres::PgPoolOptions,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+};
 
 use crate::config::DatabaseConfig;
 
@@ -81,7 +86,7 @@ pub async fn init_pool(config: &DatabaseConfig) -> Result<DbPool, sqlx::Error> {
             .acquire_timeout(Duration::from_secs(15))
             .idle_timeout(idle_timeout)
             .max_lifetime(max_lifetime)
-            .connect(&config.url)
+            .connect_with(SqliteConnectOptions::from_str(&config.url)?.pragma("foreign_keys", "ON"))
             .await
             .map(DbPool::Sqlite),
     }

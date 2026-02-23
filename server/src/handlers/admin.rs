@@ -17,6 +17,7 @@ use std::io::ErrorKind;
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::middleware::auth::AuthenticatedUser;
 use crate::{AppError, AppState, db::DbPool};
 
 #[cfg(target_os = "linux")]
@@ -34,13 +35,42 @@ pub struct AdminHealth {
     pub websocket_connections: u32,
 }
 
-pub async fn get_health(State(state): State<AppState>) -> Result<Response, AppError> {
-    // TODO(Epic 2): Replace this pre-auth guard with real admin authentication/authorization.
+async fn require_admin(pool: &DbPool, username: &str) -> Result<(), AppError> {
+    let admin_username: Option<String> = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_scalar("SELECT username FROM admin_users LIMIT 1")
+                .fetch_optional(pool)
+                .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_scalar("SELECT username FROM admin_users LIMIT 1")
+                .fetch_optional(pool)
+                .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    match admin_username {
+        Some(admin) if admin == username => Ok(()),
+        Some(_) => Err(AppError::Forbidden("Admin access required".to_string())),
+        None => Err(AppError::Forbidden(
+            "Instance admin is not configured".to_string(),
+        )),
+    }
+}
+
+pub async fn get_health(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+) -> Result<Response, AppError> {
+    // TODO(Epic 2): Replace this pre-auth guard with real admin authorization.
     if !super::instance::is_initialized(&state.pool).await? {
         return Err(AppError::Forbidden(
             "Instance is not initialized".to_string(),
         ));
     }
+
+    require_admin(&state.pool, &user.username).await?;
 
     let cpu_usage_percent = cpu_usage_percent().await;
     let memory_rss_bytes = memory_rss_bytes().await;
@@ -71,13 +101,18 @@ pub async fn get_health(State(state): State<AppState>) -> Result<Response, AppEr
     Ok((StatusCode::OK, Json(json!({ "data": health }))).into_response())
 }
 
-pub async fn create_backup(State(state): State<AppState>) -> Result<Response, AppError> {
-    // TODO(Epic 2): Replace this pre-auth guard with real admin authentication/authorization.
+pub async fn create_backup(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+) -> Result<Response, AppError> {
+    // TODO(Epic 2): Replace this pre-auth guard with real admin authorization.
     if !super::instance::is_initialized(&state.pool).await? {
         return Err(AppError::Forbidden(
             "Instance is not initialized".to_string(),
         ));
     }
+
+    require_admin(&state.pool, &user.username).await?;
 
     let db = state
         .config
@@ -487,8 +522,18 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use axum::{body::to_bytes, extract::State, response::IntoResponse};
+    use dashmap::DashMap;
 
     use super::*;
+
+    fn test_user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_string(),
+            session_id: "session-1".to_string(),
+            username: "tomas".to_string(),
+            did_key: "did:key:z6Mk-test".to_string(),
+        }
+    }
 
     async fn test_state() -> AppState {
         let mut cfg = crate::config::Config::default();
@@ -506,6 +551,7 @@ mod tests {
             config: Arc::new(cfg),
             pool,
             start_time: Instant::now() - Duration::from_secs(5),
+            challenges: Arc::new(DashMap::new()),
         }
     }
 
@@ -533,6 +579,7 @@ mod tests {
                 config: Arc::new(cfg),
                 pool,
                 start_time: Instant::now() - Duration::from_secs(5),
+                challenges: Arc::new(DashMap::new()),
             },
             path,
         )
@@ -546,7 +593,7 @@ mod tests {
     #[tokio::test]
     async fn create_backup_returns_403_when_instance_is_not_initialized() {
         let state = test_state().await;
-        let err = create_backup(State(state)).await.unwrap_err();
+        let err = create_backup(State(state), test_user()).await.unwrap_err();
 
         let res = err.into_response();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
@@ -594,7 +641,7 @@ mod tests {
             }
         }
 
-        let res = create_backup(State(state)).await.unwrap();
+        let res = create_backup(State(state), test_user()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
         let content_type = res
@@ -687,10 +734,22 @@ mod tests {
                 .execute(pool)
                 .await
                 .unwrap();
+                sqlx::query(
+                    "INSERT INTO admin_users (id, username, avatar_color)\nVALUES ('admin-1', 'tomas', NULL)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
             }
             DbPool::Sqlite(pool) => {
                 sqlx::query(
                     "INSERT INTO instance_settings (key, value)\nVALUES ('initialized_at', CURRENT_TIMESTAMP)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "INSERT INTO admin_users (id, username, avatar_color)\nVALUES ('admin-1', 'tomas', NULL)",
                 )
                 .execute(pool)
                 .await
@@ -711,7 +770,7 @@ mod tests {
         });
         state.config = Arc::new(cfg);
 
-        let res = create_backup(State(state)).await.unwrap();
+        let res = create_backup(State(state), test_user()).await.unwrap();
         let content_disposition = res
             .headers()
             .get(CONTENT_DISPOSITION)
@@ -739,7 +798,7 @@ mod tests {
     #[tokio::test]
     async fn get_health_returns_403_when_instance_is_not_initialized() {
         let state = test_state().await;
-        let err = get_health(State(state)).await.unwrap_err();
+        let err = get_health(State(state), test_user()).await.unwrap_err();
 
         let res = err.into_response();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
@@ -762,6 +821,12 @@ mod tests {
                 .execute(pool)
                 .await
                 .unwrap();
+                sqlx::query(
+                    "INSERT INTO admin_users (id, username, avatar_color)\nVALUES ('admin-1', 'tomas', NULL)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
             }
             DbPool::Sqlite(pool) => {
                 sqlx::query(
@@ -770,10 +835,16 @@ mod tests {
                 .execute(pool)
                 .await
                 .unwrap();
+                sqlx::query(
+                    "INSERT INTO admin_users (id, username, avatar_color)\nVALUES ('admin-1', 'tomas', NULL)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
             }
         }
 
-        let res = get_health(State(state)).await.unwrap();
+        let res = get_health(State(state), test_user()).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
         let value = json_value(res).await;

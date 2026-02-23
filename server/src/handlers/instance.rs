@@ -348,6 +348,7 @@ mod tests {
     use std::time::Instant;
 
     use axum::{Json, body::to_bytes, extract::State, response::IntoResponse};
+    use dashmap::DashMap;
 
     use super::*;
 
@@ -367,6 +368,7 @@ mod tests {
             config: Arc::new(cfg),
             pool,
             start_time: Instant::now(),
+            challenges: Arc::new(DashMap::new()),
         }
     }
 
