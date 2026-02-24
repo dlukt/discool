@@ -57,7 +57,7 @@ development_status:
   2-1-client-side-keypair-generation-and-identity-creation: done
   2-2-challenge-response-authentication-and-session-management: done
   2-3-identity-persistence-and-auto-login: in-progress
-  2-8-vitest-setup-and-client-test-baseline: ready-for-dev
+  2-8-vitest-setup-and-client-test-baseline: done
   2-4-display-name-and-avatar-management: backlog
   2-5-cross-instance-identity-verification: backlog
   2-6-optional-email-association: backlog

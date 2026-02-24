@@ -43,15 +43,20 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
 
       - name: npm ci
         run: cd client && npm ci
 
-      - name: biome check
-        run: cd client && npx biome check .
+      - name: npm run lint
+        run: cd client && npm run lint
 
-      - name: svelte-check
-        run: cd client && npx svelte-check --tsconfig ./tsconfig.app.json
+      - name: npm run check
+        run: cd client && npm run check
+
+      - name: npm run test
+        run: cd client && npm run test
 
       - name: npm run build
         run: cd client && npm run build
