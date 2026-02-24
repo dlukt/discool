@@ -265,7 +265,7 @@ For unit testing, reuse the `test_state()` pattern from `health.rs` — create a
 For integration tests, extend the existing test helpers. The setup flow is already tested — just add the admin health check after setup.
 
 **Client tests:**
-- Client component tests were deferred because Vitest + @testing-library/svelte were not yet set up; treat this as test debt to be addressed in Story 2.8.
+- Covered by `client/src/lib/components/AdminPanel.test.ts` (Vitest + @testing-library/svelte).
 
 **Linting:** `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `npx biome check .`, `npx svelte-check` — all must pass.
 
@@ -382,6 +382,7 @@ GitHub Copilot CLI 0.0.411
 - `server/tests/server_binds_to_configured_port.rs`
 - `client/src/lib/api.ts`
 - `client/src/lib/components/AdminPanel.svelte` (new)
+- `client/src/lib/components/AdminPanel.test.ts` (component tests for load/retry/backup states)
 - `client/src/App.svelte`
 
 ## Change Log

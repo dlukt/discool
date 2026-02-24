@@ -265,6 +265,9 @@ export async function downloadBackup(): Promise<void> {
     init.headers = { authorization: `Bearer ${sessionToken}` }
   }
   const res = await fetch('/api/v1/admin/backup', init)
+  if (res.status === 401) {
+    handleUnauthorized()
+  }
 
   if (!res.ok) {
     const text = await res.text()

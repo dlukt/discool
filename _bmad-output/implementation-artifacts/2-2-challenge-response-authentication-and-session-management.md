@@ -533,8 +533,7 @@ Continue using Svelte 5 runes as established in Story 2.1:
 - Logout invalidates only the specific token, not other sessions
 
 **Client tests** (if Vitest is configured -- optional for this story):
-- `crypto.ts` -- `signChallenge()` produces valid hex signature, `hexToBytes/bytesToHex` round-trip
-- `identityApi.ts` -- wire type mapping correctness (mock apiFetch)
+- Covered by `client/src/lib/features/identity/crypto.test.ts` and `client/src/lib/features/identity/identityApi.test.ts`.
 
 **Linting:** `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `npx biome check .`, `npx svelte-check --tsconfig ./tsconfig.app.json`
 
@@ -698,7 +697,9 @@ GitHub Copilot CLI 0.0.414
 - `client/src/App.svelte`
 - `client/src/lib/api.ts`
 - `client/src/lib/features/identity/crypto.ts`
+- `client/src/lib/features/identity/crypto.test.ts`
 - `client/src/lib/features/identity/identityApi.ts`
+- `client/src/lib/features/identity/identityApi.test.ts`
 - `client/src/lib/features/identity/identityStore.svelte.ts`
 - `client/src/lib/features/identity/types.ts`
 - `client/package-lock.json`

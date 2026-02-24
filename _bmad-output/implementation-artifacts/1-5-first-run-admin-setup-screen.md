@@ -319,7 +319,7 @@ For unit testing, create a test helper that builds an `AppState` with a real `sq
 For integration tests, extend the existing `http_response()` helper to support POST requests with JSON body. Add a `http_post()` helper function.
 
 **Client tests:**
-- Svelte component tests were deferred because the testing infrastructure (Vitest + @testing-library/svelte) was not yet set up. This created test debt; pay it down in Story 2.8 (Vitest Setup and Client Test Baseline) before taking on more client UI work.
+- Covered by `client/src/lib/components/SetupPage.test.ts` (Vitest + @testing-library/svelte).
 
 **Linting:** `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `npx biome check .`, `npx svelte-check` — all must pass.
 
@@ -431,6 +431,7 @@ GitHub Copilot CLI
 - `server/tests/server_binds_to_configured_port.rs` (added instance integration tests + POST helper)
 - `client/src/lib/api.ts` (new typed API client)
 - `client/src/lib/components/SetupPage.svelte` (new setup screen)
+- `client/src/lib/components/SetupPage.test.ts` (component tests for setup validation + submit flow)
 - `client/src/App.svelte` (conditional setup vs normal view)
 
 ## Senior Developer Review (AI)

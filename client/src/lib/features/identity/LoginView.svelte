@@ -37,7 +37,8 @@ let submitting = $state(false)
 let serverError = $state<string | null>(null)
 let usernameError = $state<string | null>(null)
 
-let avatarButtons: Array<HTMLButtonElement | null> = []
+// Avoid `binding_property_non_reactive` warnings for `bind:this={avatarButtons[i]}`.
+let avatarButtons: Array<HTMLButtonElement | null> = $state([])
 
 let usernameTrimmed = $derived(username.trim())
 let usernameValidation = $derived(validateUsername(usernameTrimmed))

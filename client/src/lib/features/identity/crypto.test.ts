@@ -1,9 +1,12 @@
+import * as ed from '@noble/ed25519'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import {
   base58btcEncode,
   didKeyFromPublicKey,
+  encryptAndStoreKey,
   loadStoredIdentity,
+  signChallenge,
 } from './crypto'
 
 type FakeOpenRequest = {
@@ -202,5 +205,65 @@ describe('loadStoredIdentity', () => {
       avatarColor: '#3b82f6',
       registeredAt: '2026-02-24T00:00:00.000Z',
     })
+  })
+})
+
+function hexToBytes(hex: string): Uint8Array {
+  const value = hex.trim()
+  if (!value || value.length % 2 !== 0) throw new Error('invalid hex')
+  const out = new Uint8Array(value.length / 2)
+  for (let i = 0; i < out.length; i++) {
+    const pair = value.slice(i * 2, i * 2 + 2)
+    const byte = Number.parseInt(pair, 16)
+    if (Number.isNaN(byte)) throw new Error('invalid hex')
+    out[i] = byte
+  }
+  return out
+}
+
+describe('signChallenge', () => {
+  let store: Map<string, unknown>
+  let restore: () => void
+
+  beforeEach(() => {
+    store = new Map()
+    restore = installFakeIndexedDb(store)
+  })
+
+  afterEach(() => {
+    restore()
+  })
+
+  it('returns a valid hex signature for a stored secret key', async () => {
+    const { secretKey, publicKey } = await ed.keygenAsync()
+    const secretKeyCopy = new Uint8Array(secretKey)
+
+    await encryptAndStoreKey(
+      secretKey,
+      publicKey,
+      'did:key:z6Mk-test',
+      'alice',
+      null,
+    )
+
+    const challenge = 'a1'.repeat(32)
+    const signatureHex = await signChallenge(challenge)
+    expect(signatureHex).toMatch(/^[0-9a-f]{128}$/)
+
+    const ok = await ed.verifyAsync(
+      hexToBytes(signatureHex),
+      new TextEncoder().encode(challenge),
+      publicKey,
+    )
+    expect(ok).toBe(true)
+
+    // ensure the original secret key passed to encryptAndStoreKey was wiped
+    expect(Array.from(secretKey)).toEqual(Array(32).fill(0))
+    expect(Array.from(secretKeyCopy)).not.toEqual(Array(32).fill(0))
+  })
+
+  it('rejects invalid challenge inputs', async () => {
+    await expect(signChallenge('abc')).rejects.toThrow('Invalid challenge')
+    await expect(signChallenge('g'.repeat(64))).rejects.toThrow('Invalid hex')
   })
 })

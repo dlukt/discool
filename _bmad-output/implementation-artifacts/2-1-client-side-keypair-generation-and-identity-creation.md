@@ -378,8 +378,7 @@ The `LoginView` component communicates with `App.svelte` via a callback prop (`o
 - Verify existing tests still pass (health, instance setup, admin health, backup)
 
 **Client tests** (if Vitest is configured — optional for this story):
-- `crypto.ts` — `didKeyFromPublicKey()` produces `did:key:z6Mk...` format
-- `base58btcEncode()` encodes correctly against known test vectors
+- Covered by `client/src/lib/features/identity/crypto.test.ts` and `client/src/lib/features/identity/LoginView.test.ts`.
 
 **Linting:** `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `npx biome check .`, `npx svelte-check --tsconfig ./tsconfig.app.json`
 
@@ -514,9 +513,11 @@ GitHub Copilot CLI 0.0.414
 - `client/package-lock.json`
 - `client/src/App.svelte`
 - `client/src/lib/features/identity/crypto.ts` (new)
+- `client/src/lib/features/identity/crypto.test.ts`
 - `client/src/lib/features/identity/identityApi.ts` (new)
 - `client/src/lib/features/identity/identityStore.svelte.ts` (new)
 - `client/src/lib/features/identity/LoginView.svelte` (new)
+- `client/src/lib/features/identity/LoginView.test.ts`
 - `client/src/lib/features/identity/types.ts` (new)
 
 ## Senior Developer Review (AI)

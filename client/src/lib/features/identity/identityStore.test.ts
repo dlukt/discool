@@ -178,6 +178,36 @@ describe('identityStore session persistence', () => {
     expect(identityState.authError).toBe('Signed out in another tab.')
   })
 
+  it('StorageEvent login restores session from localStorage', async () => {
+    vi.mocked(loadStoredIdentity).mockResolvedValue({ status: 'none' })
+    await identityState.initialize()
+
+    localStorage.setItem(
+      'discool-session',
+      JSON.stringify({
+        token: 'token-6',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        user: {
+          id: 'user-6',
+          didKey: 'did:key:z6Mk-test',
+          username: 'alice',
+          avatarColor: null,
+          createdAt: '2026-02-24T00:00:00.000Z',
+        },
+      }),
+    )
+
+    window.dispatchEvent(
+      new StorageEvent('storage', {
+        key: 'discool-session',
+        newValue: localStorage.getItem('discool-session'),
+      }),
+    )
+
+    await waitFor(() => expect(identityState.session?.token).toBe('token-6'))
+    expect(requestChallenge).not.toHaveBeenCalled()
+  })
+
   it('logout clears localStorage and calls server logout', async () => {
     localStorage.setItem(
       'discool-session',

@@ -242,7 +242,7 @@ For unit testing, reuse the `test_state()` pattern from the health tests — cre
 For integration tests, extend the existing test helpers. Use the `http_post` helper (with empty body) and check the response.
 
 **Client tests:**
-- Client component tests were deferred because Vitest + @testing-library/svelte were not yet set up; treat this as test debt to be addressed in Story 2.8.
+- Covered by `client/src/lib/components/AdminPanel.test.ts` (backup UI) and `client/src/lib/api.test.ts` (download helper).
 
 **Linting:** `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `npx biome check .`, `npx svelte-check` — all must pass.
 
@@ -356,7 +356,9 @@ GitHub Copilot CLI
 - server/src/handlers/mod.rs
  - server/tests/server_binds_to_configured_port.rs
  - client/src/lib/api.ts
+ - client/src/lib/api.test.ts
  - client/src/lib/components/AdminPanel.svelte
+ - client/src/lib/components/AdminPanel.test.ts
  - client/src/lib/components/SetupPage.svelte
  - _bmad-output/implementation-artifacts/sprint-status.yaml
  - _bmad-output/implementation-artifacts/1-7-data-export-and-backup.md
