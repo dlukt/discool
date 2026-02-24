@@ -9,6 +9,14 @@ import SetupPage from '$lib/components/SetupPage.svelte'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import LoginView from '$lib/features/identity/LoginView.svelte'
+import {
+  getLastLocation,
+  saveLastLocation,
+} from '$lib/features/identity/navigationState'
+// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
+import RecoveryPrompt from '$lib/features/identity/RecoveryPrompt.svelte'
+// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
+import ReRegisterPrompt from '$lib/features/identity/ReRegisterPrompt.svelte'
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let loading = $state(true)
@@ -16,6 +24,18 @@ let loading = $state(true)
 let errorMessage = $state<string | null>(null)
 let status = $state<InstanceStatus | null>(null)
 let view = $state<'home' | 'admin'>('home')
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let reRegistering = $state(false)
+
+let currentPath = $derived(
+  typeof window !== 'undefined'
+    ? window.location.pathname
+    : view === 'admin'
+      ? '/admin'
+      : '/',
+)
+// biome-ignore lint/correctness/noUnusedVariables: Reserved for Epic 4 router integration.
+let lastLocation = $state<string | null>(null)
 
 $effect(() => {
   const adminUsername = status?.admin?.username
@@ -28,6 +48,37 @@ $effect(() => {
   ) {
     view = 'home'
   }
+})
+
+$effect(() => {
+  if (!identityState.session) return
+  if (
+    currentPath === '/' ||
+    currentPath.startsWith('/admin') ||
+    currentPath.startsWith('/settings')
+  )
+    return
+  saveLastLocation(currentPath)
+})
+
+$effect(() => {
+  if (!identityState.session) {
+    lastLocation = null
+    return
+  }
+
+  const stored = getLastLocation()
+  if (
+    !stored ||
+    stored === '/' ||
+    stored.startsWith('/admin') ||
+    stored.startsWith('/settings')
+  ) {
+    lastLocation = null
+    return
+  }
+
+  lastLocation = stored
 })
 
 async function loadStatus() {
@@ -76,30 +127,6 @@ onMount(() => {
   </main>
 {:else if status && !status.initialized}
   <SetupPage on:complete={() => void loadStatus()} />
-{:else if status && status.initialized && !identityState.identity}
-  <LoginView oncomplete={() => (view = 'home')} />
-{:else if status && status.initialized && identityState.identity && identityState.authenticating}
-  <main class="min-h-screen bg-background p-8">
-    <div class="mx-auto w-full max-w-md space-y-4 rounded-lg border border-border bg-card p-6">
-      <p class="text-center text-sm text-muted-foreground">Signing in...</p>
-      <div class="h-2 w-full animate-pulse rounded bg-muted"></div>
-      <div class="h-2 w-5/6 animate-pulse rounded bg-muted"></div>
-      <div class="h-2 w-2/3 animate-pulse rounded bg-muted"></div>
-    </div>
-  </main>
-{:else if status && status.initialized && identityState.identity && identityState.authError}
-  <main class="min-h-screen bg-background p-8">
-    <div class="mx-auto w-full max-w-md space-y-4 rounded-lg border border-border bg-card p-6">
-      <p class="text-sm text-destructive">{identityState.authError}</p>
-      <button
-        type="button"
-        class="inline-flex w-full items-center justify-center rounded-md bg-fire px-4 py-2 text-sm font-medium text-fire-foreground transition-opacity hover:opacity-90"
-        onclick={() => void identityState.authenticate()}
-      >
-        Try again
-      </button>
-    </div>
-  </main>
 {:else if status && status.initialized && identityState.session}
   <main class="min-h-screen bg-background">
     <div class="flex min-h-screen">
@@ -131,15 +158,23 @@ onMount(() => {
             </button>
           {/if}
         </nav>
+
+        <div class="mt-6 border-t border-border pt-4">
+          <button
+            type="button"
+            class="inline-flex w-full items-center justify-center rounded-md bg-destructive px-3 py-2 text-sm font-medium text-destructive-foreground transition-opacity hover:opacity-90"
+            onclick={() => void identityState.logout()}
+          >
+            Log out
+          </button>
+        </div>
       </aside>
 
       <section class="flex-1 p-8">
         {#if view === 'admin'}
           <AdminPanel />
         {:else}
-          <div
-            class="mx-auto flex w-full max-w-xl flex-col gap-6 rounded-lg border border-border bg-card p-8"
-          >
+          <div class="mx-auto flex w-full max-w-xl flex-col gap-6 rounded-lg border border-border bg-card p-8">
             <header class="space-y-2">
               <h1 class="text-4xl font-semibold tracking-tight">Discool</h1>
               <p class="text-sm text-muted-foreground">
@@ -176,6 +211,45 @@ onMount(() => {
           </div>
         {/if}
       </section>
+    </div>
+  </main>
+{:else if status && status.initialized && identityState.identityCorrupted}
+  <RecoveryPrompt onstartfresh={() => identityState.clear()} />
+{:else if status && status.initialized && identityState.identityNotRegistered && !reRegistering}
+  <ReRegisterPrompt
+    onusedifferentname={() => {
+      identityState.identityNotRegistered = false
+      reRegistering = true
+    }}
+  />
+{:else if status && status.initialized && (!identityState.identity || reRegistering)}
+  <LoginView
+    mode={reRegistering ? 'reregister' : 'create'}
+    oncomplete={() => {
+      reRegistering = false
+      view = 'home'
+    }}
+  />
+{:else if status && status.initialized && identityState.identity && identityState.authenticating}
+  <main class="min-h-screen bg-background p-8">
+    <div class="mx-auto w-full max-w-md space-y-4 rounded-lg border border-border bg-card p-6">
+      <p class="text-center text-sm text-muted-foreground">Signing in...</p>
+      <div class="h-2 w-full animate-pulse rounded bg-muted"></div>
+      <div class="h-2 w-5/6 animate-pulse rounded bg-muted"></div>
+      <div class="h-2 w-2/3 animate-pulse rounded bg-muted"></div>
+    </div>
+  </main>
+{:else if status && status.initialized && identityState.identity && identityState.authError}
+  <main class="min-h-screen bg-background p-8">
+    <div class="mx-auto w-full max-w-md space-y-4 rounded-lg border border-border bg-card p-6">
+      <p class="text-sm text-destructive">{identityState.authError}</p>
+      <button
+        type="button"
+        class="inline-flex w-full items-center justify-center rounded-md bg-fire px-4 py-2 text-sm font-medium text-fire-foreground transition-opacity hover:opacity-90"
+        onclick={() => void identityState.authenticate()}
+      >
+        {identityState.authError.startsWith('Signed out') ? 'Sign in' : 'Try again'}
+      </button>
     </div>
   </main>
 {:else}

@@ -2,6 +2,11 @@ import * as ed from '@noble/ed25519'
 
 import type { StoredIdentity } from './types'
 
+export type LoadStoredIdentityResult =
+  | { status: 'none' }
+  | { status: 'corrupted' }
+  | { status: 'found'; identity: StoredIdentity }
+
 type IdentityRecord = {
   wrappingKey: CryptoKey
   encryptedSecretKey: ArrayBuffer
@@ -17,6 +22,18 @@ const IDENTITY_DB_NAME = 'discool-identity'
 const IDENTITY_DB_VERSION = 1
 const IDENTITY_STORE = 'keys'
 const IDENTITY_KEY = 'identity'
+
+function isCryptoKeyLike(value: unknown): value is CryptoKey {
+  if (!value || typeof value !== 'object') return false
+  const key = value as CryptoKey
+  const algo = key.algorithm as { name?: unknown } | undefined
+  return (
+    typeof key.type === 'string' &&
+    typeof key.extractable === 'boolean' &&
+    Array.isArray(key.usages) &&
+    typeof algo?.name === 'string'
+  )
+}
 
 export async function generateIdentity(): Promise<{
   secretKey: Uint8Array
@@ -106,6 +123,7 @@ export async function encryptAndStoreKey(
 
 export async function finalizeIdentityRegistration(
   registeredAt: string,
+  profile?: { username?: string; avatarColor?: string | null },
 ): Promise<StoredIdentity> {
   const record = await getIdentityRecord()
   if (!record) {
@@ -114,6 +132,8 @@ export async function finalizeIdentityRegistration(
 
   const next: IdentityRecord = {
     ...record,
+    username: profile?.username ?? record.username,
+    avatarColor: profile?.avatarColor ?? record.avatarColor,
     registeredAt,
   }
   await putIdentityRecord(next)
@@ -127,16 +147,65 @@ export async function finalizeIdentityRegistration(
   }
 }
 
-export async function loadStoredIdentity(): Promise<StoredIdentity | null> {
-  const record = await getIdentityRecord()
-  if (!record?.registeredAt) return null
+export async function loadStoredIdentity(): Promise<LoadStoredIdentityResult> {
+  let record: IdentityRecord | null = null
+  try {
+    record = await getIdentityRecord()
+  } catch {
+    // IndexedDB can fail if storage was cleared or object stores are missing.
+    return { status: 'corrupted' }
+  }
+  if (!record || !record.registeredAt) return { status: 'none' }
+
+  if (
+    !(record.iv instanceof Uint8Array) ||
+    record.iv.length !== 12 ||
+    !(record.encryptedSecretKey instanceof ArrayBuffer) ||
+    record.encryptedSecretKey.byteLength === 0 ||
+    !isCryptoKeyLike(record.wrappingKey) ||
+    (record.wrappingKey.algorithm as { name?: unknown }).name !== 'AES-GCM' ||
+    !record.wrappingKey.usages.includes('decrypt')
+  ) {
+    return { status: 'corrupted' }
+  }
+
+  if (
+    !(record.publicKey instanceof Uint8Array) ||
+    record.publicKey.length !== 32
+  ) {
+    return { status: 'corrupted' }
+  }
+  if (
+    typeof record.didKey !== 'string' ||
+    !record.didKey.startsWith('did:key:z6Mk')
+  ) {
+    return { status: 'corrupted' }
+  }
+  if (typeof record.username !== 'string' || !record.username.trim()) {
+    return { status: 'corrupted' }
+  }
+  if (typeof record.registeredAt !== 'string' || !record.registeredAt.trim()) {
+    return { status: 'corrupted' }
+  }
+  if (!Number.isFinite(Date.parse(record.registeredAt))) {
+    return { status: 'corrupted' }
+  }
+  if (record.avatarColor !== null) {
+    if (typeof record.avatarColor !== 'string') return { status: 'corrupted' }
+    if (!/^#[0-9a-fA-F]{6}$/.test(record.avatarColor)) {
+      return { status: 'corrupted' }
+    }
+  }
 
   return {
-    publicKey: record.publicKey,
-    didKey: record.didKey,
-    username: record.username,
-    avatarColor: record.avatarColor,
-    registeredAt: record.registeredAt,
+    status: 'found',
+    identity: {
+      publicKey: record.publicKey,
+      didKey: record.didKey,
+      username: record.username,
+      avatarColor: record.avatarColor,
+      registeredAt: record.registeredAt,
+    },
   }
 }
 

@@ -242,7 +242,7 @@ For unit testing, reuse the `test_state()` pattern from the health tests — cre
 For integration tests, extend the existing test helpers. Use the `http_post` helper (with empty body) and check the response.
 
 **Client tests:**
-- Client component tests deferred (same rationale as Story 1.5 and 1.6 — Vitest + @testing-library/svelte not yet set up)
+- Client component tests were deferred because Vitest + @testing-library/svelte were not yet set up; treat this as test debt to be addressed in Story 2.8.
 
 **Linting:** `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `npx biome check .`, `npx svelte-check` — all must pass.
 

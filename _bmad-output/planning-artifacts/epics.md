@@ -550,6 +550,30 @@ So that I don't permanently lose access to my guilds and messages.
 **And** if the email isn't received, a "check spam or try again" message is shown
 **And** the recovery screen uses plain language ("recover your identity") not cryptographic jargon
 
+### Story 2.8: Vitest Setup and Client Test Baseline
+
+As a **developer**,
+I want a frontend unit/component test harness (Vitest + @testing-library/svelte),
+So that we stop accruing client test debt and can safely evolve identity/auth UX.
+
+**Acceptance Criteria:**
+
+**Given** the client project dependencies are installed
+**When** `cd client && npm run test` is executed
+**Then** Vitest runs in CI-friendly mode (non-watch) and exits non-zero on failures
+**And** the default test environment is `jsdom`
+**And** `$lib` alias resolution works in tests
+**And** `@testing-library/svelte` is configured for component tests
+
+**Given** GitHub Actions CI runs on a pull request
+**When** the client job executes
+**Then** `npm run test` is executed in addition to lint/check/build
+
+**Given** the identity/auth client modules from Stories 2.1–2.3 exist
+**When** the test suite is run
+**Then** there are deterministic unit tests covering core non-UI logic (crypto helpers, storage utilities, session persistence/restore)
+**And** there are smoke-level component tests for the identity recovery prompts
+
 ## Epic 3: P2P Discovery & Federation Foundation
 
 Instances automatically discover each other via libp2p Kademlia DHT and Gossipsub. Operators can opt their instance out of discovery (unlisted mode). Cross-instance identity verification is operational. The P2P network has Sybil resistance and no single point of failure.

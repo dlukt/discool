@@ -17,11 +17,16 @@ const avatarColors = [
 
 type AvatarColorValue = (typeof avatarColors)[number]['value']
 
-type Props = {
-  oncomplete?: () => void
+function isAvatarColorValue(value: string): value is AvatarColorValue {
+  return avatarColors.some((color) => color.value === value)
 }
 
-let { oncomplete }: Props = $props()
+type Props = {
+  oncomplete?: () => void
+  mode?: 'create' | 'reregister'
+}
+
+let { oncomplete, mode = 'create' }: Props = $props()
 
 let username = $state('')
 let avatarColor = $state<AvatarColorValue>(avatarColors[0].value)
@@ -38,6 +43,23 @@ let usernameTrimmed = $derived(username.trim())
 let usernameValidation = $derived(validateUsername(usernameTrimmed))
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let canSubmit = $derived(usernameValidation === null && !submitting)
+
+let didInit = false
+$effect(() => {
+  if (didInit) return
+
+  if (mode === 'reregister') {
+    const identity = identityState.identity
+    if (!identity) return
+
+    username = identity.username
+    if (identity.avatarColor && isAvatarColorValue(identity.avatarColor)) {
+      avatarColor = identity.avatarColor
+    }
+  }
+
+  didInit = true
+})
 
 let didFocus = false
 $effect(() => {
@@ -140,15 +162,22 @@ async function onSubmit(event: SubmitEvent) {
 
   submitting = true
   try {
-    const { secretKey, publicKey, didKey } = await generateIdentity()
-    await encryptAndStoreKey(
-      secretKey,
-      publicKey,
-      didKey,
-      usernameTrimmed,
-      avatarColor,
-    )
-    await identityState.register(didKey, usernameTrimmed, avatarColor)
+    if (mode === 'reregister') {
+      await identityState.reRegister(
+        usernameTrimmed,
+        identityState.identity?.avatarColor ?? null,
+      )
+    } else {
+      const { secretKey, publicKey, didKey } = await generateIdentity()
+      await encryptAndStoreKey(
+        secretKey,
+        publicKey,
+        didKey,
+        usernameTrimmed,
+        avatarColor,
+      )
+      await identityState.register(didKey, usernameTrimmed, avatarColor)
+    }
     oncomplete?.()
   } catch (err) {
     if (
@@ -172,7 +201,9 @@ async function onSubmit(event: SubmitEvent) {
   <div class="mx-auto flex w-full max-w-md flex-col gap-6 rounded-lg border border-border bg-card p-8">
     <header class="space-y-2 text-center">
       <p class="text-sm font-medium text-muted-foreground">Discool</p>
-      <h1 class="text-3xl font-semibold tracking-tight">Pick a username</h1>
+      <h1 class="text-3xl font-semibold tracking-tight">
+        {mode === 'reregister' ? 'Choose a different name' : 'Pick a username'}
+      </h1>
     </header>
 
     {#if serverError}
@@ -227,6 +258,7 @@ async function onSubmit(event: SubmitEvent) {
                 role="radio"
                 aria-checked={avatarColor === color.value}
                 tabindex={avatarColor === color.value ? 0 : -1}
+                disabled={mode === 'reregister'}
                 class={`h-8 w-8 rounded-full border ${
                   avatarColor === color.value
                     ? 'border-fire ring-2 ring-fire'
@@ -252,9 +284,9 @@ async function onSubmit(event: SubmitEvent) {
             class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-fire-foreground border-t-transparent"
             aria-hidden="true"
           ></span>
-          Creating...
+          {mode === 'reregister' ? 'Registering...' : 'Creating...'}
         {:else}
-          Create
+          {mode === 'reregister' ? 'Register' : 'Create'}
         {/if}
       </button>
     </form>

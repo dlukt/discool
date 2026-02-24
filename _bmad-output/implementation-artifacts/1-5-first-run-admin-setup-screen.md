@@ -319,7 +319,7 @@ For unit testing, create a test helper that builds an `AppState` with a real `sq
 For integration tests, extend the existing `http_response()` helper to support POST requests with JSON body. Add a `http_post()` helper function.
 
 **Client tests:**
-- Svelte component tests are deferred — the testing infrastructure (vitest + @testing-library/svelte) is not yet set up. This is appropriate for the first client-side story. Testing infrastructure should be introduced in a dedicated story or when the client has enough components to justify the setup cost.
+- Svelte component tests were deferred because the testing infrastructure (Vitest + @testing-library/svelte) was not yet set up. This created test debt; pay it down in Story 2.8 (Vitest Setup and Client Test Baseline) before taking on more client UI work.
 
 **Linting:** `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `npx biome check .`, `npx svelte-check` — all must pass.
 
