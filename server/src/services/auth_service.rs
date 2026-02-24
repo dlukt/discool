@@ -218,7 +218,7 @@ pub async fn validate_session(pool: &DbPool, token: &str) -> Result<(Session, Us
     let user: Option<User> = match pool {
         DbPool::Postgres(pool) => {
             sqlx::query_as(
-                "SELECT id, did_key, public_key_multibase, username, avatar_color, created_at, updated_at\nFROM users\nWHERE id = $1\nLIMIT 1",
+                "SELECT id, did_key, public_key_multibase, username, display_name, avatar_color, avatar_storage_key, avatar_mime_type, avatar_size_bytes, avatar_updated_at, created_at, updated_at\nFROM users\nWHERE id = $1\nLIMIT 1",
             )
             .bind(&session.user_id)
             .fetch_optional(pool)
@@ -226,7 +226,7 @@ pub async fn validate_session(pool: &DbPool, token: &str) -> Result<(Session, Us
         }
         DbPool::Sqlite(pool) => {
             sqlx::query_as(
-                "SELECT id, did_key, public_key_multibase, username, avatar_color, created_at, updated_at\nFROM users\nWHERE id = ?1\nLIMIT 1",
+                "SELECT id, did_key, public_key_multibase, username, display_name, avatar_color, avatar_storage_key, avatar_mime_type, avatar_size_bytes, avatar_updated_at, created_at, updated_at\nFROM users\nWHERE id = ?1\nLIMIT 1",
             )
             .bind(&session.user_id)
             .fetch_optional(pool)
@@ -328,7 +328,7 @@ pub async fn fetch_user_by_did(pool: &DbPool, did_key: &str) -> Result<User, App
     let user: Option<User> = match pool {
         DbPool::Postgres(pool) => {
             sqlx::query_as(
-                "SELECT id, did_key, public_key_multibase, username, avatar_color, created_at, updated_at\nFROM users\nWHERE did_key = $1\nLIMIT 1",
+                "SELECT id, did_key, public_key_multibase, username, display_name, avatar_color, avatar_storage_key, avatar_mime_type, avatar_size_bytes, avatar_updated_at, created_at, updated_at\nFROM users\nWHERE did_key = $1\nLIMIT 1",
             )
             .bind(did_key)
             .fetch_optional(pool)
@@ -336,7 +336,7 @@ pub async fn fetch_user_by_did(pool: &DbPool, did_key: &str) -> Result<User, App
         }
         DbPool::Sqlite(pool) => {
             sqlx::query_as(
-                "SELECT id, did_key, public_key_multibase, username, avatar_color, created_at, updated_at\nFROM users\nWHERE did_key = ?1\nLIMIT 1",
+                "SELECT id, did_key, public_key_multibase, username, display_name, avatar_color, avatar_storage_key, avatar_mime_type, avatar_size_bytes, avatar_updated_at, created_at, updated_at\nFROM users\nWHERE did_key = ?1\nLIMIT 1",
             )
             .bind(did_key)
             .fetch_optional(pool)

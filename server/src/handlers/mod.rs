@@ -17,6 +17,7 @@ mod admin;
 mod auth;
 mod health;
 mod instance;
+mod users;
 
 // Keep `connect-src` strict until we have a safe, non-Host-header-derived allow-list for WebSockets.
 // Keep `style-src` strict (no 'unsafe-inline') to reduce XSS blast radius.
@@ -29,6 +30,14 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/challenge", post(auth::challenge))
         .route("/auth/verify", post(auth::verify))
         .route("/auth/logout", delete(auth::logout))
+        .route(
+            "/users/me/profile",
+            get(users::get_profile).patch(users::update_profile),
+        )
+        .route(
+            "/users/me/avatar",
+            get(users::get_avatar).post(users::upload_avatar),
+        )
         .route("/admin/health", get(admin::get_health))
         .route("/admin/backup", post(admin::create_backup))
         .route("/instance", get(instance::get_instance))

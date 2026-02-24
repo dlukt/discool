@@ -14,6 +14,8 @@ import {
   saveLastLocation,
 } from '$lib/features/identity/navigationState'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
+import ProfileSettingsView from '$lib/features/identity/ProfileSettingsView.svelte'
+// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import RecoveryPrompt from '$lib/features/identity/RecoveryPrompt.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import ReRegisterPrompt from '$lib/features/identity/ReRegisterPrompt.svelte'
@@ -23,7 +25,7 @@ let loading = $state(true)
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let errorMessage = $state<string | null>(null)
 let status = $state<InstanceStatus | null>(null)
-let view = $state<'home' | 'admin'>('home')
+let view = $state<'home' | 'admin' | 'settings'>('home')
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let reRegistering = $state(false)
 
@@ -153,10 +155,21 @@ onMount(() => {
                   : 'text-muted-foreground hover:bg-muted'
               }`}
               onclick={() => (view = 'admin')}
-            >
-              Admin
-            </button>
+              >
+                Admin
+              </button>
           {/if}
+          <button
+            type="button"
+            class={`w-full rounded-md px-3 py-2 text-left text-sm transition-colors ${
+              view === 'settings'
+                ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                : 'text-muted-foreground hover:bg-muted'
+            }`}
+            onclick={() => (view = 'settings')}
+          >
+            Settings
+          </button>
         </nav>
 
         <div class="mt-6 border-t border-border pt-4">
@@ -173,10 +186,15 @@ onMount(() => {
       <section class="flex-1 p-8">
         {#if view === 'admin'}
           <AdminPanel />
+        {:else if view === 'settings'}
+          <ProfileSettingsView />
         {:else}
           <div class="mx-auto flex w-full max-w-xl flex-col gap-6 rounded-lg border border-border bg-card p-8">
             <header class="space-y-2">
               <h1 class="text-4xl font-semibold tracking-tight">Discool</h1>
+              <p class="text-sm text-muted-foreground">
+                Signed in as {identityState.session.user.displayName}.
+              </p>
               <p class="text-sm text-muted-foreground">
                 Dual Core theme scaffold (Ice navigation, Fire actions, Zinc foundation).
               </p>

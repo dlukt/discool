@@ -80,3 +80,12 @@
 #
 # Challenge TTL in seconds (default: 300 = 5 minutes)
 # challenge_ttl_seconds = 300
+
+# ---------------------------------------------------------------------------
+# [avatar]
+# ---------------------------------------------------------------------------
+# Server-managed avatar storage directory (default: "./data/avatars")
+# upload_dir = "./data/avatars"
+#
+# Maximum allowed avatar upload size in bytes (default: 2097152 = 2 MB)
+# max_size_bytes = 2097152

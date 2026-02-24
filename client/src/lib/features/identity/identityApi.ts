@@ -1,19 +1,18 @@
 import { apiFetch } from '$lib/api'
 
-import type { AuthSession, RegisteredUser } from './types'
+import {
+  type AuthSession,
+  type RegisteredUser,
+  type RegisteredUserWire,
+  toRegisteredUser,
+  toUpdateProfileInputWire,
+  type UpdateProfileInput,
+} from './types'
 
 type RegisterRequestWire = {
   did_key: string
   username: string
   avatar_color?: string
-}
-
-type RegisteredUserWire = {
-  id: string
-  did_key: string
-  username: string
-  avatar_color?: string
-  created_at: string
 }
 
 type ChallengeRequestWire = {
@@ -35,16 +34,6 @@ type VerifyResponseWire = {
   token: string
   expires_at: string
   user: RegisteredUserWire
-}
-
-function toRegisteredUser(wire: RegisteredUserWire): RegisteredUser {
-  return {
-    id: wire.id,
-    didKey: wire.did_key,
-    username: wire.username,
-    avatarColor: wire.avatar_color ?? null,
-    createdAt: wire.created_at,
-  }
 }
 
 function toAuthSession(wire: VerifyResponseWire): AuthSession {
@@ -105,4 +94,28 @@ export function logout(token: string): Promise<void> {
     method: 'DELETE',
     headers: { authorization: `Bearer ${token}` },
   })
+}
+
+export function getProfile(): Promise<RegisteredUser> {
+  return apiFetch<RegisteredUserWire>('/api/v1/users/me/profile').then(
+    toRegisteredUser,
+  )
+}
+
+export function updateProfile(
+  input: UpdateProfileInput,
+): Promise<RegisteredUser> {
+  return apiFetch<RegisteredUserWire>('/api/v1/users/me/profile', {
+    method: 'PATCH',
+    body: JSON.stringify(toUpdateProfileInputWire(input)),
+  }).then(toRegisteredUser)
+}
+
+export function uploadAvatar(file: File): Promise<RegisteredUser> {
+  const formData = new FormData()
+  formData.append('avatar', file)
+  return apiFetch<RegisteredUserWire>('/api/v1/users/me/avatar', {
+    method: 'POST',
+    body: formData,
+  }).then(toRegisteredUser)
 }

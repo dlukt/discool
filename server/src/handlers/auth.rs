@@ -267,7 +267,9 @@ pub async fn register(
         id,
         did_key: did_key.to_string(),
         username: username.to_string(),
+        display_name: username.to_string(),
         avatar_color,
+        avatar_url: None,
         created_at,
     };
 

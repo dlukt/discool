@@ -152,6 +152,20 @@ async fn http_post(addr: &str, path: &str, json_body: &str) -> String {
     String::from_utf8_lossy(&buf).to_string()
 }
 
+async fn http_patch_with_bearer(addr: &str, path: &str, json_body: &str, token: &str) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    let req = format!(
+        "PATCH {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
+        json_body.as_bytes().len(),
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    String::from_utf8_lossy(&buf).to_string()
+}
+
 async fn http_delete_with_bearer(addr: &str, path: &str, token: &str) -> String {
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
@@ -159,6 +173,26 @@ async fn http_delete_with_bearer(addr: &str, path: &str, token: &str) -> String 
         "DELETE {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    String::from_utf8_lossy(&buf).to_string()
+}
+
+async fn http_post_multipart_with_bearer(
+    addr: &str,
+    path: &str,
+    boundary: &str,
+    body: &[u8],
+    token: &str,
+) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let headers = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len(),
+    );
+    stream.write_all(headers.as_bytes()).await.unwrap();
+    stream.write_all(body).await.unwrap();
 
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await.unwrap();
@@ -277,6 +311,36 @@ fn did_for_signing_key(secret: [u8; 32]) -> String {
     bytes.extend_from_slice(&[0xed, 0x01]);
     bytes.extend_from_slice(&public);
     format!("did:key:z{}", bs58::encode(bytes).into_string())
+}
+
+async fn register_and_authenticate(addr: &str, username: &str, secret: [u8; 32]) -> String {
+    use ed25519_dalek::Signer;
+    use serde_json::json;
+
+    let did_key = did_for_signing_key(secret);
+
+    let register = json!({ "did_key": did_key, "username": username }).to_string();
+    let res = http_post(addr, "/api/v1/auth/register", &register).await;
+    assert_eq!(response_status(&res), 201);
+
+    let challenge_req = json!({ "did_key": did_key }).to_string();
+    let res = http_post(addr, "/api/v1/auth/challenge", &challenge_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let challenge = value["data"]["challenge"].as_str().unwrap();
+
+    let signing = ed25519_dalek::SigningKey::from_bytes(&secret);
+    let sig = signing.sign(challenge.as_bytes()).to_bytes();
+    let verify_req = json!({
+        "did_key": did_key,
+        "challenge": challenge,
+        "signature": bytes_to_hex(&sig),
+    })
+    .to_string();
+    let res = http_post(addr, "/api/v1/auth/verify", &verify_req).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    value["data"]["token"].as_str().unwrap().to_string()
 }
 
 fn write_server_config_with_db_url(
@@ -1451,4 +1515,210 @@ async fn expired_session_returns_401() {
 
     let res = http_response_with_bearer(&addr, "/api/v1/admin/health", token).await;
     assert_eq!(response_status(&res), 401);
+}
+
+#[tokio::test]
+async fn users_profile_requires_authentication() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let res = http_response(&addr, "/api/v1/users/me/profile").await;
+    assert_eq!(response_status(&res), 401);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({ "error": { "code": "UNAUTHORIZED", "message": "Missing Authorization header", "details": {} } })
+    );
+}
+
+#[tokio::test]
+async fn users_profile_patch_persists_display_name_and_avatar_color() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let token = register_and_authenticate(&addr, "liam", [1u8; 32]).await;
+    let patch_body =
+        json!({ "display_name": "Liam from Guild", "avatar_color": "#3B82F6" }).to_string();
+
+    let res = http_patch_with_bearer(&addr, "/api/v1/users/me/profile", &patch_body, &token).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["data"]["display_name"], json!("Liam from Guild"));
+    assert_eq!(value["data"]["avatar_color"], json!("#3B82F6"));
+
+    let res = http_response_with_bearer(&addr, "/api/v1/users/me/profile", &token).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["data"]["display_name"], json!("Liam from Guild"));
+    assert_eq!(value["data"]["avatar_color"], json!("#3B82F6"));
+}
+
+#[tokio::test]
+async fn users_profile_patch_rejects_invalid_display_name() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let token = register_and_authenticate(&addr, "liam", [1u8; 32]).await;
+    let patch_body = json!({ "display_name": "   " }).to_string();
+
+    let res = http_patch_with_bearer(&addr, "/api/v1/users/me/profile", &patch_body, &token).await;
+    assert_eq!(response_status(&res), 422);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["error"]["code"], json!("VALIDATION_ERROR"));
+}
+
+#[tokio::test]
+async fn users_avatar_upload_rejects_unsupported_type() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let token = register_and_authenticate(&addr, "liam", [1u8; 32]).await;
+    let boundary = "----discool-boundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"avatar.gif\"\r\nContent-Type: image/gif\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(b"GIF89a");
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let res =
+        http_post_multipart_with_bearer(&addr, "/api/v1/users/me/avatar", boundary, &body, &token)
+            .await;
+    assert_eq!(response_status(&res), 422);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["error"]["code"], json!("VALIDATION_ERROR"));
+}
+
+#[tokio::test]
+async fn users_avatar_upload_rejects_oversized_file() {
+    use serde_json::json;
+    use std::io::Write;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let cfg_path = dir.join("config.toml");
+    write_server_config(&cfg_path, "127.0.0.1", port, None);
+    let mut cfg = fs::OpenOptions::new().append(true).open(&cfg_path).unwrap();
+    cfg.write_all(b"\n[avatar]\nmax_size_bytes = 10\n").unwrap();
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let token = register_and_authenticate(&addr, "liam", [1u8; 32]).await;
+    let boundary = "----discool-boundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"avatar.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&[
+        0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4, 5, 6,
+    ]);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let res =
+        http_post_multipart_with_bearer(&addr, "/api/v1/users/me/avatar", boundary, &body, &token)
+            .await;
+    assert_eq!(response_status(&res), 422);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["error"]["code"], json!("VALIDATION_ERROR"));
+}
+
+#[tokio::test]
+async fn users_avatar_upload_accepts_png_and_exposes_avatar_url() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let token = register_and_authenticate(&addr, "liam", [1u8; 32]).await;
+    let boundary = "----discool-boundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"avatar.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0]);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let res =
+        http_post_multipart_with_bearer(&addr, "/api/v1/users/me/avatar", boundary, &body, &token)
+            .await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value["data"]["avatar_url"],
+        json!("/api/v1/users/me/avatar")
+    );
+
+    let res = http_response_with_bearer(&addr, "/api/v1/users/me/profile", &token).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value["data"]["avatar_url"],
+        json!("/api/v1/users/me/avatar")
+    );
+
+    let res = http_response_with_bearer(&addr, "/api/v1/users/me/avatar", &token).await;
+    assert_eq!(response_status(&res), 200);
+    let content_type = response_header(&res, "content-type").unwrap_or_default();
+    assert!(content_type.starts_with("image/png"));
+
+    let patch_body = json!({ "avatar_color": "#ef4444" }).to_string();
+    let res = http_patch_with_bearer(&addr, "/api/v1/users/me/profile", &patch_body, &token).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["data"]["avatar_color"], json!("#ef4444"));
+    assert!(value["data"]["avatar_url"].is_null());
+
+    let res = http_response_with_bearer(&addr, "/api/v1/users/me/profile", &token).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert!(value["data"]["avatar_url"].is_null());
+
+    let res = http_response_with_bearer(&addr, "/api/v1/users/me/avatar", &token).await;
+    assert_eq!(response_status(&res), 404);
 }

@@ -7,13 +7,16 @@ import {
   signChallenge,
 } from './crypto'
 import {
+  getProfile as getProfileApi,
   logout as logoutApi,
   register as registerApi,
   requestChallenge,
+  updateProfile as updateProfileApi,
+  uploadAvatar as uploadAvatarApi,
   verifyChallenge,
 } from './identityApi'
 import { clearLastLocation } from './navigationState'
-import type { AuthSession, StoredIdentity } from './types'
+import type { AuthSession, StoredIdentity, UpdateProfileInput } from './types'
 
 const SESSION_KEY = 'discool-session'
 let storageListenerInstalled = false
@@ -259,6 +262,43 @@ export const identityState = $state({
     }
   },
 
+  setSessionUser: (user: AuthSession['user']) => {
+    const current = identityState.session
+    if (!current) return
+    identityState.session = { ...current, user }
+    safeWriteSessionToStorage(identityState.session)
+  },
+
+  refreshProfile: async () => {
+    if (!identityState.session) {
+      throw new Error('No active session')
+    }
+    const profile = await getProfileApi()
+    identityState.setSessionUser(profile)
+    return profile
+  },
+
+  saveProfile: async (
+    input: UpdateProfileInput,
+    avatarFile: File | null = null,
+  ) => {
+    if (!identityState.session) {
+      throw new Error('No active session')
+    }
+
+    const hasProfileUpdate = 'displayName' in input || 'avatarColor' in input
+    let nextUser = identityState.session.user
+    if (hasProfileUpdate) {
+      nextUser = await updateProfileApi(input)
+      identityState.setSessionUser(nextUser)
+    }
+    if (avatarFile) {
+      nextUser = await uploadAvatarApi(avatarFile)
+      identityState.setSessionUser(nextUser)
+    }
+    return nextUser
+  },
+
   logout: async () => {
     authEpoch++
     const token = identityState.session?.token
@@ -342,6 +382,14 @@ export const identityState = $state({
       ) {
         throw new Error('invalid session')
       }
+      const rawDisplayName = userRecord.displayName
+      let displayName = username
+      if (rawDisplayName !== undefined && rawDisplayName !== null) {
+        if (typeof rawDisplayName !== 'string' || !rawDisplayName.trim()) {
+          throw new Error('invalid session')
+        }
+        displayName = rawDisplayName
+      }
 
       if (identityState.identity && didKey !== identityState.identity.didKey) {
         throw new Error('session identity mismatch')
@@ -358,6 +406,14 @@ export const identityState = $state({
         }
         avatarColor = rawAvatarColor
       }
+      const rawAvatarUrl = userRecord.avatarUrl
+      let avatarUrl: string | null = null
+      if (rawAvatarUrl !== undefined && rawAvatarUrl !== null) {
+        if (typeof rawAvatarUrl !== 'string' || !rawAvatarUrl.trim()) {
+          throw new Error('invalid session')
+        }
+        avatarUrl = rawAvatarUrl
+      }
 
       identityState.session = {
         token,
@@ -366,7 +422,9 @@ export const identityState = $state({
           id,
           didKey,
           username,
+          displayName,
           avatarColor,
+          avatarUrl,
           createdAt,
         },
       }

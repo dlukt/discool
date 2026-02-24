@@ -14,6 +14,8 @@ pub struct Config {
     pub backup: Option<BackupConfig>,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub avatar: AvatarConfig,
 }
 
 impl Config {
@@ -85,6 +87,26 @@ impl Config {
             ));
         }
 
+        if self.avatar.max_size_bytes == 0 {
+            return Err(ConfigValidationError::new(
+                "avatar.max_size_bytes",
+                "must be >= 1",
+            ));
+        }
+
+        if self.avatar.upload_dir.trim().is_empty() {
+            return Err(ConfigValidationError::new(
+                "avatar.upload_dir",
+                "must not be empty",
+            ));
+        }
+        if let Err(err) = std::fs::create_dir_all(&self.avatar.upload_dir) {
+            return Err(ConfigValidationError::new(
+                "avatar.upload_dir",
+                format!("failed to create directory: {err}"),
+            ));
+        }
+
         if let Some(output_dir) = self
             .backup
             .as_ref()
@@ -151,6 +173,23 @@ impl Default for AuthConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct AvatarConfig {
+    #[serde(default = "default_avatar_upload_dir")]
+    pub upload_dir: String,
+    #[serde(default = "default_avatar_max_size_bytes")]
+    pub max_size_bytes: usize,
+}
+
+impl Default for AvatarConfig {
+    fn default() -> Self {
+        Self {
+            upload_dir: default_avatar_upload_dir(),
+            max_size_bytes: default_avatar_max_size_bytes(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub url: String, // Required — no default. Validation catches missing.
     #[serde(default = "default_max_connections")]
@@ -167,6 +206,14 @@ fn default_session_ttl_hours() -> u64 {
 
 fn default_challenge_ttl_seconds() -> u64 {
     300
+}
+
+fn default_avatar_upload_dir() -> String {
+    "./data/avatars".to_string()
+}
+
+fn default_avatar_max_size_bytes() -> usize {
+    2 * 1024 * 1024
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -331,6 +378,8 @@ mod tests {
         assert_eq!(cfg.log.level, "info");
         assert_eq!(cfg.log.format, LogFormat::Json);
         assert!(cfg.database.is_none());
+        assert_eq!(cfg.avatar.upload_dir, "./data/avatars");
+        assert_eq!(cfg.avatar.max_size_bytes, 2 * 1024 * 1024);
     }
 
     #[test]
@@ -404,6 +453,32 @@ mod tests {
         });
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("database.max_connections"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_avatar_max_size() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+        cfg.avatar.max_size_bytes = 0;
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("avatar.max_size_bytes"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_avatar_upload_dir() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+        cfg.avatar.upload_dir = " ".to_string();
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("avatar.upload_dir"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('$lib/api', () => ({
   apiFetch: vi.fn(),
@@ -6,18 +6,26 @@ vi.mock('$lib/api', () => ({
 
 import { apiFetch } from '$lib/api'
 import {
+  getProfile,
   logout,
   register,
   requestChallenge,
+  updateProfile,
+  uploadAvatar,
   verifyChallenge,
 } from './identityApi'
 
 describe('identityApi', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
   it('register sends wire format and maps response', async () => {
     vi.mocked(apiFetch).mockResolvedValue({
       id: 'user-1',
       did_key: 'did:key:z6Mk-test',
       username: 'alice',
+      display_name: 'alice',
       avatar_color: '#3b82f6',
       created_at: '2026-02-24T00:00:00.000Z',
     })
@@ -37,7 +45,9 @@ describe('identityApi', () => {
       id: 'user-1',
       didKey: 'did:key:z6Mk-test',
       username: 'alice',
+      displayName: 'alice',
       avatarColor: '#3b82f6',
+      avatarUrl: null,
       createdAt: '2026-02-24T00:00:00.000Z',
     })
   })
@@ -64,6 +74,7 @@ describe('identityApi', () => {
         id: 'user-1',
         did_key: 'did:key:z6Mk-test',
         username: 'alice',
+        display_name: 'Alice',
         created_at: '2026-02-24T00:00:00.000Z',
       },
     })
@@ -90,7 +101,9 @@ describe('identityApi', () => {
         id: 'user-1',
         didKey: 'did:key:z6Mk-test',
         username: 'alice',
+        displayName: 'Alice',
         avatarColor: null,
+        avatarUrl: null,
         createdAt: '2026-02-24T00:00:00.000Z',
       },
     })
@@ -105,5 +118,70 @@ describe('identityApi', () => {
       method: 'DELETE',
       headers: { authorization: 'Bearer token-2' },
     })
+  })
+
+  it('getProfile maps profile payload', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      id: 'user-1',
+      did_key: 'did:key:z6Mk-test',
+      username: 'alice',
+      display_name: 'Alice',
+      avatar_color: '#3b82f6',
+      avatar_url: '/api/v1/users/me/avatar',
+      created_at: '2026-02-24T00:00:00.000Z',
+    })
+
+    await expect(getProfile()).resolves.toEqual({
+      id: 'user-1',
+      didKey: 'did:key:z6Mk-test',
+      username: 'alice',
+      displayName: 'Alice',
+      avatarColor: '#3b82f6',
+      avatarUrl: '/api/v1/users/me/avatar',
+      createdAt: '2026-02-24T00:00:00.000Z',
+    })
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/users/me/profile')
+  })
+
+  it('updateProfile sends patch wire payload', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      id: 'user-1',
+      did_key: 'did:key:z6Mk-test',
+      username: 'alice',
+      display_name: 'Alice',
+      avatar_color: '#3b82f6',
+      created_at: '2026-02-24T00:00:00.000Z',
+    })
+
+    await updateProfile({ displayName: 'Alice', avatarColor: '#3b82f6' })
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/users/me/profile', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        display_name: 'Alice',
+        avatar_color: '#3b82f6',
+      }),
+    })
+  })
+
+  it('uploadAvatar sends multipart form data', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      id: 'user-1',
+      did_key: 'did:key:z6Mk-test',
+      username: 'alice',
+      display_name: 'Alice',
+      avatar_color: '#3b82f6',
+      avatar_url: '/api/v1/users/me/avatar',
+      created_at: '2026-02-24T00:00:00.000Z',
+    })
+    const file = new File(['hello'], 'avatar.png', { type: 'image/png' })
+
+    await uploadAvatar(file)
+
+    const lastCall = vi.mocked(apiFetch).mock.calls.at(-1)
+    expect(lastCall).toBeDefined()
+    expect(lastCall?.[0]).toBe('/api/v1/users/me/avatar')
+    expect(lastCall?.[1]?.method).toBe('POST')
+    expect(lastCall?.[1]?.body).toBeInstanceOf(FormData)
   })
 })

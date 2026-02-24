@@ -9,14 +9,23 @@ vi.mock('./crypto', () => ({
 }))
 
 vi.mock('./identityApi', () => ({
+  getProfile: vi.fn(),
   logout: vi.fn(),
   register: vi.fn(),
   requestChallenge: vi.fn(),
+  updateProfile: vi.fn(),
+  uploadAvatar: vi.fn(),
   verifyChallenge: vi.fn(),
 }))
 
 import { loadStoredIdentity, signChallenge } from './crypto'
-import { logout, requestChallenge, verifyChallenge } from './identityApi'
+import {
+  logout,
+  requestChallenge,
+  updateProfile,
+  uploadAvatar,
+  verifyChallenge,
+} from './identityApi'
 import { identityState } from './identityStore.svelte'
 
 function resetIdentityState() {
@@ -58,7 +67,9 @@ describe('identityStore session persistence', () => {
         id: 'user-1',
         didKey: 'did:key:z6Mk-test',
         username: 'alice',
+        displayName: 'alice',
         avatarColor: null,
+        avatarUrl: null,
         createdAt: '2026-02-24T00:00:00.000Z',
       },
     })
@@ -81,7 +92,9 @@ describe('identityStore session persistence', () => {
           id: 'user-2',
           didKey: 'did:key:z6Mk-test',
           username: 'alice',
+          displayName: 'alice',
           avatarColor: null,
+          avatarUrl: null,
           createdAt: '2026-02-24T00:00:00.000Z',
         },
       }),
@@ -114,7 +127,9 @@ describe('identityStore session persistence', () => {
           id: 'user-3',
           didKey: 'did:key:z6Mk-test',
           username: 'alice',
+          displayName: 'alice',
           avatarColor: null,
+          avatarUrl: null,
           createdAt: '2026-02-24T00:00:00.000Z',
         },
       }),
@@ -143,7 +158,9 @@ describe('identityStore session persistence', () => {
         id: 'user-3',
         didKey: 'did:key:z6Mk-test',
         username: 'alice',
+        displayName: 'alice',
         avatarColor: null,
+        avatarUrl: null,
         createdAt: '2026-02-24T00:00:00.000Z',
       },
     })
@@ -165,7 +182,9 @@ describe('identityStore session persistence', () => {
         id: 'user-4',
         didKey: 'did:key:z6Mk-test',
         username: 'alice',
+        displayName: 'alice',
         avatarColor: null,
+        avatarUrl: null,
         createdAt: '2026-02-24T00:00:00.000Z',
       },
     }
@@ -191,7 +210,9 @@ describe('identityStore session persistence', () => {
           id: 'user-6',
           didKey: 'did:key:z6Mk-test',
           username: 'alice',
+          displayName: 'alice',
           avatarColor: null,
+          avatarUrl: null,
           createdAt: '2026-02-24T00:00:00.000Z',
         },
       }),
@@ -218,7 +239,9 @@ describe('identityStore session persistence', () => {
           id: 'user-5',
           didKey: 'did:key:z6Mk-test',
           username: 'alice',
+          displayName: 'alice',
           avatarColor: null,
+          avatarUrl: null,
           createdAt: '2026-02-24T00:00:00.000Z',
         },
       }),
@@ -233,5 +256,47 @@ describe('identityStore session persistence', () => {
 
     expect(localStorage.getItem('discool-session')).toBeNull()
     expect(logout).toHaveBeenCalledWith('token-5')
+  })
+
+  it('keeps successful profile updates in session when avatar upload fails', async () => {
+    const expiresAt = new Date(Date.now() + 60_000).toISOString()
+    identityState.session = {
+      token: 'token-7',
+      expiresAt,
+      user: {
+        id: 'user-7',
+        didKey: 'did:key:z6Mk-test',
+        username: 'alice',
+        displayName: 'Alice',
+        avatarColor: '#3b82f6',
+        avatarUrl: null,
+        createdAt: '2026-02-24T00:00:00.000Z',
+      },
+    }
+
+    vi.mocked(updateProfile).mockResolvedValue({
+      id: 'user-7',
+      didKey: 'did:key:z6Mk-test',
+      username: 'alice',
+      displayName: 'Alice Cooper',
+      avatarColor: '#3b82f6',
+      avatarUrl: null,
+      createdAt: '2026-02-24T00:00:00.000Z',
+    })
+    vi.mocked(uploadAvatar).mockRejectedValue(new Error('upload failed'))
+
+    const file = new File(['avatar'], 'avatar.png', { type: 'image/png' })
+    await expect(
+      identityState.saveProfile({ displayName: 'Alice Cooper' }, file),
+    ).rejects.toThrow('upload failed')
+
+    expect(identityState.session?.user.displayName).toBe('Alice Cooper')
+    expect(
+      JSON.parse(localStorage.getItem('discool-session') ?? '{}'),
+    ).toMatchObject({
+      token: 'token-7',
+      expiresAt,
+      user: { displayName: 'Alice Cooper' },
+    })
   })
 })
