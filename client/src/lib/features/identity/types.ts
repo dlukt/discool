@@ -37,6 +37,12 @@ export type UpdateProfileInput = {
   avatarColor?: string | null
 }
 
+export type CrossInstanceChallengeInput = {
+  username: string
+  displayName?: string | null
+  avatarColor?: string | null
+}
+
 export type UpdateProfileInputWire = {
   display_name?: string | null
   avatar_color?: string | null

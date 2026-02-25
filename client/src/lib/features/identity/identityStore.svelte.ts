@@ -49,12 +49,16 @@ export const identityState = $state({
   session: null as AuthSession | null,
   authenticating: false,
   authError: null as string | null,
+  crossInstanceJoining: false,
+  crossInstanceJoinError: null as string | null,
 
   initialize: async () => {
     identityState.loading = true
     identityState.error = null
     identityState.identityCorrupted = false
     identityState.identityNotRegistered = false
+    identityState.crossInstanceJoining = false
+    identityState.crossInstanceJoinError = null
 
     if (typeof window !== 'undefined' && !storageListenerInstalled) {
       storageListenerInstalled = true
@@ -70,6 +74,8 @@ export const identityState = $state({
           identityState.authenticating = false
           identityState.authError = 'Signed out in another tab.'
           identityState.identityNotRegistered = false
+          identityState.crossInstanceJoining = false
+          identityState.crossInstanceJoinError = null
           clearLastLocation()
           setSessionToken(null)
           return
@@ -77,6 +83,8 @@ export const identityState = $state({
 
         identityState.authError = null
         identityState.identityNotRegistered = false
+        identityState.crossInstanceJoining = false
+        identityState.crossInstanceJoinError = null
         identityState.authenticating = false
         const restored = await identityState.restoreSession()
         if (epoch !== authEpoch) return
@@ -97,6 +105,8 @@ export const identityState = $state({
         identityState.session = null
         identityState.authenticating = false
         identityState.authError = null
+        identityState.crossInstanceJoining = false
+        identityState.crossInstanceJoinError = null
         safeRemoveSessionFromStorage()
         clearLastLocation()
         setSessionToken(null)
@@ -112,12 +122,16 @@ export const identityState = $state({
       if (!restored && !identityState.identity) {
         identityState.session = null
         identityState.authError = null
+        identityState.crossInstanceJoining = false
+        identityState.crossInstanceJoinError = null
         setSessionToken(null)
       }
     } catch (err) {
       identityState.identity = null
       identityState.identityCorrupted = false
       identityState.identityNotRegistered = false
+      identityState.crossInstanceJoining = false
+      identityState.crossInstanceJoinError = null
       identityState.error =
         err instanceof Error ? err.message : 'Failed to load identity'
       throw err
@@ -140,6 +154,8 @@ export const identityState = $state({
       )
       identityState.identityCorrupted = false
       identityState.identityNotRegistered = false
+      identityState.crossInstanceJoining = false
+      identityState.crossInstanceJoinError = null
       await identityState.authenticate()
     } catch (err) {
       identityState.error =
@@ -170,6 +186,8 @@ export const identityState = $state({
       )
       identityState.identityCorrupted = false
       identityState.identityNotRegistered = false
+      identityState.crossInstanceJoining = false
+      identityState.crossInstanceJoinError = null
       await identityState.authenticate()
     } catch (err) {
       identityState.error =
@@ -192,6 +210,8 @@ export const identityState = $state({
       identityState.session = null
       identityState.authenticating = false
       identityState.authError = null
+      identityState.crossInstanceJoining = false
+      identityState.crossInstanceJoinError = null
       safeRemoveSessionFromStorage()
       clearLastLocation()
       setSessionToken(null)
@@ -210,6 +230,7 @@ export const identityState = $state({
     identityState.authenticating = true
     identityState.authError = null
     identityState.identityNotRegistered = false
+    identityState.crossInstanceJoinError = null
 
     try {
       const identity = identityState.identity
@@ -228,6 +249,7 @@ export const identityState = $state({
           identityState.session = null
           identityState.authError = null
           identityState.identityNotRegistered = true
+          identityState.crossInstanceJoinError = null
           setSessionToken(null)
           return
         }
@@ -258,6 +280,69 @@ export const identityState = $state({
     } finally {
       if (epoch === authEpoch) {
         identityState.authenticating = false
+      }
+    }
+  },
+
+  authenticateCrossInstance: async () => {
+    if (identityState.crossInstanceJoining || identityState.authenticating)
+      return
+    const epoch = authEpoch
+    identityState.crossInstanceJoining = true
+    identityState.crossInstanceJoinError = null
+    identityState.authError = null
+
+    try {
+      const identity = identityState.identity
+      if (!identity) {
+        identityState.session = null
+        identityState.crossInstanceJoinError = 'No identity found'
+        return
+      }
+
+      const sessionProfile = identityState.session?.user
+      const profileDidMatchesIdentity =
+        sessionProfile && sessionProfile.didKey === identity.didKey
+      const displayNameHint = profileDidMatchesIdentity
+        ? sessionProfile.displayName
+        : identity.username
+      const avatarColorHint = profileDidMatchesIdentity
+        ? sessionProfile.avatarColor
+        : identity.avatarColor
+
+      const { challenge } = await requestChallenge(identity.didKey, {
+        username: identity.username,
+        displayName: displayNameHint,
+        avatarColor: avatarColorHint,
+      })
+      if (epoch !== authEpoch) return
+      const signature = await signChallenge(challenge)
+      if (epoch !== authEpoch) return
+      const session = await verifyChallenge(
+        identity.didKey,
+        challenge,
+        signature,
+        true,
+      )
+      if (epoch !== authEpoch) return
+
+      identityState.session = session
+      identityState.identityNotRegistered = false
+      identityState.crossInstanceJoinError = null
+      safeWriteSessionToStorage(session)
+      setSessionToken(session.token)
+    } catch (err) {
+      if (epoch !== authEpoch) return
+      identityState.session = null
+      setSessionToken(null)
+      if (err instanceof Error) {
+        identityState.crossInstanceJoinError = err.message
+      } else {
+        identityState.crossInstanceJoinError = 'Failed to join this instance'
+      }
+    } finally {
+      if (epoch === authEpoch) {
+        identityState.crossInstanceJoining = false
       }
     }
   },
@@ -306,6 +391,8 @@ export const identityState = $state({
     identityState.authenticating = false
     identityState.authError = 'Signed out.'
     identityState.identityNotRegistered = false
+    identityState.crossInstanceJoining = false
+    identityState.crossInstanceJoinError = null
     safeRemoveSessionFromStorage()
     clearLastLocation()
     setSessionToken(null)
@@ -327,6 +414,8 @@ export const identityState = $state({
       identityState.session = null
       identityState.authError = null
       identityState.identityNotRegistered = false
+      identityState.crossInstanceJoining = false
+      identityState.crossInstanceJoinError = null
       setSessionToken(null)
       return false
     }
@@ -334,6 +423,8 @@ export const identityState = $state({
       identityState.session = null
       identityState.authError = null
       identityState.identityNotRegistered = false
+      identityState.crossInstanceJoining = false
+      identityState.crossInstanceJoinError = null
       setSessionToken(null)
       return false
     }
@@ -430,12 +521,16 @@ export const identityState = $state({
       }
       identityState.authError = null
       identityState.identityNotRegistered = false
+      identityState.crossInstanceJoining = false
+      identityState.crossInstanceJoinError = null
       setSessionToken(token)
       return true
     } catch {
       identityState.session = null
       identityState.authError = null
       identityState.identityNotRegistered = false
+      identityState.crossInstanceJoining = false
+      identityState.crossInstanceJoinError = null
       safeRemoveSessionFromStorage()
       setSessionToken(null)
       return false
@@ -449,6 +544,8 @@ setUnauthorizedHandler(() => {
   identityState.authenticating = false
   identityState.authError = null
   identityState.identityNotRegistered = false
+  identityState.crossInstanceJoining = false
+  identityState.crossInstanceJoinError = null
   safeRemoveSessionFromStorage()
   setSessionToken(null)
   void identityState.authenticate()

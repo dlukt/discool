@@ -2,6 +2,7 @@ import { apiFetch } from '$lib/api'
 
 import {
   type AuthSession,
+  type CrossInstanceChallengeInput,
   type RegisteredUser,
   type RegisteredUserWire,
   toRegisteredUser,
@@ -17,6 +18,7 @@ type RegisterRequestWire = {
 
 type ChallengeRequestWire = {
   did_key: string
+  cross_instance?: CrossInstanceChallengeWire
 }
 
 type ChallengeResponseWire = {
@@ -24,10 +26,22 @@ type ChallengeResponseWire = {
   expires_in: number
 }
 
+type CrossInstanceChallengeWire = {
+  enabled: true
+  username: string
+  display_name?: string
+  avatar_color?: string
+}
+
 type VerifyRequestWire = {
   did_key: string
   challenge: string
   signature: string
+  cross_instance?: CrossInstanceVerifyWire
+}
+
+type CrossInstanceVerifyWire = {
+  enabled: true
 }
 
 type VerifyResponseWire = {
@@ -56,6 +70,24 @@ function toRegisterRequestWire(
   }
 }
 
+function toCrossInstanceChallengeWire(
+  input: CrossInstanceChallengeInput,
+): CrossInstanceChallengeWire {
+  const wire: CrossInstanceChallengeWire = {
+    enabled: true,
+    username: input.username,
+  }
+  const displayName = input.displayName?.trim()
+  if (displayName) {
+    wire.display_name = displayName
+  }
+  const avatarColor = input.avatarColor?.trim()
+  if (avatarColor) {
+    wire.avatar_color = avatarColor
+  }
+  return wire
+}
+
 export function register(
   didKey: string,
   username: string,
@@ -69,8 +101,14 @@ export function register(
 
 export function requestChallenge(
   didKey: string,
+  crossInstance?: CrossInstanceChallengeInput,
 ): Promise<{ challenge: string; expiresIn: number }> {
-  const body: ChallengeRequestWire = { did_key: didKey }
+  const body: ChallengeRequestWire = {
+    did_key: didKey,
+    cross_instance: crossInstance
+      ? toCrossInstanceChallengeWire(crossInstance)
+      : undefined,
+  }
   return apiFetch<ChallengeResponseWire>('/api/v1/auth/challenge', {
     method: 'POST',
     body: JSON.stringify(body),
@@ -81,8 +119,14 @@ export function verifyChallenge(
   didKey: string,
   challenge: string,
   signature: string,
+  crossInstance = false,
 ): Promise<AuthSession> {
-  const body: VerifyRequestWire = { did_key: didKey, challenge, signature }
+  const body: VerifyRequestWire = {
+    did_key: didKey,
+    challenge,
+    signature,
+    cross_instance: crossInstance ? { enabled: true } : undefined,
+  }
   return apiFetch<VerifyResponseWire>('/api/v1/auth/verify', {
     method: 'POST',
     body: JSON.stringify(body),

@@ -66,6 +66,29 @@ describe('identityApi', () => {
     })
   })
 
+  it('requestChallenge sends optional cross_instance payload in snake_case', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({ challenge: 'c2', expires_in: 300 })
+
+    await requestChallenge('did:key:z6Mk-test', {
+      username: 'alice',
+      displayName: 'Alice',
+      avatarColor: '#3b82f6',
+    })
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/auth/challenge', {
+      method: 'POST',
+      body: JSON.stringify({
+        did_key: 'did:key:z6Mk-test',
+        cross_instance: {
+          enabled: true,
+          username: 'alice',
+          display_name: 'Alice',
+          avatar_color: '#3b82f6',
+        },
+      }),
+    })
+  })
+
   it('verifyChallenge maps session response', async () => {
     vi.mocked(apiFetch).mockResolvedValue({
       token: 'token-1',
@@ -106,6 +129,32 @@ describe('identityApi', () => {
         avatarUrl: null,
         createdAt: '2026-02-24T00:00:00.000Z',
       },
+    })
+  })
+
+  it('verifyChallenge sends cross_instance when enabled', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      token: 'token-1',
+      expires_at: '2026-03-01T00:00:00.000Z',
+      user: {
+        id: 'user-1',
+        did_key: 'did:key:z6Mk-test',
+        username: 'alice',
+        display_name: 'Alice',
+        created_at: '2026-02-24T00:00:00.000Z',
+      },
+    })
+
+    await verifyChallenge('did:key:z6Mk-test', 'challenge', 'signature', true)
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/auth/verify', {
+      method: 'POST',
+      body: JSON.stringify({
+        did_key: 'did:key:z6Mk-test',
+        challenge: 'challenge',
+        signature: 'signature',
+        cross_instance: { enabled: true },
+      }),
     })
   })
 

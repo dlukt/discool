@@ -6,6 +6,8 @@ import { ApiError, getInstanceStatus, type InstanceStatus } from '$lib/api'
 import AdminPanel from '$lib/components/AdminPanel.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import SetupPage from '$lib/components/SetupPage.svelte'
+// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
+import CrossInstanceJoinPrompt from '$lib/features/identity/CrossInstanceJoinPrompt.svelte'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import LoginView from '$lib/features/identity/LoginView.svelte'
@@ -17,8 +19,6 @@ import {
 import ProfileSettingsView from '$lib/features/identity/ProfileSettingsView.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import RecoveryPrompt from '$lib/features/identity/RecoveryPrompt.svelte'
-// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
-import ReRegisterPrompt from '$lib/features/identity/ReRegisterPrompt.svelte'
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let loading = $state(true)
@@ -38,6 +38,23 @@ let currentPath = $derived(
 )
 // biome-ignore lint/correctness/noUnusedVariables: Reserved for Epic 4 router integration.
 let lastLocation = $state<string | null>(null)
+let joinGuildName = $derived(
+  (() => {
+    if (typeof window === 'undefined') return null
+    const params = new URLSearchParams(window.location.search)
+    const guildName =
+      params.get('guild_name')?.trim() || params.get('guild')?.trim() || ''
+    return guildName || null
+  })(),
+)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let inviteContextInvalid = $derived(
+  (() => {
+    if (typeof window === 'undefined') return false
+    const params = new URLSearchParams(window.location.search)
+    return Boolean(params.get('invite')?.trim()) && !joinGuildName
+  })(),
+)
 
 $effect(() => {
   const adminUsername = status?.admin?.username
@@ -234,9 +251,18 @@ onMount(() => {
 {:else if status && status.initialized && identityState.identityCorrupted}
   <RecoveryPrompt onstartfresh={() => identityState.clear()} />
 {:else if status && status.initialized && identityState.identityNotRegistered && !reRegistering}
-  <ReRegisterPrompt
+  <CrossInstanceJoinPrompt
+    guildName={joinGuildName}
+    inviteContextInvalid={inviteContextInvalid}
+    username={identityState.identity?.username ?? ''}
+    displayName={identityState.identity?.username ?? ''}
+    avatarColor={identityState.identity?.avatarColor ?? null}
+    joining={identityState.crossInstanceJoining}
+    errorMessage={identityState.crossInstanceJoinError}
+    onconfirm={() => void identityState.authenticateCrossInstance()}
     onusedifferentname={() => {
       identityState.identityNotRegistered = false
+      identityState.crossInstanceJoinError = null
       reRegistering = true
     }}
   />

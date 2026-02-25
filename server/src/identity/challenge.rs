@@ -4,10 +4,18 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::Rng;
 
 #[derive(Debug, Clone)]
+pub struct CrossInstanceOnboarding {
+    pub username: String,
+    pub display_name: Option<String>,
+    pub avatar_color: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ChallengeRecord {
     pub challenge: String,
     pub did_key: String,
     pub created_at: Instant,
+    pub cross_instance: Option<CrossInstanceOnboarding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

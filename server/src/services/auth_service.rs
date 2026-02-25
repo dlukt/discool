@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{
     AppError,
     db::DbPool,
-    identity::challenge::{ChallengeRecord, generate_challenge},
+    identity::challenge::{ChallengeRecord, CrossInstanceOnboarding, generate_challenge},
     models::{session::Session, user::User},
 };
 
@@ -18,7 +18,13 @@ pub enum AuthError {
     ChallengeExpired,
 }
 
-pub fn create_challenge(challenges: &DashMap<String, ChallengeRecord>, did_key: &str) -> String {
+const MAX_USERNAME_LEN: usize = 32;
+
+pub fn create_challenge(
+    challenges: &DashMap<String, ChallengeRecord>,
+    did_key: &str,
+    cross_instance: Option<CrossInstanceOnboarding>,
+) -> String {
     let challenge = generate_challenge();
     challenges.insert(
         did_key.to_string(),
@@ -26,6 +32,7 @@ pub fn create_challenge(challenges: &DashMap<String, ChallengeRecord>, did_key: 
             challenge: challenge.clone(),
             did_key: did_key.to_string(),
             created_at: Instant::now(),
+            cross_instance,
         },
     );
     challenge
@@ -74,12 +81,13 @@ pub fn check_challenge(
     did_key: &str,
     challenge: &str,
     ttl_seconds: u64,
-) -> Result<(), AuthError> {
+) -> Result<ChallengeRecord, AuthError> {
     let ttl = Duration::from_secs(ttl_seconds);
     let record = challenges
         .get(did_key)
         .ok_or(AuthError::ChallengeNotFound)?;
 
+    let snapshot = record.clone();
     let expired = record.created_at.elapsed() > ttl;
     let matches = record.challenge == challenge;
     drop(record);
@@ -94,7 +102,7 @@ pub fn check_challenge(
         return Err(AuthError::ChallengeMismatch);
     }
 
-    Ok(())
+    Ok(snapshot)
 }
 
 pub async fn create_session(
@@ -348,6 +356,106 @@ pub async fn fetch_user_by_did(pool: &DbPool, did_key: &str) -> Result<User, App
     user.ok_or(AppError::NotFound)
 }
 
+pub async fn fetch_existing_or_create_verified_user(
+    pool: &DbPool,
+    did_key: &str,
+    onboarding: &CrossInstanceOnboarding,
+) -> Result<User, AppError> {
+    match fetch_user_by_did(pool, did_key).await {
+        Ok(user) => return Ok(user),
+        Err(AppError::NotFound) => {}
+        Err(err) => return Err(err),
+    }
+
+    let public_key_multibase = did_key
+        .strip_prefix("did:key:")
+        .ok_or_else(|| AppError::ValidationError("Invalid DID format".to_string()))?;
+    let created_at = Utc::now().to_rfc3339();
+    let updated_at = created_at.clone();
+
+    for attempt in 0..16 {
+        let candidate = cross_instance_username_candidate(&onboarding.username, did_key, attempt);
+        let id = Uuid::new_v4().to_string();
+        let inserted = match pool {
+            DbPool::Postgres(pool) => sqlx::query(
+                "INSERT INTO users (id, did_key, public_key_multibase, username, display_name, avatar_color, created_at, updated_at)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8)\nON CONFLICT DO NOTHING",
+            )
+            .bind(&id)
+            .bind(did_key)
+            .bind(public_key_multibase)
+            .bind(&candidate)
+            .bind(onboarding.display_name.as_deref())
+            .bind(onboarding.avatar_color.as_deref())
+            .bind(&created_at)
+            .bind(&updated_at)
+            .execute(pool)
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?
+            .rows_affected()
+                == 1,
+            DbPool::Sqlite(pool) => sqlx::query(
+                "INSERT INTO users (id, did_key, public_key_multibase, username, display_name, avatar_color, created_at, updated_at)\nVALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)\nON CONFLICT DO NOTHING",
+            )
+            .bind(&id)
+            .bind(did_key)
+            .bind(public_key_multibase)
+            .bind(&candidate)
+            .bind(onboarding.display_name.as_deref())
+            .bind(onboarding.avatar_color.as_deref())
+            .bind(&created_at)
+            .bind(&updated_at)
+            .execute(pool)
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?
+            .rows_affected()
+                == 1,
+        };
+
+        if inserted {
+            return fetch_user_by_did(pool, did_key).await;
+        }
+
+        match fetch_user_by_did(pool, did_key).await {
+            Ok(user) => return Ok(user),
+            Err(AppError::NotFound) => {}
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(AppError::Conflict(
+        "Username already taken on this instance".to_string(),
+    ))
+}
+
+fn cross_instance_username_candidate(base: &str, did_key: &str, attempt: usize) -> String {
+    if attempt == 0 {
+        return base.to_string();
+    }
+
+    let deterministic_suffix = did_key_hash_suffix(did_key);
+    let suffix = if attempt == 1 {
+        deterministic_suffix
+    } else {
+        format!("{}{}", &deterministic_suffix[..6], attempt)
+    };
+
+    let mut max_base_chars = MAX_USERNAME_LEN.saturating_sub(suffix.len() + 1);
+    if max_base_chars == 0 {
+        max_base_chars = 1;
+    }
+    let trimmed_base: String = base.chars().take(max_base_chars).collect();
+    format!("{trimmed_base}-{suffix}")
+}
+
+fn did_key_hash_suffix(did_key: &str) -> String {
+    let mut hash: u32 = 0x811c9dc5;
+    for byte in did_key.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(16777619);
+    }
+    format!("{hash:08x}")
+}
+
 #[cfg(test)]
 mod tests {
     use axum::response::IntoResponse;
@@ -361,7 +469,7 @@ mod tests {
         let challenges = DashMap::new();
         let did = "did:key:z6Mk-test";
 
-        let challenge = create_challenge(&challenges, did);
+        let challenge = create_challenge(&challenges, did, None);
         assert!(challenges.contains_key(did));
 
         assert_eq!(
@@ -377,7 +485,7 @@ mod tests {
         let did = "did:key:z6Mk-test";
         let other = "did:key:z6Mk-other";
 
-        let challenge = create_challenge(&challenges, did);
+        let challenge = create_challenge(&challenges, did, None);
         assert_eq!(
             validate_challenge(&challenges, other, &challenge, 300),
             Err(AuthError::ChallengeNotFound)
@@ -396,6 +504,7 @@ mod tests {
                 challenge: "abc".to_string(),
                 did_key: did.to_string(),
                 created_at: Instant::now() - Duration::from_secs(301),
+                cross_instance: None,
             },
         );
 
@@ -411,7 +520,7 @@ mod tests {
         let challenges = DashMap::new();
         let did = "did:key:z6Mk-test";
 
-        let _ = create_challenge(&challenges, did);
+        let _ = create_challenge(&challenges, did, None);
         assert_eq!(
             validate_challenge(&challenges, did, "wrong", 300),
             Err(AuthError::ChallengeMismatch)
@@ -424,8 +533,10 @@ mod tests {
         let challenges = DashMap::new();
         let did = "did:key:z6Mk-test";
 
-        let challenge = create_challenge(&challenges, did);
-        assert_eq!(check_challenge(&challenges, did, &challenge, 300), Ok(()));
+        let challenge = create_challenge(&challenges, did, None);
+        let checked = check_challenge(&challenges, did, &challenge, 300).unwrap();
+        assert_eq!(checked.challenge, challenge);
+        assert_eq!(checked.did_key, did);
         assert!(challenges.contains_key(did));
 
         assert_eq!(

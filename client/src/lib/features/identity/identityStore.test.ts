@@ -37,6 +37,8 @@ function resetIdentityState() {
   identityState.session = null
   identityState.authenticating = false
   identityState.authError = null
+  identityState.crossInstanceJoining = false
+  identityState.crossInstanceJoinError = null
 }
 
 describe('identityStore session persistence', () => {
@@ -80,6 +82,52 @@ describe('identityStore session persistence', () => {
     const raw = localStorage.getItem('discool-session')
     expect(raw).not.toBeNull()
     expect(JSON.parse(raw ?? '')).toMatchObject({ token: 'token-1' })
+  })
+
+  it('authenticateCrossInstance sends cross payload and persists session', async () => {
+    identityState.identity = {
+      publicKey: new Uint8Array(32).fill(1),
+      didKey: 'did:key:z6Mk-test',
+      username: 'alice',
+      avatarColor: '#3b82f6',
+      registeredAt: '2026-02-24T00:00:00.000Z',
+    }
+    identityState.identityNotRegistered = true
+
+    vi.mocked(requestChallenge).mockResolvedValue({
+      challenge: 'challenge',
+      expiresIn: 60,
+    })
+    vi.mocked(signChallenge).mockResolvedValue('signature')
+    vi.mocked(verifyChallenge).mockResolvedValue({
+      token: 'token-cross',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      user: {
+        id: 'user-1',
+        didKey: 'did:key:z6Mk-test',
+        username: 'alice',
+        displayName: 'Alice',
+        avatarColor: '#3b82f6',
+        avatarUrl: null,
+        createdAt: '2026-02-24T00:00:00.000Z',
+      },
+    })
+
+    await identityState.authenticateCrossInstance()
+
+    expect(requestChallenge).toHaveBeenCalledWith('did:key:z6Mk-test', {
+      username: 'alice',
+      displayName: 'alice',
+      avatarColor: '#3b82f6',
+    })
+    expect(verifyChallenge).toHaveBeenCalledWith(
+      'did:key:z6Mk-test',
+      'challenge',
+      'signature',
+      true,
+    )
+    expect(identityState.session?.token).toBe('token-cross')
+    expect(identityState.identityNotRegistered).toBe(false)
   })
 
   it('restores session from localStorage on initialize()', async () => {
