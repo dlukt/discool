@@ -7,9 +7,11 @@ vi.mock('$lib/api', () => ({
 import { apiFetch } from '$lib/api'
 import {
   getProfile,
+  getRecoveryEmailStatus,
   logout,
   register,
   requestChallenge,
+  startRecoveryEmailAssociation,
   updateProfile,
   uploadAvatar,
   verifyChallenge,
@@ -232,5 +234,50 @@ describe('identityApi', () => {
     expect(lastCall?.[0]).toBe('/api/v1/users/me/avatar')
     expect(lastCall?.[1]?.method).toBe('POST')
     expect(lastCall?.[1]?.body).toBeInstanceOf(FormData)
+  })
+
+  it('getRecoveryEmailStatus maps recovery status payload', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      associated: true,
+      email_masked: 'l***@example.com',
+      verified: false,
+    })
+
+    await expect(getRecoveryEmailStatus()).resolves.toEqual({
+      associated: true,
+      emailMasked: 'l***@example.com',
+      verified: false,
+      verifiedAt: null,
+    })
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/users/me/recovery-email')
+  })
+
+  it('startRecoveryEmailAssociation sends snake_case payload', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      associated: true,
+      email_masked: 'l***@example.com',
+      verified: false,
+    })
+
+    await startRecoveryEmailAssociation({
+      email: 'liam@example.com',
+      encryptedPrivateKey: 'c2VjcmV0',
+      encryptionContext: {
+        algorithm: 'aes-256-gcm',
+        version: 1,
+      },
+    })
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/users/me/recovery-email', {
+      method: 'POST',
+      body: JSON.stringify({
+        email: 'liam@example.com',
+        encrypted_private_key: 'c2VjcmV0',
+        encryption_context: {
+          algorithm: 'aes-256-gcm',
+          version: 1,
+        },
+      }),
+    })
   })
 })

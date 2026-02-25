@@ -3,9 +3,14 @@ import { apiFetch } from '$lib/api'
 import {
   type AuthSession,
   type CrossInstanceChallengeInput,
+  type RecoveryEmailStatus,
+  type RecoveryEmailStatusWire,
   type RegisteredUser,
   type RegisteredUserWire,
+  type StartRecoveryEmailInput,
+  toRecoveryEmailStatus,
   toRegisteredUser,
+  toStartRecoveryEmailInputWire,
   toUpdateProfileInputWire,
   type UpdateProfileInput,
 } from './types'
@@ -162,4 +167,19 @@ export function uploadAvatar(file: File): Promise<RegisteredUser> {
     method: 'POST',
     body: formData,
   }).then(toRegisteredUser)
+}
+
+export function getRecoveryEmailStatus(): Promise<RecoveryEmailStatus> {
+  return apiFetch<RecoveryEmailStatusWire>(
+    '/api/v1/users/me/recovery-email',
+  ).then(toRecoveryEmailStatus)
+}
+
+export function startRecoveryEmailAssociation(
+  input: StartRecoveryEmailInput,
+): Promise<RecoveryEmailStatus> {
+  return apiFetch<RecoveryEmailStatusWire>('/api/v1/users/me/recovery-email', {
+    method: 'POST',
+    body: JSON.stringify(toStartRecoveryEmailInputWire(input)),
+  }).then(toRecoveryEmailStatus)
 }

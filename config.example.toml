@@ -26,6 +26,17 @@
 #   DISCOOL_DATABASE__URL=sqlite::memory:
 #   DISCOOL_METRICS__ENABLED=true
 #   DISCOOL_BACKUP__OUTPUT_DIR=/var/backups/discool
+#   DISCOOL_EMAIL__SMTP_HOST=smtp.example.com
+#   DISCOOL_EMAIL__SMTP_PORT=587
+#   DISCOOL_EMAIL__SMTP_USERNAME=mailer
+#   DISCOOL_EMAIL__SMTP_PASSWORD=supersecret
+#   DISCOOL_EMAIL__FROM_ADDRESS=no-reply@example.com
+#   DISCOOL_EMAIL__FROM_NAME=Discool
+#   DISCOOL_EMAIL__VERIFICATION_URL_BASE=https://chat.example.com/api/v1/auth/recovery-email/verify
+#   DISCOOL_EMAIL__TOKEN_TTL_SECONDS=900
+#   DISCOOL_EMAIL__START_RATE_LIMIT_PER_HOUR=5
+#   DISCOOL_EMAIL__VERIFY_RATE_LIMIT_PER_HOUR=20
+#   DISCOOL_EMAIL__SERVER_SECRET=change-me-in-production
 #
 # Note: For log filtering, the standard Rust `RUST_LOG` env var overrides
 # `log.level` (debugging escape hatch).
@@ -89,3 +100,35 @@
 #
 # Maximum allowed avatar upload size in bytes (default: 2097152 = 2 MB)
 # max_size_bytes = 2097152
+
+# ---------------------------------------------------------------------------
+# [email]
+# ---------------------------------------------------------------------------
+# SMTP host. Use "stub" for local/dev tests without actual delivery.
+# smtp_host = "stub"
+#
+# SMTP port (default: 1025)
+# smtp_port = 1025
+#
+# Optional SMTP auth (set both or neither)
+# smtp_username = "mailer"
+# smtp_password = "secret"
+#
+# Sender identity for verification emails
+# from_address = "no-reply@discool.local"
+# from_name = "Discool"
+#
+# Base URL used for verification links in emails
+# verification_url_base = "http://localhost:3000/api/v1/auth/recovery-email/verify"
+#
+# Verification token TTL in seconds (default: 900 = 15 minutes)
+# token_ttl_seconds = 900
+#
+# Per-user and per-IP initiation limit (default: 5 per hour)
+# start_rate_limit_per_hour = 5
+#
+# Per-IP verification attempt limit (default: 20 per hour)
+# verify_rate_limit_per_hour = 20
+#
+# Secret used to derive server-side recovery encryption keys (required in production)
+# server_secret = "change-me-in-production"

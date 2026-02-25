@@ -47,6 +47,17 @@ let joinGuildName = $derived(
     return guildName || null
   })(),
 )
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let showRecoveryNudge = $derived(
+  Boolean(
+    identityState.session &&
+      view === 'home' &&
+      !identityState.recoveryEmailLoading &&
+      !identityState.recoveryNudgeDismissed &&
+      !identityState.recoveryEmailStatus?.associated,
+  ),
+)
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let inviteContextInvalid = $derived(
   (() => {
@@ -120,6 +131,13 @@ async function loadStatus() {
   } finally {
     loading = false
   }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+async function handleRecoveryPromptRecover() {
+  throw new Error(
+    'Email recovery requires a previously verified recovery email and will be completed in Story 2.7. For now, create a new identity.',
+  )
 }
 
 onMount(() => {
@@ -217,6 +235,36 @@ onMount(() => {
               </p>
             </header>
 
+            {#if showRecoveryNudge}
+              <section class="rounded-md border border-border bg-muted p-4">
+                <p class="text-sm font-medium text-foreground">
+                  Add a recovery email to protect this identity.
+                </p>
+                <p class="mt-1 text-sm text-muted-foreground">
+                  Optional, and only shown after your first successful session.
+                </p>
+                <div class="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    class="inline-flex items-center justify-center rounded-md bg-fire px-3 py-2 text-sm font-medium text-fire-foreground transition-opacity hover:opacity-90"
+                    onclick={() => {
+                      identityState.recoveryNudgeDismissed = false
+                      view = 'settings'
+                    }}
+                  >
+                    Set up recovery email
+                  </button>
+                  <button
+                    type="button"
+                    class="inline-flex items-center justify-center rounded-md bg-background px-3 py-2 text-sm font-medium text-foreground transition-opacity hover:opacity-90"
+                    onclick={() => identityState.dismissRecoveryNudge()}
+                  >
+                    Not now
+                  </button>
+                </div>
+              </section>
+            {/if}
+
             <section class="flex flex-wrap gap-3">
               <button
                 type="button"
@@ -249,7 +297,10 @@ onMount(() => {
     </div>
   </main>
 {:else if status && status.initialized && identityState.identityCorrupted}
-  <RecoveryPrompt onstartfresh={() => identityState.clear()} />
+  <RecoveryPrompt
+    onstartfresh={() => identityState.clear()}
+    onrecover={handleRecoveryPromptRecover}
+  />
 {:else if status && status.initialized && identityState.identityNotRegistered && !reRegistering}
   <CrossInstanceJoinPrompt
     guildName={joinGuildName}

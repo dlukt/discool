@@ -43,6 +43,40 @@ export type CrossInstanceChallengeInput = {
   avatarColor?: string | null
 }
 
+export type RecoveryEmailStatus = {
+  associated: boolean
+  emailMasked: string | null
+  verified: boolean
+  verifiedAt: string | null
+}
+
+export type RecoveryEmailStatusWire = {
+  associated: boolean
+  email_masked?: string
+  verified: boolean
+  verified_at?: string
+}
+
+export type RecoveryEmailEncryptionContextInput = {
+  algorithm: string
+  version: number
+}
+
+export type StartRecoveryEmailInput = {
+  email: string
+  encryptedPrivateKey: string
+  encryptionContext: RecoveryEmailEncryptionContextInput
+}
+
+export type StartRecoveryEmailInputWire = {
+  email: string
+  encrypted_private_key: string
+  encryption_context: {
+    algorithm: string
+    version: number
+  }
+}
+
 export type UpdateProfileInputWire = {
   display_name?: string | null
   avatar_color?: string | null
@@ -71,4 +105,28 @@ export function toUpdateProfileInputWire(
     wire.avatar_color = input.avatarColor ?? null
   }
   return wire
+}
+
+export function toRecoveryEmailStatus(
+  wire: RecoveryEmailStatusWire,
+): RecoveryEmailStatus {
+  return {
+    associated: wire.associated,
+    emailMasked: wire.email_masked ?? null,
+    verified: wire.verified,
+    verifiedAt: wire.verified_at ?? null,
+  }
+}
+
+export function toStartRecoveryEmailInputWire(
+  input: StartRecoveryEmailInput,
+): StartRecoveryEmailInputWire {
+  return {
+    email: input.email,
+    encrypted_private_key: input.encryptedPrivateKey,
+    encryption_context: {
+      algorithm: input.encryptionContext.algorithm,
+      version: input.encryptionContext.version,
+    },
+  }
 }

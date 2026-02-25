@@ -16,6 +16,8 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default)]
     pub avatar: AvatarConfig,
+    #[serde(default)]
+    pub email: EmailConfig,
 }
 
 impl Config {
@@ -107,6 +109,67 @@ impl Config {
             ));
         }
 
+        if self.email.smtp_host.trim().is_empty() {
+            return Err(ConfigValidationError::new(
+                "email.smtp_host",
+                "must not be empty",
+            ));
+        }
+        if self.email.smtp_port == 0 {
+            return Err(ConfigValidationError::new(
+                "email.smtp_port",
+                "must be between 1 and 65535",
+            ));
+        }
+        if self.email.from_address.trim().is_empty() {
+            return Err(ConfigValidationError::new(
+                "email.from_address",
+                "must not be empty",
+            ));
+        }
+        if self.email.from_name.trim().is_empty() {
+            return Err(ConfigValidationError::new(
+                "email.from_name",
+                "must not be empty",
+            ));
+        }
+        if self.email.verification_url_base.trim().is_empty() {
+            return Err(ConfigValidationError::new(
+                "email.verification_url_base",
+                "must not be empty",
+            ));
+        }
+        if self.email.token_ttl_seconds == 0 {
+            return Err(ConfigValidationError::new(
+                "email.token_ttl_seconds",
+                "must be >= 1",
+            ));
+        }
+        if self.email.start_rate_limit_per_hour == 0 {
+            return Err(ConfigValidationError::new(
+                "email.start_rate_limit_per_hour",
+                "must be >= 1",
+            ));
+        }
+        if self.email.verify_rate_limit_per_hour == 0 {
+            return Err(ConfigValidationError::new(
+                "email.verify_rate_limit_per_hour",
+                "must be >= 1",
+            ));
+        }
+        if self.email.server_secret.trim().is_empty() {
+            return Err(ConfigValidationError::new(
+                "email.server_secret",
+                "must not be empty",
+            ));
+        }
+        if self.email.smtp_username.is_some() ^ self.email.smtp_password.is_some() {
+            return Err(ConfigValidationError::new(
+                "email.smtp_username/email.smtp_password",
+                "must be set together",
+            ));
+        }
+
         if let Some(output_dir) = self
             .backup
             .as_ref()
@@ -190,6 +253,50 @@ impl Default for AvatarConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct EmailConfig {
+    #[serde(default = "default_email_smtp_host")]
+    pub smtp_host: String,
+    #[serde(default = "default_email_smtp_port")]
+    pub smtp_port: u16,
+    #[serde(default)]
+    pub smtp_username: Option<String>,
+    #[serde(default)]
+    pub smtp_password: Option<String>,
+    #[serde(default = "default_email_from_address")]
+    pub from_address: String,
+    #[serde(default = "default_email_from_name")]
+    pub from_name: String,
+    #[serde(default = "default_email_verification_url_base")]
+    pub verification_url_base: String,
+    #[serde(default = "default_email_token_ttl_seconds")]
+    pub token_ttl_seconds: u64,
+    #[serde(default = "default_email_start_rate_limit_per_hour")]
+    pub start_rate_limit_per_hour: u32,
+    #[serde(default = "default_email_verify_rate_limit_per_hour")]
+    pub verify_rate_limit_per_hour: u32,
+    #[serde(default = "default_email_server_secret")]
+    pub server_secret: String,
+}
+
+impl Default for EmailConfig {
+    fn default() -> Self {
+        Self {
+            smtp_host: default_email_smtp_host(),
+            smtp_port: default_email_smtp_port(),
+            smtp_username: None,
+            smtp_password: None,
+            from_address: default_email_from_address(),
+            from_name: default_email_from_name(),
+            verification_url_base: default_email_verification_url_base(),
+            token_ttl_seconds: default_email_token_ttl_seconds(),
+            start_rate_limit_per_hour: default_email_start_rate_limit_per_hour(),
+            verify_rate_limit_per_hour: default_email_verify_rate_limit_per_hour(),
+            server_secret: default_email_server_secret(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub url: String, // Required — no default. Validation catches missing.
     #[serde(default = "default_max_connections")]
@@ -214,6 +321,42 @@ fn default_avatar_upload_dir() -> String {
 
 fn default_avatar_max_size_bytes() -> usize {
     2 * 1024 * 1024
+}
+
+fn default_email_smtp_host() -> String {
+    "stub".to_string()
+}
+
+fn default_email_smtp_port() -> u16 {
+    1025
+}
+
+fn default_email_from_address() -> String {
+    "no-reply@discool.local".to_string()
+}
+
+fn default_email_from_name() -> String {
+    "Discool".to_string()
+}
+
+fn default_email_verification_url_base() -> String {
+    "http://localhost:3000/api/v1/auth/recovery-email/verify".to_string()
+}
+
+fn default_email_token_ttl_seconds() -> u64 {
+    900
+}
+
+fn default_email_start_rate_limit_per_hour() -> u32 {
+    5
+}
+
+fn default_email_verify_rate_limit_per_hour() -> u32 {
+    20
+}
+
+fn default_email_server_secret() -> String {
+    "change-me-in-production".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]

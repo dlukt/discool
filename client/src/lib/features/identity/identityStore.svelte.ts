@@ -2,21 +2,29 @@ import { ApiError, setSessionToken, setUnauthorizedHandler } from '$lib/api'
 
 import {
   clearStoredIdentity,
+  decryptSecretKey,
   finalizeIdentityRegistration,
   loadStoredIdentity,
   signChallenge,
 } from './crypto'
 import {
   getProfile as getProfileApi,
+  getRecoveryEmailStatus as getRecoveryEmailStatusApi,
   logout as logoutApi,
   register as registerApi,
   requestChallenge,
+  startRecoveryEmailAssociation as startRecoveryEmailAssociationApi,
   updateProfile as updateProfileApi,
   uploadAvatar as uploadAvatarApi,
   verifyChallenge,
 } from './identityApi'
 import { clearLastLocation } from './navigationState'
-import type { AuthSession, StoredIdentity, UpdateProfileInput } from './types'
+import type {
+  AuthSession,
+  RecoveryEmailStatus,
+  StoredIdentity,
+  UpdateProfileInput,
+} from './types'
 
 const SESSION_KEY = 'discool-session'
 let storageListenerInstalled = false
@@ -40,6 +48,14 @@ function safeWriteSessionToStorage(session: AuthSession): void {
   }
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i])
+  }
+  return btoa(binary)
+}
+
 export const identityState = $state({
   identity: null as StoredIdentity | null,
   identityCorrupted: false,
@@ -51,6 +67,10 @@ export const identityState = $state({
   authError: null as string | null,
   crossInstanceJoining: false,
   crossInstanceJoinError: null as string | null,
+  recoveryEmailStatus: null as RecoveryEmailStatus | null,
+  recoveryEmailLoading: false,
+  recoveryEmailError: null as string | null,
+  recoveryNudgeDismissed: false,
 
   initialize: async () => {
     identityState.loading = true
@@ -59,6 +79,9 @@ export const identityState = $state({
     identityState.identityNotRegistered = false
     identityState.crossInstanceJoining = false
     identityState.crossInstanceJoinError = null
+    identityState.recoveryEmailStatus = null
+    identityState.recoveryEmailLoading = false
+    identityState.recoveryEmailError = null
 
     if (typeof window !== 'undefined' && !storageListenerInstalled) {
       storageListenerInstalled = true
@@ -76,6 +99,9 @@ export const identityState = $state({
           identityState.identityNotRegistered = false
           identityState.crossInstanceJoining = false
           identityState.crossInstanceJoinError = null
+          identityState.recoveryEmailStatus = null
+          identityState.recoveryEmailLoading = false
+          identityState.recoveryEmailError = null
           clearLastLocation()
           setSessionToken(null)
           return
@@ -85,6 +111,9 @@ export const identityState = $state({
         identityState.identityNotRegistered = false
         identityState.crossInstanceJoining = false
         identityState.crossInstanceJoinError = null
+        identityState.recoveryEmailStatus = null
+        identityState.recoveryEmailLoading = false
+        identityState.recoveryEmailError = null
         identityState.authenticating = false
         const restored = await identityState.restoreSession()
         if (epoch !== authEpoch) return
@@ -107,6 +136,9 @@ export const identityState = $state({
         identityState.authError = null
         identityState.crossInstanceJoining = false
         identityState.crossInstanceJoinError = null
+        identityState.recoveryEmailStatus = null
+        identityState.recoveryEmailLoading = false
+        identityState.recoveryEmailError = null
         safeRemoveSessionFromStorage()
         clearLastLocation()
         setSessionToken(null)
@@ -124,6 +156,9 @@ export const identityState = $state({
         identityState.authError = null
         identityState.crossInstanceJoining = false
         identityState.crossInstanceJoinError = null
+        identityState.recoveryEmailStatus = null
+        identityState.recoveryEmailLoading = false
+        identityState.recoveryEmailError = null
         setSessionToken(null)
       }
     } catch (err) {
@@ -132,6 +167,9 @@ export const identityState = $state({
       identityState.identityNotRegistered = false
       identityState.crossInstanceJoining = false
       identityState.crossInstanceJoinError = null
+      identityState.recoveryEmailStatus = null
+      identityState.recoveryEmailLoading = false
+      identityState.recoveryEmailError = null
       identityState.error =
         err instanceof Error ? err.message : 'Failed to load identity'
       throw err
@@ -212,6 +250,9 @@ export const identityState = $state({
       identityState.authError = null
       identityState.crossInstanceJoining = false
       identityState.crossInstanceJoinError = null
+      identityState.recoveryEmailStatus = null
+      identityState.recoveryEmailLoading = false
+      identityState.recoveryEmailError = null
       safeRemoveSessionFromStorage()
       clearLastLocation()
       setSessionToken(null)
@@ -250,6 +291,9 @@ export const identityState = $state({
           identityState.authError = null
           identityState.identityNotRegistered = true
           identityState.crossInstanceJoinError = null
+          identityState.recoveryEmailStatus = null
+          identityState.recoveryEmailLoading = false
+          identityState.recoveryEmailError = null
           setSessionToken(null)
           return
         }
@@ -268,9 +312,13 @@ export const identityState = $state({
       identityState.session = session
       safeWriteSessionToStorage(session)
       setSessionToken(session.token)
+      void identityState.loadRecoveryEmailStatus()
     } catch (err) {
       if (epoch !== authEpoch) return
       identityState.session = null
+      identityState.recoveryEmailStatus = null
+      identityState.recoveryEmailLoading = false
+      identityState.recoveryEmailError = null
       setSessionToken(null)
       if (err instanceof Error) {
         identityState.authError = err.message
@@ -331,9 +379,13 @@ export const identityState = $state({
       identityState.crossInstanceJoinError = null
       safeWriteSessionToStorage(session)
       setSessionToken(session.token)
+      void identityState.loadRecoveryEmailStatus()
     } catch (err) {
       if (epoch !== authEpoch) return
       identityState.session = null
+      identityState.recoveryEmailStatus = null
+      identityState.recoveryEmailLoading = false
+      identityState.recoveryEmailError = null
       setSessionToken(null)
       if (err instanceof Error) {
         identityState.crossInstanceJoinError = err.message
@@ -384,6 +436,76 @@ export const identityState = $state({
     return nextUser
   },
 
+  loadRecoveryEmailStatus: async (): Promise<RecoveryEmailStatus | null> => {
+    if (!identityState.session) {
+      identityState.recoveryEmailStatus = null
+      identityState.recoveryEmailLoading = false
+      identityState.recoveryEmailError = null
+      return null
+    }
+
+    identityState.recoveryEmailLoading = true
+    identityState.recoveryEmailError = null
+    try {
+      const status = await getRecoveryEmailStatusApi()
+      identityState.recoveryEmailStatus = status
+      return status
+    } catch (err) {
+      if (err instanceof Error) {
+        identityState.recoveryEmailError = err.message
+      } else {
+        identityState.recoveryEmailError =
+          'Failed to load recovery email status'
+      }
+      return null
+    } finally {
+      identityState.recoveryEmailLoading = false
+    }
+  },
+
+  startRecoveryEmailAssociation: async (email: string) => {
+    if (!identityState.session) {
+      throw new Error('No active session')
+    }
+    const normalizedEmail = email.trim()
+    if (!normalizedEmail) {
+      throw new Error('Email is required')
+    }
+
+    identityState.recoveryEmailLoading = true
+    identityState.recoveryEmailError = null
+    let secretKey: Uint8Array | null = null
+    try {
+      secretKey = await decryptSecretKey()
+      const status = await startRecoveryEmailAssociationApi({
+        email: normalizedEmail,
+        encryptedPrivateKey: bytesToBase64(secretKey),
+        encryptionContext: {
+          algorithm: 'aes-256-gcm',
+          version: 1,
+        },
+      })
+      identityState.recoveryEmailStatus = status
+      identityState.recoveryNudgeDismissed = false
+      return status
+    } catch (err) {
+      if (err instanceof Error) {
+        identityState.recoveryEmailError = err.message
+      } else {
+        identityState.recoveryEmailError =
+          'Failed to send recovery verification email'
+      }
+      throw err
+    } finally {
+      secretKey?.fill(0)
+      identityState.recoveryEmailLoading = false
+    }
+  },
+
+  dismissRecoveryNudge: () => {
+    identityState.recoveryNudgeDismissed = true
+  },
+
   logout: async () => {
     authEpoch++
     const token = identityState.session?.token
@@ -393,6 +515,9 @@ export const identityState = $state({
     identityState.identityNotRegistered = false
     identityState.crossInstanceJoining = false
     identityState.crossInstanceJoinError = null
+    identityState.recoveryEmailStatus = null
+    identityState.recoveryEmailLoading = false
+    identityState.recoveryEmailError = null
     safeRemoveSessionFromStorage()
     clearLastLocation()
     setSessionToken(null)
@@ -416,6 +541,9 @@ export const identityState = $state({
       identityState.identityNotRegistered = false
       identityState.crossInstanceJoining = false
       identityState.crossInstanceJoinError = null
+      identityState.recoveryEmailStatus = null
+      identityState.recoveryEmailLoading = false
+      identityState.recoveryEmailError = null
       setSessionToken(null)
       return false
     }
@@ -425,6 +553,9 @@ export const identityState = $state({
       identityState.identityNotRegistered = false
       identityState.crossInstanceJoining = false
       identityState.crossInstanceJoinError = null
+      identityState.recoveryEmailStatus = null
+      identityState.recoveryEmailLoading = false
+      identityState.recoveryEmailError = null
       setSessionToken(null)
       return false
     }
@@ -524,6 +655,7 @@ export const identityState = $state({
       identityState.crossInstanceJoining = false
       identityState.crossInstanceJoinError = null
       setSessionToken(token)
+      void identityState.loadRecoveryEmailStatus()
       return true
     } catch {
       identityState.session = null
@@ -531,6 +663,9 @@ export const identityState = $state({
       identityState.identityNotRegistered = false
       identityState.crossInstanceJoining = false
       identityState.crossInstanceJoinError = null
+      identityState.recoveryEmailStatus = null
+      identityState.recoveryEmailLoading = false
+      identityState.recoveryEmailError = null
       safeRemoveSessionFromStorage()
       setSessionToken(null)
       return false
@@ -546,6 +681,9 @@ setUnauthorizedHandler(() => {
   identityState.identityNotRegistered = false
   identityState.crossInstanceJoining = false
   identityState.crossInstanceJoinError = null
+  identityState.recoveryEmailStatus = null
+  identityState.recoveryEmailLoading = false
+  identityState.recoveryEmailError = null
   safeRemoveSessionFromStorage()
   setSessionToken(null)
   void identityState.authenticate()

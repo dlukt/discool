@@ -60,7 +60,7 @@ development_status:
   2-8-vitest-setup-and-client-test-baseline: done
   2-4-display-name-and-avatar-management: done
   2-5-cross-instance-identity-verification: done
-  2-6-optional-email-association: backlog
+  2-6-optional-email-association: done
   2-7-email-based-identity-recovery: backlog
   epic-2-retrospective: optional
 

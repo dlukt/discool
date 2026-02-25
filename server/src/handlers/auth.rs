@@ -1,8 +1,8 @@
 use axum::{
     Json,
-    extract::State,
     extract::rejection::JsonRejection,
-    http::StatusCode,
+    extract::{Query, State},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use chrono::Utc;
@@ -15,7 +15,7 @@ use crate::{
     db::DbPool,
     identity::{challenge, did, keypair},
     models::user::UserResponse,
-    services::auth_service,
+    services::{auth_service, recovery_email_service},
 };
 
 const MAX_USERNAME_LEN: usize = 32;
@@ -58,6 +58,11 @@ pub struct VerifyRequest {
 pub struct CrossInstanceVerifyRequest {
     #[serde(default)]
     pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RecoveryEmailVerifyQuery {
+    pub token: Option<String>,
 }
 
 fn is_hex_color(value: &str) -> bool {
@@ -538,13 +543,42 @@ pub async fn logout(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+pub async fn verify_recovery_email(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<RecoveryEmailVerifyQuery>,
+) -> Result<Response, AppError> {
+    let token = query.token.as_deref().unwrap_or("").trim();
+    if token.is_empty() {
+        return Err(AppError::ValidationError("token is required".to_string()));
+    }
+
+    let requester_ip = recovery_email_service::requester_ip_from_headers(&headers);
+    let status = recovery_email_service::verify_recovery_email_token(
+        &state.pool,
+        &state.config.email,
+        token,
+        &requester_ip,
+    )
+    .await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "data": { "verified": status.verified } })),
+    )
+        .into_response())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use std::time::Instant;
 
-    use axum::{Json, body::to_bytes, extract::State, response::IntoResponse};
+    use axum::{
+        Json, body::to_bytes, extract::Query, extract::State, http::HeaderMap,
+        response::IntoResponse,
+    };
     use dashmap::DashMap;
     use ed25519_dalek::Signer;
 
@@ -560,12 +594,17 @@ mod tests {
         out
     }
 
-    async fn test_state() -> AppState {
+    async fn test_state_with_email_limits(
+        start_rate_limit_per_hour: u32,
+        verify_rate_limit_per_hour: u32,
+    ) -> AppState {
         let mut cfg = crate::config::Config::default();
         cfg.database = Some(crate::config::DatabaseConfig {
             url: "sqlite::memory:".to_string(),
             max_connections: 1,
         });
+        cfg.email.start_rate_limit_per_hour = start_rate_limit_per_hour;
+        cfg.email.verify_rate_limit_per_hour = verify_rate_limit_per_hour;
 
         let pool = crate::db::init_pool(cfg.database.as_ref().unwrap())
             .await
@@ -578,6 +617,15 @@ mod tests {
             start_time: Instant::now(),
             challenges: Arc::new(DashMap::new()),
         }
+    }
+
+    async fn test_state() -> AppState {
+        let defaults = crate::config::EmailConfig::default();
+        test_state_with_email_limits(
+            defaults.start_rate_limit_per_hour,
+            defaults.verify_rate_limit_per_hour,
+        )
+        .await
     }
 
     async fn json_value(res: Response) -> serde_json::Value {
@@ -1264,5 +1312,203 @@ mod tests {
 
         let res = err.into_response();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn verify_recovery_email_marks_association_verified_once() {
+        let state = test_state().await;
+        let did_key = did_for_signing_key([11u8; 32]);
+
+        let _ = register(
+            State(state.clone()),
+            Ok(Json(RegisterRequest {
+                did_key: Some(did_key.clone()),
+                username: Some("liam".to_string()),
+                avatar_color: None,
+            })),
+        )
+        .await
+        .unwrap();
+
+        let user = auth_service::fetch_user_by_did(&state.pool, &did_key)
+            .await
+            .unwrap();
+        let started = recovery_email_service::start_recovery_email_association(
+            &state.pool,
+            &state.config.email,
+            &user.id,
+            &recovery_email_service::StartRecoveryEmailInput {
+                email: "liam@example.com".to_string(),
+                encrypted_private_key: "c2VjcmV0".to_string(),
+                encryption_algorithm: "aes-256-gcm".to_string(),
+                encryption_version: 1,
+                requester_ip: "127.0.0.1".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let status_before =
+            recovery_email_service::get_recovery_email_status(&state.pool, &user.id)
+                .await
+                .unwrap();
+        assert_eq!(status_before.verified, false);
+
+        let res = verify_recovery_email(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(RecoveryEmailVerifyQuery {
+                token: Some(started.token.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let value = json_value(res).await;
+        assert_eq!(value["data"]["verified"], json!(true));
+
+        let encrypted_count: i64 = match &state.pool {
+            crate::db::DbPool::Postgres(pool) => sqlx::query_scalar(
+                "SELECT COUNT(*) FROM user_recovery_email WHERE user_id = $1 AND encrypted_private_key IS NOT NULL",
+            )
+            .bind(&user.id)
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            crate::db::DbPool::Sqlite(pool) => sqlx::query_scalar(
+                "SELECT COUNT(*) FROM user_recovery_email WHERE user_id = ?1 AND encrypted_private_key IS NOT NULL",
+            )
+            .bind(&user.id)
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+        };
+        assert_eq!(encrypted_count, 1);
+
+        let err = verify_recovery_email(
+            State(state),
+            HeaderMap::new(),
+            Query(RecoveryEmailVerifyQuery {
+                token: Some(started.token),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.into_response().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn verify_recovery_email_rejects_expired_token() {
+        let state = test_state().await;
+        let did_key = did_for_signing_key([12u8; 32]);
+
+        let _ = register(
+            State(state.clone()),
+            Ok(Json(RegisterRequest {
+                did_key: Some(did_key.clone()),
+                username: Some("liam".to_string()),
+                avatar_color: None,
+            })),
+        )
+        .await
+        .unwrap();
+
+        let user = auth_service::fetch_user_by_did(&state.pool, &did_key)
+            .await
+            .unwrap();
+        let started = recovery_email_service::start_recovery_email_association(
+            &state.pool,
+            &state.config.email,
+            &user.id,
+            &recovery_email_service::StartRecoveryEmailInput {
+                email: "liam@example.com".to_string(),
+                encrypted_private_key: "c2VjcmV0".to_string(),
+                encryption_algorithm: "aes-256-gcm".to_string(),
+                encryption_version: 1,
+                requester_ip: "127.0.0.1".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let token_hash: String = match &state.pool {
+            crate::db::DbPool::Postgres(pool) => sqlx::query_scalar(
+                "SELECT token_hash FROM email_verification_tokens WHERE user_id = $1 LIMIT 1",
+            )
+            .bind(&user.id)
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            crate::db::DbPool::Sqlite(pool) => sqlx::query_scalar(
+                "SELECT token_hash FROM email_verification_tokens WHERE user_id = ?1 LIMIT 1",
+            )
+            .bind(&user.id)
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+        };
+
+        match &state.pool {
+            crate::db::DbPool::Postgres(pool) => {
+                sqlx::query(
+                    "UPDATE email_verification_tokens SET expires_at = $1 WHERE token_hash = $2",
+                )
+                .bind("2000-01-01T00:00:00Z")
+                .bind(&token_hash)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            crate::db::DbPool::Sqlite(pool) => {
+                sqlx::query(
+                    "UPDATE email_verification_tokens SET expires_at = ?1 WHERE token_hash = ?2",
+                )
+                .bind("2000-01-01T00:00:00Z")
+                .bind(&token_hash)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+
+        let err = verify_recovery_email(
+            State(state),
+            HeaderMap::new(),
+            Query(RecoveryEmailVerifyQuery {
+                token: Some(started.token),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.into_response().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn verify_recovery_email_rate_limits_invalid_attempts_by_ip() {
+        let state = test_state_with_email_limits(5, 1).await;
+        let first = verify_recovery_email(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(RecoveryEmailVerifyQuery {
+                token: Some("not-a-real-token".to_string()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(first.into_response().status(), StatusCode::UNAUTHORIZED);
+
+        let second = verify_recovery_email(
+            State(state),
+            HeaderMap::new(),
+            Query(RecoveryEmailVerifyQuery {
+                token: Some("not-a-real-token".to_string()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            second.into_response().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 }

@@ -3,26 +3,36 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from '$lib/api'
 
-const { saveProfile, identityState } = vi.hoisted(() => {
-  const saveProfile = vi.fn()
-  const identityState = {
-    session: {
-      token: 'token-1',
-      expiresAt: '2026-03-01T00:00:00.000Z',
-      user: {
-        id: 'user-1',
-        didKey: 'did:key:z6Mk-test',
-        username: 'alice',
-        displayName: 'Alice',
-        avatarColor: '#3b82f6' as string | null,
-        avatarUrl: null as string | null,
-        createdAt: '2026-02-24T00:00:00.000Z',
+const { saveProfile, startRecoveryEmailAssociation, identityState } =
+  vi.hoisted(() => {
+    const saveProfile = vi.fn()
+    const startRecoveryEmailAssociation = vi.fn()
+    const identityState = {
+      session: {
+        token: 'token-1',
+        expiresAt: '2026-03-01T00:00:00.000Z',
+        user: {
+          id: 'user-1',
+          didKey: 'did:key:z6Mk-test',
+          username: 'alice',
+          displayName: 'Alice',
+          avatarColor: '#3b82f6' as string | null,
+          avatarUrl: null as string | null,
+          createdAt: '2026-02-24T00:00:00.000Z',
+        },
       },
-    },
-    saveProfile,
-  }
-  return { saveProfile, identityState }
-})
+      saveProfile,
+      startRecoveryEmailAssociation,
+      recoveryEmailStatus: null as {
+        associated: boolean
+        emailMasked: string | null
+        verified: boolean
+        verifiedAt: string | null
+      } | null,
+      recoveryEmailLoading: false,
+    }
+    return { saveProfile, startRecoveryEmailAssociation, identityState }
+  })
 
 vi.mock('./identityStore.svelte', () => ({ identityState }))
 
@@ -44,6 +54,8 @@ describe('ProfileSettingsView', () => {
         createdAt: '2026-02-24T00:00:00.000Z',
       },
     }
+    identityState.recoveryEmailStatus = null
+    identityState.recoveryEmailLoading = false
   })
 
   it('validates display name on blur', async () => {
@@ -147,5 +159,35 @@ describe('ProfileSettingsView', () => {
 
     const alert = await findByRole('alert')
     expect(alert).toHaveTextContent('Unsupported avatar image type')
+  })
+
+  it('renders recovery email status and sends verification action', async () => {
+    startRecoveryEmailAssociation.mockResolvedValue({
+      associated: true,
+      emailMasked: 'a***@example.com',
+      verified: false,
+      verifiedAt: null,
+    })
+
+    const { getByText, getByPlaceholderText, getByRole } =
+      render(ProfileSettingsView)
+    expect(getByText('Status:')).toBeInTheDocument()
+    expect(getByText('Not configured')).toBeInTheDocument()
+
+    await fireEvent.input(getByPlaceholderText('name@example.com'), {
+      target: { value: 'alice@example.com' },
+    })
+    await fireEvent.click(getByRole('button', { name: 'Send verification' }))
+
+    await waitFor(() =>
+      expect(startRecoveryEmailAssociation).toHaveBeenCalledWith(
+        'alice@example.com',
+      ),
+    )
+    expect(
+      getByText(
+        'Verification email sent. Check your inbox and click the link to verify.',
+      ),
+    ).toBeInTheDocument()
   })
 })

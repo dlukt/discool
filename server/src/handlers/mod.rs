@@ -29,10 +29,18 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/register", post(auth::register))
         .route("/auth/challenge", post(auth::challenge))
         .route("/auth/verify", post(auth::verify))
+        .route(
+            "/auth/recovery-email/verify",
+            get(auth::verify_recovery_email),
+        )
         .route("/auth/logout", delete(auth::logout))
         .route(
             "/users/me/profile",
             get(users::get_profile).patch(users::update_profile),
+        )
+        .route(
+            "/users/me/recovery-email",
+            get(users::get_recovery_email).post(users::start_recovery_email),
         )
         .route(
             "/users/me/avatar",

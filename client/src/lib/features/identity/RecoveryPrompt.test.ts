@@ -4,10 +4,14 @@ import { describe, expect, it, vi } from 'vitest'
 import RecoveryPrompt from './RecoveryPrompt.svelte'
 
 describe('RecoveryPrompt', () => {
-  it('renders copy and triggers start-fresh action', async () => {
+  it('renders copy and triggers actions', async () => {
     const onstartfresh = vi.fn()
+    const onrecover = vi.fn()
 
-    const { getByRole, getByText } = render(RecoveryPrompt, { onstartfresh })
+    const { getByRole, getByText } = render(RecoveryPrompt, {
+      onstartfresh,
+      onrecover,
+    })
 
     expect(
       getByText('Your stored identity appears to be damaged'),
@@ -17,6 +21,8 @@ describe('RecoveryPrompt', () => {
     await fireEvent.click(startFresh)
 
     expect(onstartfresh).toHaveBeenCalledTimes(1)
-    expect(getByRole('button', { name: 'Recover via email' })).toBeDisabled()
+    const recover = getByRole('button', { name: 'Recover via email' })
+    await fireEvent.click(recover)
+    expect(onrecover).toHaveBeenCalledTimes(1)
   })
 })

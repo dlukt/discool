@@ -4,7 +4,6 @@ type Props = {
   onrecover?: () => void | Promise<void>
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let { onstartfresh, onrecover }: Props = $props()
 
 let submitting = $state(false)
@@ -18,8 +17,30 @@ async function handleStartFresh() {
   errorMessage = null
   try {
     await onstartfresh?.()
-  } catch {
-    errorMessage = "We couldn't clear your stored data. Please try again."
+  } catch (err) {
+    if (err instanceof Error && err.message.trim()) {
+      errorMessage = err.message
+    } else {
+      errorMessage = "We couldn't clear your stored data. Please try again."
+    }
+  } finally {
+    submitting = false
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+async function handleRecover() {
+  if (submitting) return
+  submitting = true
+  errorMessage = null
+  try {
+    await onrecover?.()
+  } catch (err) {
+    if (err instanceof Error && err.message.trim()) {
+      errorMessage = err.message
+    } else {
+      errorMessage = "We couldn't start email recovery. Please try again."
+    }
   } finally {
     submitting = false
   }
@@ -67,9 +88,8 @@ async function handleStartFresh() {
       <button
         type="button"
         class="inline-flex w-full items-center justify-center rounded-md bg-muted px-4 py-2 text-sm font-medium text-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-        disabled
-        title="Coming soon"
-        onclick={() => void onrecover?.()}
+        disabled={submitting}
+        onclick={() => void handleRecover()}
       >
         Recover via email
       </button>

@@ -3,25 +3,30 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('./crypto', () => ({
   clearStoredIdentity: vi.fn(),
+  decryptSecretKey: vi.fn(),
   finalizeIdentityRegistration: vi.fn(),
   loadStoredIdentity: vi.fn(),
   signChallenge: vi.fn(),
 }))
 
 vi.mock('./identityApi', () => ({
+  getRecoveryEmailStatus: vi.fn(),
   getProfile: vi.fn(),
   logout: vi.fn(),
   register: vi.fn(),
   requestChallenge: vi.fn(),
+  startRecoveryEmailAssociation: vi.fn(),
   updateProfile: vi.fn(),
   uploadAvatar: vi.fn(),
   verifyChallenge: vi.fn(),
 }))
 
-import { loadStoredIdentity, signChallenge } from './crypto'
+import { decryptSecretKey, loadStoredIdentity, signChallenge } from './crypto'
 import {
+  getRecoveryEmailStatus,
   logout,
   requestChallenge,
+  startRecoveryEmailAssociation,
   updateProfile,
   uploadAvatar,
   verifyChallenge,
@@ -39,6 +44,10 @@ function resetIdentityState() {
   identityState.authError = null
   identityState.crossInstanceJoining = false
   identityState.crossInstanceJoinError = null
+  identityState.recoveryEmailStatus = null
+  identityState.recoveryEmailLoading = false
+  identityState.recoveryEmailError = null
+  identityState.recoveryNudgeDismissed = false
 }
 
 describe('identityStore session persistence', () => {
@@ -46,6 +55,12 @@ describe('identityStore session persistence', () => {
     vi.clearAllMocks()
     localStorage.clear()
     resetIdentityState()
+    vi.mocked(getRecoveryEmailStatus).mockResolvedValue({
+      associated: false,
+      emailMasked: null,
+      verified: false,
+      verifiedAt: null,
+    })
   })
 
   it('persists session to localStorage after authenticate()', async () => {
@@ -346,5 +361,70 @@ describe('identityStore session persistence', () => {
       expiresAt,
       user: { displayName: 'Alice Cooper' },
     })
+  })
+
+  it('startRecoveryEmailAssociation decrypts key material and stores status', async () => {
+    identityState.session = {
+      token: 'token-8',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      user: {
+        id: 'user-8',
+        didKey: 'did:key:z6Mk-test',
+        username: 'alice',
+        displayName: 'Alice',
+        avatarColor: '#3b82f6',
+        avatarUrl: null,
+        createdAt: '2026-02-24T00:00:00.000Z',
+      },
+    }
+    vi.mocked(decryptSecretKey).mockResolvedValue(new Uint8Array([1, 2, 3, 4]))
+    vi.mocked(startRecoveryEmailAssociation).mockResolvedValue({
+      associated: true,
+      emailMasked: 'a***@example.com',
+      verified: false,
+      verifiedAt: null,
+    })
+
+    await identityState.startRecoveryEmailAssociation('alice@example.com')
+
+    expect(startRecoveryEmailAssociation).toHaveBeenCalledWith({
+      email: 'alice@example.com',
+      encryptedPrivateKey: 'AQIDBA==',
+      encryptionContext: {
+        algorithm: 'aes-256-gcm',
+        version: 1,
+      },
+    })
+    expect(identityState.recoveryEmailStatus).toEqual({
+      associated: true,
+      emailMasked: 'a***@example.com',
+      verified: false,
+      verifiedAt: null,
+    })
+  })
+
+  it('startRecoveryEmailAssociation clears loading state when decrypt fails', async () => {
+    identityState.session = {
+      token: 'token-9',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      user: {
+        id: 'user-9',
+        didKey: 'did:key:z6Mk-test',
+        username: 'alice',
+        displayName: 'Alice',
+        avatarColor: '#3b82f6',
+        avatarUrl: null,
+        createdAt: '2026-02-24T00:00:00.000Z',
+      },
+    }
+    vi.mocked(decryptSecretKey).mockRejectedValue(new Error('decrypt failed'))
+
+    await expect(
+      identityState.startRecoveryEmailAssociation('alice@example.com'),
+    ).rejects.toThrow('decrypt failed')
+
+    expect(identityState.recoveryEmailLoading).toBe(false)
+    expect(identityState.recoveryEmailError).toBe('decrypt failed')
+    expect(startRecoveryEmailAssociation).not.toHaveBeenCalled()
   })
 })

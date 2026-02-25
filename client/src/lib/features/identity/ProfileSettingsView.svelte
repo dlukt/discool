@@ -20,6 +20,7 @@ type AvatarMode = 'color' | 'image'
 type AvatarColorValue = (typeof avatarColors)[number]['value']
 
 let sessionUser = $derived(identityState.session?.user ?? null)
+let recoveryEmailStatus = $derived(identityState.recoveryEmailStatus)
 let displayName = $state('')
 let avatarColor = $state<AvatarColorValue>(avatarColors[0].value)
 let avatarMode = $state<AvatarMode>('color')
@@ -33,6 +34,12 @@ let statusMessage = $state<string | null>(null)
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let errorMessage = $state<string | null>(null)
 let saving = $state(false)
+let recoveryEmailInput = $state('')
+let recoverySending = $state(false)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let recoveryStatusMessage = $state<string | null>(null)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let recoveryErrorMessage = $state<string | null>(null)
 
 let initialized = false
 $effect(() => {
@@ -154,6 +161,46 @@ async function onSubmit(event: SubmitEvent) {
     }
   } finally {
     saving = false
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function recoveryStatusLabel(): string {
+  if (!recoveryEmailStatus?.associated) return 'Not configured'
+  if (recoveryEmailStatus.verified) return 'Verified'
+  return 'Unverified'
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function recoveryActionLabel(): string {
+  if (recoveryEmailStatus?.associated && !recoveryEmailStatus.verified) {
+    return 'Resend verification'
+  }
+  return 'Send verification'
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+async function onRecoverySubmit(event: SubmitEvent) {
+  event.preventDefault()
+  if (recoverySending || !sessionUser) return
+
+  recoveryStatusMessage = null
+  recoveryErrorMessage = null
+  recoverySending = true
+  try {
+    await identityState.startRecoveryEmailAssociation(recoveryEmailInput)
+    recoveryStatusMessage =
+      'Verification email sent. Check your inbox and click the link to verify.'
+  } catch (err) {
+    if (err instanceof ApiError) {
+      recoveryErrorMessage = err.message
+    } else if (err instanceof Error) {
+      recoveryErrorMessage = err.message
+    } else {
+      recoveryErrorMessage = 'Failed to send recovery verification email.'
+    }
+  } finally {
+    recoverySending = false
   }
 }
 </script>
@@ -306,5 +353,53 @@ async function onSubmit(event: SubmitEvent) {
         {saving ? 'Saving...' : 'Save profile'}
       </button>
     </form>
+
+    <section class="mt-6 rounded-md border border-border bg-muted p-4">
+      <header class="mb-3 space-y-1">
+        <h3 class="text-sm font-semibold">Recovery email (optional)</h3>
+        <p class="text-sm text-muted-foreground">
+          Add an email so this identity can be recovered later if browser storage is lost.
+        </p>
+      </header>
+
+      <p class="text-sm text-muted-foreground">
+        Status:
+        <span class="font-medium text-foreground">{recoveryStatusLabel()}</span>
+        {#if recoveryEmailStatus?.emailMasked}
+          ({recoveryEmailStatus.emailMasked})
+        {/if}
+      </p>
+
+      {#if recoveryStatusMessage}
+        <p class="mt-3 rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-300">
+          {recoveryStatusMessage}
+        </p>
+      {/if}
+      {#if recoveryErrorMessage}
+        <p class="mt-3 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive" role="alert">
+          {recoveryErrorMessage}
+        </p>
+      {/if}
+
+      <form class="mt-3 flex flex-col gap-3 sm:flex-row" onsubmit={onRecoverySubmit} novalidate>
+        <input
+          type="email"
+          class="w-full rounded-md border border-input bg-background px-3 py-2 text-base focus:outline-none focus:ring-2 focus:ring-ring"
+          bind:value={recoveryEmailInput}
+          placeholder="name@example.com"
+          autocomplete="email"
+          required
+        />
+        <button
+          type="submit"
+          class="inline-flex items-center justify-center rounded-md bg-fire px-4 py-2 text-sm font-medium text-fire-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={recoverySending || identityState.recoveryEmailLoading}
+        >
+          {recoverySending || identityState.recoveryEmailLoading
+            ? 'Sending...'
+            : recoveryActionLabel()}
+        </button>
+      </form>
+    </section>
   </div>
 {/if}
