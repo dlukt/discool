@@ -6,6 +6,7 @@ import {
   didKeyFromPublicKey,
   encryptAndStoreKey,
   loadStoredIdentity,
+  restoreIdentityFromRecovery,
   signChallenge,
 } from './crypto'
 
@@ -205,6 +206,66 @@ describe('loadStoredIdentity', () => {
       avatarColor: '#3b82f6',
       registeredAt: '2026-02-24T00:00:00.000Z',
     })
+  })
+})
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i])
+  }
+  return btoa(binary)
+}
+
+describe('restoreIdentityFromRecovery', () => {
+  let store: Map<string, unknown>
+  let restore: () => void
+
+  beforeEach(() => {
+    store = new Map()
+    restore = installFakeIndexedDb(store)
+  })
+
+  afterEach(() => {
+    restore()
+  })
+
+  it('restores identity record and returns stored identity', async () => {
+    const { secretKey, publicKey } = await ed.keygenAsync()
+    const didKey = didKeyFromPublicKey(publicKey)
+
+    const restored = await restoreIdentityFromRecovery({
+      didKey,
+      username: 'alice',
+      avatarColor: '#3b82f6',
+      registeredAt: '2026-02-24T00:00:00.000Z',
+      encryptedPrivateKey: bytesToBase64(secretKey),
+      encryptionContext: {
+        algorithm: 'aes-256-gcm',
+        version: 1,
+      },
+    })
+
+    expect(restored.didKey).toBe(didKey)
+    expect(restored.username).toBe('alice')
+  })
+
+  it('rejects payload when key material does not match did key', async () => {
+    const { secretKey } = await ed.keygenAsync()
+
+    await expect(
+      restoreIdentityFromRecovery({
+        didKey: 'did:key:z6MkeXBLjYiSvqnhFb6D7sHm8yKm4jV45wwBFRaatf1cfZ76',
+        username: 'alice',
+        avatarColor: null,
+        registeredAt: '2026-02-24T00:00:00.000Z',
+        encryptedPrivateKey: bytesToBase64(secretKey),
+        encryptionContext: {
+          algorithm: 'aes-256-gcm',
+          version: 1,
+        },
+      }),
+    ).rejects.toThrow('Recovery payload does not match identity')
   })
 })
 

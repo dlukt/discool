@@ -3,12 +3,18 @@ import { apiFetch } from '$lib/api'
 import {
   type AuthSession,
   type CrossInstanceChallengeInput,
+  type IdentityRecoveryStartResponse,
+  type IdentityRecoveryStartResponseWire,
   type RecoveryEmailStatus,
   type RecoveryEmailStatusWire,
+  type RecoveryIdentityPayload,
+  type RecoveryIdentityPayloadWire,
   type RegisteredUser,
   type RegisteredUserWire,
   type StartRecoveryEmailInput,
+  toIdentityRecoveryStartResponse,
   toRecoveryEmailStatus,
+  toRecoveryIdentityPayload,
   toRegisteredUser,
   toStartRecoveryEmailInputWire,
   toUpdateProfileInputWire,
@@ -182,4 +188,25 @@ export function startRecoveryEmailAssociation(
     method: 'POST',
     body: JSON.stringify(toStartRecoveryEmailInputWire(input)),
   }).then(toRecoveryEmailStatus)
+}
+
+export function startIdentityRecovery(
+  email: string,
+): Promise<IdentityRecoveryStartResponse> {
+  return apiFetch<IdentityRecoveryStartResponseWire>(
+    '/api/v1/auth/recovery-email/start',
+    {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    },
+  ).then(toIdentityRecoveryStartResponse)
+}
+
+export function recoverIdentityByToken(
+  token: string,
+): Promise<RecoveryIdentityPayload> {
+  const query = new URLSearchParams({ token })
+  return apiFetch<RecoveryIdentityPayloadWire>(
+    `/api/v1/auth/recovery-email/recover?${query.toString()}`,
+  ).then(toRecoveryIdentityPayload)
 }

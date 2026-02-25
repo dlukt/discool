@@ -30,9 +30,14 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/challenge", post(auth::challenge))
         .route("/auth/verify", post(auth::verify))
         .route(
+            "/auth/recovery-email/start",
+            post(auth::start_identity_recovery),
+        )
+        .route(
             "/auth/recovery-email/verify",
             get(auth::verify_recovery_email),
         )
+        .route("/auth/recovery-email/recover", get(auth::recover_identity))
         .route("/auth/logout", delete(auth::logout))
         .route(
             "/users/me/profile",

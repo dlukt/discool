@@ -91,7 +91,7 @@ async function handleRecover() {
         disabled={submitting}
         onclick={() => void handleRecover()}
       >
-        Recover via email
+        Recover existing identity
       </button>
     </div>
   </div>

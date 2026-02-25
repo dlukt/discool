@@ -139,6 +139,12 @@ impl Config {
                 "must not be empty",
             ));
         }
+        if self.email.recovery_url_base.trim().is_empty() {
+            return Err(ConfigValidationError::new(
+                "email.recovery_url_base",
+                "must not be empty",
+            ));
+        }
         if self.email.token_ttl_seconds == 0 {
             return Err(ConfigValidationError::new(
                 "email.token_ttl_seconds",
@@ -268,6 +274,8 @@ pub struct EmailConfig {
     pub from_name: String,
     #[serde(default = "default_email_verification_url_base")]
     pub verification_url_base: String,
+    #[serde(default = "default_email_recovery_url_base")]
+    pub recovery_url_base: String,
     #[serde(default = "default_email_token_ttl_seconds")]
     pub token_ttl_seconds: u64,
     #[serde(default = "default_email_start_rate_limit_per_hour")]
@@ -288,6 +296,7 @@ impl Default for EmailConfig {
             from_address: default_email_from_address(),
             from_name: default_email_from_name(),
             verification_url_base: default_email_verification_url_base(),
+            recovery_url_base: default_email_recovery_url_base(),
             token_ttl_seconds: default_email_token_ttl_seconds(),
             start_rate_limit_per_hour: default_email_start_rate_limit_per_hour(),
             verify_rate_limit_per_hour: default_email_verify_rate_limit_per_hour(),
@@ -341,6 +350,10 @@ fn default_email_from_name() -> String {
 
 fn default_email_verification_url_base() -> String {
     "http://localhost:3000/api/v1/auth/recovery-email/verify".to_string()
+}
+
+fn default_email_recovery_url_base() -> String {
+    "http://localhost:3000/".to_string()
 }
 
 fn default_email_token_ttl_seconds() -> u64 {

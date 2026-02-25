@@ -121,6 +121,9 @@
 # Base URL used for verification links in emails
 # verification_url_base = "http://localhost:3000/api/v1/auth/recovery-email/verify"
 #
+# Base URL used for identity recovery links (opens the SPA with recovery_token query param)
+# recovery_url_base = "http://localhost:3000/"
+#
 # Verification token TTL in seconds (default: 900 = 15 minutes)
 # token_ttl_seconds = 900
 #

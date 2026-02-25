@@ -115,4 +115,15 @@ describe('LoginView', () => {
     expect(encryptAndStoreKey).not.toHaveBeenCalled()
     expect(oncomplete).toHaveBeenCalledTimes(1)
   })
+
+  it('calls onrecover in create mode', async () => {
+    const onrecover = vi.fn()
+    const { getByRole } = render(LoginView, { onrecover })
+
+    await fireEvent.click(
+      getByRole('button', { name: 'Recover existing identity' }),
+    )
+
+    expect(onrecover).toHaveBeenCalledTimes(1)
+  })
 })

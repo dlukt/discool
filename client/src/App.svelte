@@ -8,6 +8,8 @@ import AdminPanel from '$lib/components/AdminPanel.svelte'
 import SetupPage from '$lib/components/SetupPage.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import CrossInstanceJoinPrompt from '$lib/features/identity/CrossInstanceJoinPrompt.svelte'
+// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
+import IdentityRecoveryView from '$lib/features/identity/IdentityRecoveryView.svelte'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import LoginView from '$lib/features/identity/LoginView.svelte'
@@ -28,6 +30,16 @@ let status = $state<InstanceStatus | null>(null)
 let view = $state<'home' | 'admin' | 'settings'>('home')
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let reRegistering = $state(false)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let showIdentityRecovery = $state(false)
+
+function readRecoveryTokenFromLocation(): string | null {
+  if (typeof window === 'undefined') return null
+  const token = new URLSearchParams(window.location.search)
+    .get('recovery_token')
+    ?.trim()
+  return token || null
+}
 
 let currentPath = $derived(
   typeof window !== 'undefined'
@@ -66,6 +78,17 @@ let inviteContextInvalid = $derived(
     return Boolean(params.get('invite')?.trim()) && !joinGuildName
   })(),
 )
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let recoveryToken = $state(readRecoveryTokenFromLocation())
+
+$effect(() => {
+  if (typeof window === 'undefined') return
+  const syncRecoveryToken = () => {
+    recoveryToken = readRecoveryTokenFromLocation()
+  }
+  window.addEventListener('popstate', syncRecoveryToken)
+  return () => window.removeEventListener('popstate', syncRecoveryToken)
+})
 
 $effect(() => {
   const adminUsername = status?.admin?.username
@@ -135,9 +158,7 @@ async function loadStatus() {
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 async function handleRecoveryPromptRecover() {
-  throw new Error(
-    'Email recovery requires a previously verified recovery email and will be completed in Story 2.7. For now, create a new identity.',
-  )
+  showIdentityRecovery = true
 }
 
 onMount(() => {
@@ -297,10 +318,23 @@ onMount(() => {
     </div>
   </main>
 {:else if status && status.initialized && identityState.identityCorrupted}
-  <RecoveryPrompt
-    onstartfresh={() => identityState.clear()}
-    onrecover={handleRecoveryPromptRecover}
-  />
+  {#if showIdentityRecovery || recoveryToken}
+    <IdentityRecoveryView
+      token={recoveryToken}
+      oncleartoken={() => {
+        recoveryToken = readRecoveryTokenFromLocation()
+      }}
+      oncancel={async () => {
+        showIdentityRecovery = false
+        await identityState.clear()
+      }}
+    />
+  {:else}
+    <RecoveryPrompt
+      onstartfresh={() => identityState.clear()}
+      onrecover={handleRecoveryPromptRecover}
+    />
+  {/if}
 {:else if status && status.initialized && identityState.identityNotRegistered && !reRegistering}
   <CrossInstanceJoinPrompt
     guildName={joinGuildName}
@@ -317,14 +351,38 @@ onMount(() => {
       reRegistering = true
     }}
   />
-{:else if status && status.initialized && (!identityState.identity || reRegistering)}
+{:else if status && status.initialized && reRegistering}
   <LoginView
-    mode={reRegistering ? 'reregister' : 'create'}
+    mode="reregister"
     oncomplete={() => {
       reRegistering = false
+      showIdentityRecovery = false
       view = 'home'
     }}
   />
+{:else if status && status.initialized && !identityState.identity}
+  {#if showIdentityRecovery || recoveryToken}
+    <IdentityRecoveryView
+      token={recoveryToken}
+      oncleartoken={() => {
+        recoveryToken = readRecoveryTokenFromLocation()
+      }}
+      oncancel={() => {
+        showIdentityRecovery = false
+      }}
+    />
+  {:else}
+    <LoginView
+      mode="create"
+      onrecover={() => {
+        showIdentityRecovery = true
+      }}
+      oncomplete={() => {
+        showIdentityRecovery = false
+        view = 'home'
+      }}
+    />
+  {/if}
 {:else if status && status.initialized && identityState.identity && identityState.authenticating}
   <main class="min-h-screen bg-background p-8">
     <div class="mx-auto w-full max-w-md space-y-4 rounded-lg border border-border bg-card p-6">

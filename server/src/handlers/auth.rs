@@ -15,7 +15,7 @@ use crate::{
     db::DbPool,
     identity::{challenge, did, keypair},
     models::user::UserResponse,
-    services::{auth_service, recovery_email_service},
+    services::{auth_service, email_service, recovery_email_service},
 };
 
 const MAX_USERNAME_LEN: usize = 32;
@@ -62,6 +62,16 @@ pub struct CrossInstanceVerifyRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct RecoveryEmailVerifyQuery {
+    pub token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StartIdentityRecoveryRequest {
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RecoveryEmailRecoverQuery {
     pub token: Option<String>,
 }
 
@@ -543,6 +553,75 @@ pub async fn logout(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+pub async fn start_identity_recovery(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<StartIdentityRecoveryRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+    let email = req.email.as_deref().unwrap_or("").trim();
+    if email.is_empty() {
+        return Err(AppError::ValidationError("email is required".to_string()));
+    }
+
+    let requester_ip = recovery_email_service::requester_ip_from_headers(&headers);
+    let started = recovery_email_service::start_identity_recovery(
+        &state.pool,
+        &state.config.email,
+        email,
+        &requester_ip,
+    )
+    .await?;
+
+    if let Err(err) = email_service::send_identity_recovery_email(
+        &state.config.email,
+        &started.normalized_email,
+        &started.token,
+    )
+    .await
+    {
+        recovery_email_service::mark_identity_recovery_token_send_failed(
+            &state.pool,
+            &started.token,
+        )
+        .await?;
+        return Err(match err {
+            AppError::ValidationError(_) => {
+                AppError::ValidationError("Failed to send recovery email".to_string())
+            }
+            AppError::Internal(_) => {
+                AppError::ValidationError("Failed to send recovery email".to_string())
+            }
+            other => other,
+        });
+    }
+
+    Ok((StatusCode::OK, Json(json!({ "data": started.response }))).into_response())
+}
+
+pub async fn recover_identity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<RecoveryEmailRecoverQuery>,
+) -> Result<Response, AppError> {
+    let token = query.token.as_deref().unwrap_or("").trim();
+    if token.is_empty() {
+        return Err(AppError::ValidationError("token is required".to_string()));
+    }
+
+    let requester_ip = recovery_email_service::requester_ip_from_headers(&headers);
+    let payload = recovery_email_service::redeem_identity_recovery_token(
+        &state.pool,
+        &state.config.email,
+        token,
+        &requester_ip,
+    )
+    .await?;
+
+    Ok((StatusCode::OK, Json(json!({ "data": payload }))).into_response())
+}
+
 pub async fn verify_recovery_email(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -576,7 +655,11 @@ mod tests {
     use std::time::Instant;
 
     use axum::{
-        Json, body::to_bytes, extract::Query, extract::State, http::HeaderMap,
+        Json,
+        body::to_bytes,
+        extract::Query,
+        extract::State,
+        http::{HeaderMap, HeaderValue},
         response::IntoResponse,
     };
     use dashmap::DashMap;
@@ -666,6 +749,57 @@ mod tests {
             signature: Some(signature),
             cross_instance: Some(CrossInstanceVerifyRequest { enabled: true }),
         }
+    }
+
+    async fn seed_verified_recovery_email(
+        state: &AppState,
+        did_key: &str,
+        username: &str,
+        email: &str,
+        encrypted_private_key: &str,
+    ) -> crate::models::user::User {
+        let _ = register(
+            State(state.clone()),
+            Ok(Json(RegisterRequest {
+                did_key: Some(did_key.to_string()),
+                username: Some(username.to_string()),
+                avatar_color: Some("#3B82F6".to_string()),
+            })),
+        )
+        .await
+        .unwrap();
+
+        let user = auth_service::fetch_user_by_did(&state.pool, did_key)
+            .await
+            .unwrap();
+
+        let started = recovery_email_service::start_recovery_email_association(
+            &state.pool,
+            &state.config.email,
+            &user.id,
+            &recovery_email_service::StartRecoveryEmailInput {
+                email: email.to_string(),
+                encrypted_private_key: encrypted_private_key.to_string(),
+                encryption_algorithm: "aes-256-gcm".to_string(),
+                encryption_version: 1,
+                requester_ip: "127.0.0.1".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let verify = verify_recovery_email(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(RecoveryEmailVerifyQuery {
+                token: Some(started.token),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(verify.status(), StatusCode::OK);
+
+        user
     }
 
     #[tokio::test]
@@ -1312,6 +1446,335 @@ mod tests {
 
         let res = err.into_response();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn start_identity_recovery_returns_success_for_verified_association() {
+        let state = test_state().await;
+        let did_key = did_for_signing_key([13u8; 32]);
+        let user =
+            seed_verified_recovery_email(&state, &did_key, "liam", "liam@example.com", "c2VjcmV0")
+                .await;
+
+        let res = start_identity_recovery(
+            State(state.clone()),
+            HeaderMap::new(),
+            Ok(Json(StartIdentityRecoveryRequest {
+                email: Some("liam@example.com".to_string()),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let value = json_value(res).await;
+        assert_eq!(
+            value["data"]["message"],
+            json!(recovery_email_service::RECOVERY_SENT_MESSAGE)
+        );
+        assert_eq!(
+            value["data"]["help_message"],
+            json!(recovery_email_service::RECOVERY_HELP_MESSAGE)
+        );
+
+        let token_count: i64 = match &state.pool {
+            crate::db::DbPool::Postgres(pool) => sqlx::query_scalar(
+                "SELECT COUNT(*) FROM identity_recovery_tokens WHERE user_id = $1",
+            )
+            .bind(&user.id)
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            crate::db::DbPool::Sqlite(pool) => sqlx::query_scalar(
+                "SELECT COUNT(*) FROM identity_recovery_tokens WHERE user_id = ?1",
+            )
+            .bind(&user.id)
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+        };
+        assert_eq!(token_count, 1);
+    }
+
+    #[tokio::test]
+    async fn start_identity_recovery_returns_no_identity_message() {
+        let state = test_state().await;
+
+        let err = start_identity_recovery(
+            State(state),
+            HeaderMap::new(),
+            Ok(Json(StartIdentityRecoveryRequest {
+                email: Some("missing@example.com".to_string()),
+            })),
+        )
+        .await
+        .unwrap_err();
+
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let value = json_value(res).await;
+        assert_eq!(
+            value["error"]["message"],
+            json!(recovery_email_service::NO_IDENTITY_FOUND_MESSAGE)
+        );
+    }
+
+    #[tokio::test]
+    async fn start_identity_recovery_rate_limits_by_ip() {
+        let state = test_state_with_email_limits(1, 20).await;
+        let did_key = did_for_signing_key([14u8; 32]);
+        let _ =
+            seed_verified_recovery_email(&state, &did_key, "liam", "liam@example.com", "c2VjcmV0")
+                .await;
+
+        let first = start_identity_recovery(
+            State(state.clone()),
+            HeaderMap::new(),
+            Ok(Json(StartIdentityRecoveryRequest {
+                email: Some("liam@example.com".to_string()),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let err = start_identity_recovery(
+            State(state),
+            HeaderMap::new(),
+            Ok(Json(StartIdentityRecoveryRequest {
+                email: Some("liam@example.com".to_string()),
+            })),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            err.into_response().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[tokio::test]
+    async fn start_identity_recovery_send_failure_does_not_consume_user_quota() {
+        let base = test_state_with_email_limits(1, 20).await;
+        let mut cfg = (*base.config).clone();
+        cfg.email.smtp_host = "localhost".to_string();
+        cfg.email.from_address = "invalid-sender".to_string();
+        let state = AppState {
+            config: Arc::new(cfg),
+            ..base
+        };
+
+        let did_key = did_for_signing_key([17u8; 32]);
+        let user =
+            seed_verified_recovery_email(&state, &did_key, "liam", "liam@example.com", "c2VjcmV0")
+                .await;
+
+        let mut first_headers = HeaderMap::new();
+        first_headers.insert("x-real-ip", HeaderValue::from_static("10.0.0.1"));
+        let first_err = start_identity_recovery(
+            State(state.clone()),
+            first_headers,
+            Ok(Json(StartIdentityRecoveryRequest {
+                email: Some("liam@example.com".to_string()),
+            })),
+        )
+        .await
+        .unwrap_err();
+        let first_res = first_err.into_response();
+        assert_eq!(first_res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let first_value = json_value(first_res).await;
+        assert_eq!(
+            first_value["error"]["message"],
+            json!("Failed to send recovery email")
+        );
+
+        let mut second_headers = HeaderMap::new();
+        second_headers.insert("x-real-ip", HeaderValue::from_static("10.0.0.2"));
+        let second_err = start_identity_recovery(
+            State(state.clone()),
+            second_headers,
+            Ok(Json(StartIdentityRecoveryRequest {
+                email: Some("liam@example.com".to_string()),
+            })),
+        )
+        .await
+        .unwrap_err();
+        let second_res = second_err.into_response();
+        assert_eq!(second_res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let second_value = json_value(second_res).await;
+        assert_eq!(
+            second_value["error"]["message"],
+            json!("Failed to send recovery email")
+        );
+
+        let send_failed_count: i64 = match &state.pool {
+            crate::db::DbPool::Postgres(pool) => sqlx::query_scalar(
+                "SELECT COUNT(*) FROM identity_recovery_tokens WHERE user_id = $1 AND used_by_ip = $2",
+            )
+            .bind(&user.id)
+            .bind("send-failed")
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            crate::db::DbPool::Sqlite(pool) => sqlx::query_scalar(
+                "SELECT COUNT(*) FROM identity_recovery_tokens WHERE user_id = ?1 AND used_by_ip = ?2",
+            )
+            .bind(&user.id)
+            .bind("send-failed")
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+        };
+        assert_eq!(send_failed_count, 2);
+    }
+
+    #[tokio::test]
+    async fn recover_identity_returns_expected_payload_and_rejects_replay() {
+        let state = test_state().await;
+        let did_key = did_for_signing_key([15u8; 32]);
+        let user =
+            seed_verified_recovery_email(&state, &did_key, "liam", "liam@example.com", "c2VjcmV0")
+                .await;
+
+        let started = recovery_email_service::start_identity_recovery(
+            &state.pool,
+            &state.config.email,
+            "liam@example.com",
+            "127.0.0.1",
+        )
+        .await
+        .unwrap();
+
+        let res = recover_identity(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(RecoveryEmailRecoverQuery {
+                token: Some(started.token.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let value = json_value(res).await;
+        assert_eq!(value["data"]["did_key"], json!(did_key));
+        assert_eq!(value["data"]["username"], json!(user.username));
+        assert_eq!(value["data"]["encrypted_private_key"], json!("c2VjcmV0"));
+        assert_eq!(
+            value["data"]["encryption_context"]["algorithm"],
+            json!("aes-256-gcm")
+        );
+        assert_eq!(value["data"]["encryption_context"]["version"], json!(1));
+        assert!(value["data"]["registered_at"].as_str().is_some());
+
+        let replay = recover_identity(
+            State(state),
+            HeaderMap::new(),
+            Query(RecoveryEmailRecoverQuery {
+                token: Some(started.token),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(replay.into_response().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn recover_identity_rejects_expired_token() {
+        let state = test_state().await;
+        let did_key = did_for_signing_key([16u8; 32]);
+        let user =
+            seed_verified_recovery_email(&state, &did_key, "liam", "liam@example.com", "c2VjcmV0")
+                .await;
+
+        let started = recovery_email_service::start_identity_recovery(
+            &state.pool,
+            &state.config.email,
+            "liam@example.com",
+            "127.0.0.1",
+        )
+        .await
+        .unwrap();
+
+        let token_hash: String = match &state.pool {
+            crate::db::DbPool::Postgres(pool) => sqlx::query_scalar(
+                "SELECT token_hash FROM identity_recovery_tokens WHERE user_id = $1 LIMIT 1",
+            )
+            .bind(&user.id)
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            crate::db::DbPool::Sqlite(pool) => sqlx::query_scalar(
+                "SELECT token_hash FROM identity_recovery_tokens WHERE user_id = ?1 LIMIT 1",
+            )
+            .bind(&user.id)
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+        };
+
+        match &state.pool {
+            crate::db::DbPool::Postgres(pool) => {
+                sqlx::query(
+                    "UPDATE identity_recovery_tokens SET expires_at = $1 WHERE token_hash = $2",
+                )
+                .bind("2000-01-01T00:00:00Z")
+                .bind(&token_hash)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            crate::db::DbPool::Sqlite(pool) => {
+                sqlx::query(
+                    "UPDATE identity_recovery_tokens SET expires_at = ?1 WHERE token_hash = ?2",
+                )
+                .bind("2000-01-01T00:00:00Z")
+                .bind(&token_hash)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+
+        let err = recover_identity(
+            State(state),
+            HeaderMap::new(),
+            Query(RecoveryEmailRecoverQuery {
+                token: Some(started.token),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.into_response().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn recover_identity_rate_limits_invalid_attempts_by_ip() {
+        let state = test_state_with_email_limits(5, 1).await;
+        let first = recover_identity(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(RecoveryEmailRecoverQuery {
+                token: Some("not-a-real-token".to_string()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(first.into_response().status(), StatusCode::UNAUTHORIZED);
+
+        let second = recover_identity(
+            State(state),
+            HeaderMap::new(),
+            Query(RecoveryEmailRecoverQuery {
+                token: Some("not-a-real-token".to_string()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            second.into_response().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 
     #[tokio::test]

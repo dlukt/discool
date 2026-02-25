@@ -14,7 +14,9 @@ use crate::{
     config::EmailConfig,
     db::DbPool,
     models::recovery_email::{
-        EmailVerificationToken, RecoveryEmailAssociation, RecoveryEmailStatusResponse,
+        EmailVerificationToken, IdentityRecoveryStartResponse, IdentityRecoveryToken,
+        RecoveryEmailAssociation, RecoveryEmailEncryptionContextResponse,
+        RecoveryEmailStatusResponse, RecoveryIdentityPayloadResponse, RecoveryIdentityRecord,
     },
 };
 
@@ -24,6 +26,16 @@ const INVALID_OR_EXPIRED_TOKEN: &str = "Invalid or expired verification token";
 const TOKEN_ALREADY_USED: &str = "Verification token already used";
 const START_RATE_LIMIT_ERROR: &str = "Too many recovery email requests. Please try again later.";
 const VERIFY_RATE_LIMIT_ERROR: &str = "Too many verification attempts. Please try again later.";
+const INVALID_OR_EXPIRED_RECOVERY_TOKEN: &str = "Invalid or expired recovery token";
+const RECOVERY_TOKEN_ALREADY_USED: &str = "Recovery token already used";
+const RECOVERY_START_RATE_LIMIT_ERROR: &str = "Too many recovery attempts. Please try again later.";
+const RECOVERY_REDEEM_RATE_LIMIT_ERROR: &str =
+    "Too many recovery attempts. Please try again later.";
+const SEND_FAILED_TOKEN_MARKER: &str = "send-failed";
+pub const NO_IDENTITY_FOUND_MESSAGE: &str = "No identity found for this email.";
+pub const RECOVERY_HELP_MESSAGE: &str = "Didn't receive the email? Check spam, or try again.";
+pub const RECOVERY_SENT_MESSAGE: &str =
+    "Recovery email sent. Check your inbox for a recovery link.";
 
 #[derive(Debug, Clone)]
 pub struct StartRecoveryEmailInput {
@@ -39,6 +51,13 @@ pub struct StartRecoveryEmailResult {
     pub token: String,
     pub normalized_email: String,
     pub status: RecoveryEmailStatusResponse,
+}
+
+#[derive(Debug, Clone)]
+pub struct StartIdentityRecoveryResult {
+    pub token: String,
+    pub normalized_email: String,
+    pub response: IdentityRecoveryStartResponse,
 }
 
 pub fn requester_ip_from_headers(headers: &HeaderMap) -> String {
@@ -203,6 +222,160 @@ pub async fn verify_recovery_email_token(
     })
 }
 
+pub async fn start_identity_recovery(
+    pool: &DbPool,
+    config: &EmailConfig,
+    email: &str,
+    requester_ip: &str,
+) -> Result<StartIdentityRecoveryResult, AppError> {
+    let normalized_email = normalize_email(email)?;
+    let now = Utc::now();
+    let now_rfc3339 = now.to_rfc3339();
+
+    record_start_recovery_attempt(pool, requester_ip, &now_rfc3339).await?;
+    enforce_start_identity_recovery_rate_limit_by_ip(pool, config, requester_ip).await?;
+
+    let Some(recovery_record) =
+        fetch_recovery_identity_record_by_normalized_email(pool, &normalized_email).await?
+    else {
+        return Err(AppError::ValidationError(
+            NO_IDENTITY_FOUND_MESSAGE.to_string(),
+        ));
+    };
+
+    enforce_start_identity_recovery_rate_limit_for_user(pool, config, &recovery_record.user_id)
+        .await?;
+
+    let expires_at = (now
+        + Duration::seconds(config.token_ttl_seconds.try_into().map_err(|_| {
+            AppError::Internal("email.token_ttl_seconds is too large".to_string())
+        })?))
+    .to_rfc3339();
+    let token = generate_token();
+    let token_hash = sha256_hex(token.as_bytes());
+
+    invalidate_pending_identity_recovery_tokens(pool, &recovery_record.user_id, &now_rfc3339)
+        .await?;
+    insert_identity_recovery_token(
+        pool,
+        &IdentityRecoveryTokenInsert {
+            token_hash: &token_hash,
+            user_id: &recovery_record.user_id,
+            requester_ip,
+            expires_at: &expires_at,
+            created_at: &now_rfc3339,
+        },
+    )
+    .await?;
+
+    Ok(StartIdentityRecoveryResult {
+        token,
+        normalized_email,
+        response: IdentityRecoveryStartResponse {
+            message: RECOVERY_SENT_MESSAGE.to_string(),
+            help_message: RECOVERY_HELP_MESSAGE.to_string(),
+        },
+    })
+}
+
+pub async fn mark_identity_recovery_token_send_failed(
+    pool: &DbPool,
+    token: &str,
+) -> Result<(), AppError> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Ok(());
+    }
+
+    let token_hash = sha256_hex(token.as_bytes());
+    let now_rfc3339 = Utc::now().to_rfc3339();
+    let _ = mark_identity_recovery_token_used(
+        pool,
+        &token_hash,
+        SEND_FAILED_TOKEN_MARKER,
+        &now_rfc3339,
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn redeem_identity_recovery_token(
+    pool: &DbPool,
+    config: &EmailConfig,
+    token: &str,
+    requester_ip: &str,
+) -> Result<RecoveryIdentityPayloadResponse, AppError> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(AppError::ValidationError("token is required".to_string()));
+    }
+    if token.len() > 256 {
+        return Err(AppError::ValidationError("token is too long".to_string()));
+    }
+
+    let now = Utc::now();
+    let now_rfc3339 = now.to_rfc3339();
+    record_redeem_recovery_attempt(pool, requester_ip, &now_rfc3339).await?;
+    enforce_redeem_identity_recovery_rate_limit_by_ip(pool, config, requester_ip).await?;
+
+    let token_hash = sha256_hex(token.as_bytes());
+    let Some(token_record) = fetch_identity_recovery_token(pool, &token_hash).await? else {
+        return Err(AppError::Unauthorized(
+            INVALID_OR_EXPIRED_RECOVERY_TOKEN.to_string(),
+        ));
+    };
+
+    if token_record.used_at.is_some() {
+        return Err(AppError::Unauthorized(
+            RECOVERY_TOKEN_ALREADY_USED.to_string(),
+        ));
+    }
+
+    let expires_at = DateTime::parse_from_rfc3339(&token_record.expires_at)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|_| AppError::Unauthorized(INVALID_OR_EXPIRED_RECOVERY_TOKEN.to_string()))?;
+    if expires_at <= now {
+        return Err(AppError::Unauthorized(
+            INVALID_OR_EXPIRED_RECOVERY_TOKEN.to_string(),
+        ));
+    }
+
+    let marked_used =
+        mark_identity_recovery_token_used(pool, &token_hash, requester_ip, &now_rfc3339).await?;
+    if !marked_used {
+        return Err(AppError::Unauthorized(
+            RECOVERY_TOKEN_ALREADY_USED.to_string(),
+        ));
+    }
+
+    let Some(recovery_record) =
+        fetch_recovery_identity_record_by_user_id(pool, &token_record.user_id).await?
+    else {
+        return Err(AppError::Unauthorized(
+            INVALID_OR_EXPIRED_RECOVERY_TOKEN.to_string(),
+        ));
+    };
+
+    let decrypted_payload = decrypt_private_key_payload(
+        config,
+        &recovery_record.normalized_email,
+        &recovery_record.encrypted_private_key,
+        &recovery_record.key_nonce,
+    )?;
+
+    Ok(RecoveryIdentityPayloadResponse {
+        did_key: recovery_record.did_key,
+        username: recovery_record.username,
+        avatar_color: recovery_record.avatar_color,
+        registered_at: recovery_record.created_at,
+        encrypted_private_key: decrypted_payload,
+        encryption_context: RecoveryEmailEncryptionContextResponse {
+            algorithm: recovery_record.encryption_algorithm,
+            version: recovery_record.encryption_version,
+        },
+    })
+}
+
 fn normalize_email(value: &str) -> Result<String, AppError> {
     let normalized = value.trim().to_ascii_lowercase();
     if normalized.is_empty() {
@@ -254,6 +427,38 @@ fn encrypt_private_key_payload(
         .encrypt(Nonce::from_slice(&nonce), payload.as_bytes())
         .map_err(|_| AppError::Internal("Failed to encrypt recovery payload".to_string()))?;
     Ok((BASE64.encode(ciphertext), BASE64.encode(nonce)))
+}
+
+fn decrypt_private_key_payload(
+    config: &EmailConfig,
+    normalized_email: &str,
+    encrypted_payload: &str,
+    key_nonce: &str,
+) -> Result<String, AppError> {
+    let key = derive_email_encryption_key(&config.server_secret, normalized_email);
+    let cipher = Aes256Gcm::new_from_slice(&key)
+        .map_err(|_| AppError::Internal("Failed to initialize recovery decryption".to_string()))?;
+
+    let nonce_bytes = BASE64
+        .decode(key_nonce)
+        .map_err(|_| AppError::Internal("Stored recovery key nonce is invalid".to_string()))?;
+    if nonce_bytes.len() != 12 {
+        return Err(AppError::Internal(
+            "Stored recovery key nonce is invalid".to_string(),
+        ));
+    }
+
+    let ciphertext = BASE64
+        .decode(encrypted_payload)
+        .map_err(|_| AppError::Internal("Stored recovery payload is invalid base64".to_string()))?;
+    let decrypted = cipher
+        .decrypt(Nonce::from_slice(&nonce_bytes), ciphertext.as_ref())
+        .map_err(|_| {
+            AppError::Internal("Stored recovery payload cannot be decrypted".to_string())
+        })?;
+
+    String::from_utf8(decrypted)
+        .map_err(|_| AppError::Internal("Stored recovery payload is invalid UTF-8".to_string()))
 }
 
 fn derive_email_encryption_key(server_secret: &str, normalized_email: &str) -> [u8; 32] {
@@ -442,6 +647,374 @@ async fn count_recent_verify_attempts_for_ip(
     }
     .map_err(|err| AppError::Internal(err.to_string()))?;
     Ok(count)
+}
+
+async fn record_start_recovery_attempt(
+    pool: &DbPool,
+    requester_ip: &str,
+    attempted_at: &str,
+) -> Result<(), AppError> {
+    match pool {
+        DbPool::Postgres(pool) => sqlx::query(
+            "INSERT INTO identity_recovery_start_attempts (requester_ip, attempted_at) VALUES ($1, $2)",
+        )
+        .bind(requester_ip)
+        .bind(attempted_at)
+        .execute(pool)
+        .await
+        .map(|_| ()),
+        DbPool::Sqlite(pool) => sqlx::query(
+            "INSERT INTO identity_recovery_start_attempts (requester_ip, attempted_at) VALUES (?1, ?2)",
+        )
+        .bind(requester_ip)
+        .bind(attempted_at)
+        .execute(pool)
+        .await
+        .map(|_| ()),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+    Ok(())
+}
+
+async fn enforce_start_identity_recovery_rate_limit_by_ip(
+    pool: &DbPool,
+    config: &EmailConfig,
+    requester_ip: &str,
+) -> Result<(), AppError> {
+    let window_start = (Utc::now() - Duration::hours(1)).to_rfc3339();
+    let attempts =
+        count_recent_start_recovery_attempts_for_ip(pool, requester_ip, &window_start).await?;
+    if attempts > i64::from(config.start_rate_limit_per_hour) {
+        return Err(AppError::ValidationError(
+            RECOVERY_START_RATE_LIMIT_ERROR.to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn enforce_start_identity_recovery_rate_limit_for_user(
+    pool: &DbPool,
+    config: &EmailConfig,
+    user_id: &str,
+) -> Result<(), AppError> {
+    let window_start = (Utc::now() - Duration::hours(1)).to_rfc3339();
+    let request_count =
+        count_recent_identity_recovery_tokens_for_user(pool, user_id, &window_start).await?;
+    if request_count >= i64::from(config.start_rate_limit_per_hour) {
+        return Err(AppError::ValidationError(
+            RECOVERY_START_RATE_LIMIT_ERROR.to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn count_recent_start_recovery_attempts_for_ip(
+    pool: &DbPool,
+    requester_ip: &str,
+    window_start: &str,
+) -> Result<i64, AppError> {
+    let count: i64 = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM identity_recovery_start_attempts WHERE requester_ip = $1 AND attempted_at >= $2",
+            )
+            .bind(requester_ip)
+            .bind(window_start)
+            .fetch_one(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM identity_recovery_start_attempts WHERE requester_ip = ?1 AND attempted_at >= ?2",
+            )
+            .bind(requester_ip)
+            .bind(window_start)
+            .fetch_one(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+    Ok(count)
+}
+
+async fn count_recent_identity_recovery_tokens_for_user(
+    pool: &DbPool,
+    user_id: &str,
+    window_start: &str,
+) -> Result<i64, AppError> {
+    let count: i64 = match pool {
+        DbPool::Postgres(pool) => sqlx::query_scalar(
+            "SELECT COUNT(*) FROM identity_recovery_tokens WHERE user_id = $1 AND created_at >= $2 AND COALESCE(used_by_ip, '') <> $3",
+        )
+        .bind(user_id)
+        .bind(window_start)
+        .bind(SEND_FAILED_TOKEN_MARKER)
+        .fetch_one(pool)
+        .await,
+        DbPool::Sqlite(pool) => sqlx::query_scalar(
+            "SELECT COUNT(*) FROM identity_recovery_tokens WHERE user_id = ?1 AND created_at >= ?2 AND COALESCE(used_by_ip, '') <> ?3",
+        )
+        .bind(user_id)
+        .bind(window_start)
+        .bind(SEND_FAILED_TOKEN_MARKER)
+        .fetch_one(pool)
+        .await,
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+    Ok(count)
+}
+
+async fn record_redeem_recovery_attempt(
+    pool: &DbPool,
+    requester_ip: &str,
+    attempted_at: &str,
+) -> Result<(), AppError> {
+    match pool {
+        DbPool::Postgres(pool) => sqlx::query(
+            "INSERT INTO identity_recovery_redeem_attempts (requester_ip, attempted_at) VALUES ($1, $2)",
+        )
+        .bind(requester_ip)
+        .bind(attempted_at)
+        .execute(pool)
+        .await
+        .map(|_| ()),
+        DbPool::Sqlite(pool) => sqlx::query(
+            "INSERT INTO identity_recovery_redeem_attempts (requester_ip, attempted_at) VALUES (?1, ?2)",
+        )
+        .bind(requester_ip)
+        .bind(attempted_at)
+        .execute(pool)
+        .await
+        .map(|_| ()),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+    Ok(())
+}
+
+async fn enforce_redeem_identity_recovery_rate_limit_by_ip(
+    pool: &DbPool,
+    config: &EmailConfig,
+    requester_ip: &str,
+) -> Result<(), AppError> {
+    let window_start = (Utc::now() - Duration::hours(1)).to_rfc3339();
+    let attempts =
+        count_recent_redeem_recovery_attempts_for_ip(pool, requester_ip, &window_start).await?;
+    if attempts > i64::from(config.verify_rate_limit_per_hour) {
+        return Err(AppError::ValidationError(
+            RECOVERY_REDEEM_RATE_LIMIT_ERROR.to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn count_recent_redeem_recovery_attempts_for_ip(
+    pool: &DbPool,
+    requester_ip: &str,
+    window_start: &str,
+) -> Result<i64, AppError> {
+    let count: i64 = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM identity_recovery_redeem_attempts WHERE requester_ip = $1 AND attempted_at >= $2",
+            )
+            .bind(requester_ip)
+            .bind(window_start)
+            .fetch_one(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM identity_recovery_redeem_attempts WHERE requester_ip = ?1 AND attempted_at >= ?2",
+            )
+            .bind(requester_ip)
+            .bind(window_start)
+            .fetch_one(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+    Ok(count)
+}
+
+async fn fetch_recovery_identity_record_by_normalized_email(
+    pool: &DbPool,
+    normalized_email: &str,
+) -> Result<Option<RecoveryIdentityRecord>, AppError> {
+    let record = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_as(
+                "SELECT ure.user_id, u.did_key, u.username, u.avatar_color, u.created_at, ure.normalized_email, ure.encrypted_private_key, ure.encryption_algorithm, ure.encryption_version, ure.key_nonce\nFROM user_recovery_email ure\nJOIN users u ON u.id = ure.user_id\nWHERE ure.normalized_email = $1 AND ure.verified_at IS NOT NULL AND ure.encrypted_private_key IS NOT NULL AND ure.encryption_algorithm IS NOT NULL AND ure.encryption_version IS NOT NULL AND ure.key_nonce IS NOT NULL\nLIMIT 1",
+            )
+            .bind(normalized_email)
+            .fetch_optional(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_as(
+                "SELECT ure.user_id, u.did_key, u.username, u.avatar_color, u.created_at, ure.normalized_email, ure.encrypted_private_key, ure.encryption_algorithm, ure.encryption_version, ure.key_nonce\nFROM user_recovery_email ure\nJOIN users u ON u.id = ure.user_id\nWHERE ure.normalized_email = ?1 AND ure.verified_at IS NOT NULL AND ure.encrypted_private_key IS NOT NULL AND ure.encryption_algorithm IS NOT NULL AND ure.encryption_version IS NOT NULL AND ure.key_nonce IS NOT NULL\nLIMIT 1",
+            )
+            .bind(normalized_email)
+            .fetch_optional(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+    Ok(record)
+}
+
+async fn fetch_recovery_identity_record_by_user_id(
+    pool: &DbPool,
+    user_id: &str,
+) -> Result<Option<RecoveryIdentityRecord>, AppError> {
+    let record = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_as(
+                "SELECT ure.user_id, u.did_key, u.username, u.avatar_color, u.created_at, ure.normalized_email, ure.encrypted_private_key, ure.encryption_algorithm, ure.encryption_version, ure.key_nonce\nFROM user_recovery_email ure\nJOIN users u ON u.id = ure.user_id\nWHERE ure.user_id = $1 AND ure.verified_at IS NOT NULL AND ure.encrypted_private_key IS NOT NULL AND ure.encryption_algorithm IS NOT NULL AND ure.encryption_version IS NOT NULL AND ure.key_nonce IS NOT NULL\nLIMIT 1",
+            )
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_as(
+                "SELECT ure.user_id, u.did_key, u.username, u.avatar_color, u.created_at, ure.normalized_email, ure.encrypted_private_key, ure.encryption_algorithm, ure.encryption_version, ure.key_nonce\nFROM user_recovery_email ure\nJOIN users u ON u.id = ure.user_id\nWHERE ure.user_id = ?1 AND ure.verified_at IS NOT NULL AND ure.encrypted_private_key IS NOT NULL AND ure.encryption_algorithm IS NOT NULL AND ure.encryption_version IS NOT NULL AND ure.key_nonce IS NOT NULL\nLIMIT 1",
+            )
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+    Ok(record)
+}
+
+struct IdentityRecoveryTokenInsert<'a> {
+    token_hash: &'a str,
+    user_id: &'a str,
+    requester_ip: &'a str,
+    expires_at: &'a str,
+    created_at: &'a str,
+}
+
+async fn insert_identity_recovery_token(
+    pool: &DbPool,
+    input: &IdentityRecoveryTokenInsert<'_>,
+) -> Result<(), AppError> {
+    match pool {
+        DbPool::Postgres(pool) => sqlx::query(
+            "INSERT INTO identity_recovery_tokens (token_hash, user_id, requester_ip, expires_at, created_at)\nVALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(input.token_hash)
+        .bind(input.user_id)
+        .bind(input.requester_ip)
+        .bind(input.expires_at)
+        .bind(input.created_at)
+        .execute(pool)
+        .await
+        .map(|_| ()),
+        DbPool::Sqlite(pool) => sqlx::query(
+            "INSERT INTO identity_recovery_tokens (token_hash, user_id, requester_ip, expires_at, created_at)\nVALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(input.token_hash)
+        .bind(input.user_id)
+        .bind(input.requester_ip)
+        .bind(input.expires_at)
+        .bind(input.created_at)
+        .execute(pool)
+        .await
+        .map(|_| ()),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+    Ok(())
+}
+
+async fn invalidate_pending_identity_recovery_tokens(
+    pool: &DbPool,
+    user_id: &str,
+    invalidated_at: &str,
+) -> Result<(), AppError> {
+    match pool {
+        DbPool::Postgres(pool) => sqlx::query(
+            "UPDATE identity_recovery_tokens SET used_at = $1, used_by_ip = $2 WHERE user_id = $3 AND used_at IS NULL",
+        )
+        .bind(invalidated_at)
+        .bind("superseded")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map(|_| ()),
+        DbPool::Sqlite(pool) => sqlx::query(
+            "UPDATE identity_recovery_tokens SET used_at = ?1, used_by_ip = ?2 WHERE user_id = ?3 AND used_at IS NULL",
+        )
+        .bind(invalidated_at)
+        .bind("superseded")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map(|_| ()),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+    Ok(())
+}
+
+async fn fetch_identity_recovery_token(
+    pool: &DbPool,
+    token_hash: &str,
+) -> Result<Option<IdentityRecoveryToken>, AppError> {
+    let token = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_as(
+                "SELECT token_hash, user_id, requester_ip, used_by_ip, expires_at, used_at, created_at FROM identity_recovery_tokens WHERE token_hash = $1 LIMIT 1",
+            )
+            .bind(token_hash)
+            .fetch_optional(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_as(
+                "SELECT token_hash, user_id, requester_ip, used_by_ip, expires_at, used_at, created_at FROM identity_recovery_tokens WHERE token_hash = ?1 LIMIT 1",
+            )
+            .bind(token_hash)
+            .fetch_optional(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+    Ok(token)
+}
+
+async fn mark_identity_recovery_token_used(
+    pool: &DbPool,
+    token_hash: &str,
+    requester_ip: &str,
+    used_at: &str,
+) -> Result<bool, AppError> {
+    let rows = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query(
+                "UPDATE identity_recovery_tokens SET used_at = $1, used_by_ip = $2 WHERE token_hash = $3 AND used_at IS NULL",
+            )
+            .bind(used_at)
+            .bind(requester_ip)
+            .bind(token_hash)
+            .execute(pool)
+            .await
+            .map(|result| result.rows_affected())
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query(
+                "UPDATE identity_recovery_tokens SET used_at = ?1, used_by_ip = ?2 WHERE token_hash = ?3 AND used_at IS NULL",
+            )
+            .bind(used_at)
+            .bind(requester_ip)
+            .bind(token_hash)
+            .execute(pool)
+            .await
+            .map(|result| result.rows_affected())
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+    Ok(rows == 1)
 }
 
 async fn fetch_recovery_email_association(

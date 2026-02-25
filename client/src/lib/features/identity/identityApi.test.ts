@@ -9,8 +9,10 @@ import {
   getProfile,
   getRecoveryEmailStatus,
   logout,
+  recoverIdentityByToken,
   register,
   requestChallenge,
+  startIdentityRecovery,
   startRecoveryEmailAssociation,
   updateProfile,
   uploadAvatar,
@@ -279,5 +281,52 @@ describe('identityApi', () => {
         },
       }),
     })
+  })
+
+  it('startIdentityRecovery posts email and maps response', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      message: 'Recovery email sent. Check your inbox for a recovery link.',
+      help_message: "Didn't receive the email? Check spam, or try again.",
+    })
+
+    await expect(startIdentityRecovery('liam@example.com')).resolves.toEqual({
+      message: 'Recovery email sent. Check your inbox for a recovery link.',
+      helpMessage: "Didn't receive the email? Check spam, or try again.",
+    })
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/auth/recovery-email/start', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'liam@example.com' }),
+    })
+  })
+
+  it('recoverIdentityByToken maps recovery payload', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      did_key: 'did:key:z6Mk-test',
+      username: 'liam',
+      avatar_color: '#3b82f6',
+      registered_at: '2026-02-24T00:00:00.000Z',
+      encrypted_private_key: 'c2VjcmV0',
+      encryption_context: {
+        algorithm: 'aes-256-gcm',
+        version: 1,
+      },
+    })
+
+    await expect(recoverIdentityByToken('abc-token')).resolves.toEqual({
+      didKey: 'did:key:z6Mk-test',
+      username: 'liam',
+      avatarColor: '#3b82f6',
+      registeredAt: '2026-02-24T00:00:00.000Z',
+      encryptedPrivateKey: 'c2VjcmV0',
+      encryptionContext: {
+        algorithm: 'aes-256-gcm',
+        version: 1,
+      },
+    })
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/auth/recovery-email/recover?token=abc-token',
+    )
   })
 })

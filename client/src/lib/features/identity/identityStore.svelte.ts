@@ -5,14 +5,17 @@ import {
   decryptSecretKey,
   finalizeIdentityRegistration,
   loadStoredIdentity,
+  restoreIdentityFromRecovery,
   signChallenge,
 } from './crypto'
 import {
   getProfile as getProfileApi,
   getRecoveryEmailStatus as getRecoveryEmailStatusApi,
   logout as logoutApi,
+  recoverIdentityByToken as recoverIdentityByTokenApi,
   register as registerApi,
   requestChallenge,
+  startIdentityRecovery as startIdentityRecoveryApi,
   startRecoveryEmailAssociation as startRecoveryEmailAssociationApi,
   updateProfile as updateProfileApi,
   uploadAvatar as uploadAvatarApi,
@@ -21,6 +24,7 @@ import {
 import { clearLastLocation } from './navigationState'
 import type {
   AuthSession,
+  IdentityRecoveryStartResponse,
   RecoveryEmailStatus,
   StoredIdentity,
   UpdateProfileInput,
@@ -500,6 +504,31 @@ export const identityState = $state({
       secretKey?.fill(0)
       identityState.recoveryEmailLoading = false
     }
+  },
+
+  startIdentityRecovery: async (
+    email: string,
+  ): Promise<IdentityRecoveryStartResponse> => {
+    const normalizedEmail = email.trim()
+    if (!normalizedEmail) {
+      throw new Error('Email is required')
+    }
+    return startIdentityRecoveryApi(normalizedEmail)
+  },
+
+  recoverIdentityByToken: async (token: string): Promise<void> => {
+    const normalizedToken = token.trim()
+    if (!normalizedToken) {
+      throw new Error('token is required')
+    }
+
+    const payload = await recoverIdentityByTokenApi(normalizedToken)
+    identityState.identity = await restoreIdentityFromRecovery(payload)
+    identityState.identityCorrupted = false
+    identityState.identityNotRegistered = false
+    identityState.crossInstanceJoining = false
+    identityState.crossInstanceJoinError = null
+    await identityState.authenticate()
   },
 
   dismissRecoveryNudge: () => {

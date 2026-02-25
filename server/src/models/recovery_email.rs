@@ -31,6 +31,31 @@ pub struct EmailVerificationToken {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct IdentityRecoveryToken {
+    pub token_hash: String,
+    pub user_id: String,
+    pub requester_ip: String,
+    pub used_by_ip: Option<String>,
+    pub expires_at: String,
+    pub used_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RecoveryIdentityRecord {
+    pub user_id: String,
+    pub did_key: String,
+    pub username: String,
+    pub avatar_color: Option<String>,
+    pub created_at: String,
+    pub normalized_email: String,
+    pub encrypted_private_key: String,
+    pub encryption_algorithm: String,
+    pub encryption_version: i64,
+    pub key_nonce: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RecoveryEmailStatusResponse {
     pub associated: bool,
@@ -39,6 +64,29 @@ pub struct RecoveryEmailStatusResponse {
     pub verified: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct IdentityRecoveryStartResponse {
+    pub message: String,
+    pub help_message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RecoveryIdentityPayloadResponse {
+    pub did_key: String,
+    pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_color: Option<String>,
+    pub registered_at: String,
+    pub encrypted_private_key: String,
+    pub encryption_context: RecoveryEmailEncryptionContextResponse,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RecoveryEmailEncryptionContextResponse {
+    pub algorithm: String,
+    pub version: i64,
 }
 
 impl RecoveryEmailStatusResponse {

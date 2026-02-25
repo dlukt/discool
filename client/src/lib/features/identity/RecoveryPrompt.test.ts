@@ -21,7 +21,7 @@ describe('RecoveryPrompt', () => {
     await fireEvent.click(startFresh)
 
     expect(onstartfresh).toHaveBeenCalledTimes(1)
-    const recover = getByRole('button', { name: 'Recover via email' })
+    const recover = getByRole('button', { name: 'Recover existing identity' })
     await fireEvent.click(recover)
     expect(onrecover).toHaveBeenCalledTimes(1)
   })

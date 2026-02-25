@@ -6,6 +6,7 @@ vi.mock('./crypto', () => ({
   decryptSecretKey: vi.fn(),
   finalizeIdentityRegistration: vi.fn(),
   loadStoredIdentity: vi.fn(),
+  restoreIdentityFromRecovery: vi.fn(),
   signChallenge: vi.fn(),
 }))
 
@@ -13,19 +14,28 @@ vi.mock('./identityApi', () => ({
   getRecoveryEmailStatus: vi.fn(),
   getProfile: vi.fn(),
   logout: vi.fn(),
+  recoverIdentityByToken: vi.fn(),
   register: vi.fn(),
   requestChallenge: vi.fn(),
+  startIdentityRecovery: vi.fn(),
   startRecoveryEmailAssociation: vi.fn(),
   updateProfile: vi.fn(),
   uploadAvatar: vi.fn(),
   verifyChallenge: vi.fn(),
 }))
 
-import { decryptSecretKey, loadStoredIdentity, signChallenge } from './crypto'
+import {
+  decryptSecretKey,
+  loadStoredIdentity,
+  restoreIdentityFromRecovery,
+  signChallenge,
+} from './crypto'
 import {
   getRecoveryEmailStatus,
   logout,
+  recoverIdentityByToken,
   requestChallenge,
+  startIdentityRecovery,
   startRecoveryEmailAssociation,
   updateProfile,
   uploadAvatar,
@@ -426,5 +436,69 @@ describe('identityStore session persistence', () => {
     expect(identityState.recoveryEmailLoading).toBe(false)
     expect(identityState.recoveryEmailError).toBe('decrypt failed')
     expect(startRecoveryEmailAssociation).not.toHaveBeenCalled()
+  })
+
+  it('startIdentityRecovery validates email and forwards request', async () => {
+    vi.mocked(startIdentityRecovery).mockResolvedValue({
+      message: 'Recovery email sent. Check your inbox for a recovery link.',
+      helpMessage: "Didn't receive the email? Check spam, or try again.",
+    })
+
+    await expect(
+      identityState.startIdentityRecovery('  liam@example.com  '),
+    ).resolves.toEqual({
+      message: 'Recovery email sent. Check your inbox for a recovery link.',
+      helpMessage: "Didn't receive the email? Check spam, or try again.",
+    })
+
+    expect(startIdentityRecovery).toHaveBeenCalledWith('liam@example.com')
+  })
+
+  it('recoverIdentityByToken restores identity then authenticates', async () => {
+    const restoredIdentity = {
+      publicKey: new Uint8Array(32).fill(1),
+      didKey: 'did:key:z6Mk-test',
+      username: 'liam',
+      avatarColor: '#3b82f6',
+      registeredAt: '2026-02-24T00:00:00.000Z',
+    }
+
+    vi.mocked(recoverIdentityByToken).mockResolvedValue({
+      didKey: 'did:key:z6Mk-test',
+      username: 'liam',
+      avatarColor: '#3b82f6',
+      registeredAt: '2026-02-24T00:00:00.000Z',
+      encryptedPrivateKey: 'c2VjcmV0',
+      encryptionContext: {
+        algorithm: 'aes-256-gcm',
+        version: 1,
+      },
+    })
+    vi.mocked(restoreIdentityFromRecovery).mockResolvedValue(restoredIdentity)
+    vi.mocked(requestChallenge).mockResolvedValue({
+      challenge: 'challenge',
+      expiresIn: 60,
+    })
+    vi.mocked(signChallenge).mockResolvedValue('signature')
+    vi.mocked(verifyChallenge).mockResolvedValue({
+      token: 'token-recovered',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      user: {
+        id: 'user-recovered',
+        didKey: 'did:key:z6Mk-test',
+        username: 'liam',
+        displayName: 'Liam',
+        avatarColor: '#3b82f6',
+        avatarUrl: null,
+        createdAt: '2026-02-24T00:00:00.000Z',
+      },
+    })
+
+    await identityState.recoverIdentityByToken('token-123')
+
+    expect(recoverIdentityByToken).toHaveBeenCalledWith('token-123')
+    expect(restoreIdentityFromRecovery).toHaveBeenCalled()
+    expect(identityState.identity).toEqual(restoredIdentity)
+    expect(identityState.session?.token).toBe('token-recovered')
   })
 })

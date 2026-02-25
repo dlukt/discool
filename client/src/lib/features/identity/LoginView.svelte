@@ -23,10 +23,12 @@ function isAvatarColorValue(value: string): value is AvatarColorValue {
 
 type Props = {
   oncomplete?: () => void
+  onrecover?: () => void
   mode?: 'create' | 'reregister'
 }
 
-let { oncomplete, mode = 'create' }: Props = $props()
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let { oncomplete, onrecover, mode = 'create' }: Props = $props()
 
 let username = $state('')
 let avatarColor = $state<AvatarColorValue>(avatarColors[0].value)
@@ -290,6 +292,17 @@ async function onSubmit(event: SubmitEvent) {
           {mode === 'reregister' ? 'Register' : 'Create'}
         {/if}
       </button>
+
+      {#if mode === 'create'}
+        <button
+          type="button"
+          class="inline-flex w-full items-center justify-center rounded-md bg-muted px-4 py-2 text-sm font-medium text-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={submitting}
+          onclick={() => onrecover?.()}
+        >
+          Recover existing identity
+        </button>
+      {/if}
     </form>
   </div>
 </main>

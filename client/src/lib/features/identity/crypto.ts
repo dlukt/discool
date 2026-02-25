@@ -1,6 +1,6 @@
 import * as ed from '@noble/ed25519'
 
-import type { StoredIdentity } from './types'
+import type { RecoveryIdentityPayload, StoredIdentity } from './types'
 
 export type LoadStoredIdentityResult =
   | { status: 'none' }
@@ -286,6 +286,73 @@ export async function clearStoredIdentity(): Promise<void> {
     await transactionDone(tx)
   } finally {
     db.close()
+  }
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    throw new Error('Recovery payload is missing key material')
+  }
+
+  let binary: string
+  try {
+    binary = atob(trimmed)
+  } catch {
+    throw new Error('Recovery payload is invalid')
+  }
+
+  const out = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) {
+    out[i] = binary.charCodeAt(i)
+  }
+  return out
+}
+
+export async function restoreIdentityFromRecovery(
+  payload: RecoveryIdentityPayload,
+): Promise<StoredIdentity> {
+  const didKey = payload.didKey.trim()
+  if (!didKey) {
+    throw new Error('Recovery payload is missing did key')
+  }
+  const username = payload.username.trim()
+  if (!username) {
+    throw new Error('Recovery payload is missing username')
+  }
+  const registeredAt = payload.registeredAt.trim()
+  if (!registeredAt) {
+    throw new Error('Recovery payload is missing registration timestamp')
+  }
+
+  const secretKey = base64ToBytes(payload.encryptedPrivateKey)
+  if (secretKey.length !== 32) {
+    secretKey.fill(0)
+    throw new Error('Recovery payload has invalid key length')
+  }
+
+  const secretKeyCopy = new Uint8Array(secretKey)
+  try {
+    const publicKey = await ed.getPublicKeyAsync(secretKeyCopy)
+    const expectedDidKey = didKeyFromPublicKey(publicKey)
+    if (expectedDidKey !== didKey) {
+      throw new Error('Recovery payload does not match identity')
+    }
+
+    await encryptAndStoreKey(
+      secretKeyCopy,
+      publicKey,
+      didKey,
+      username,
+      payload.avatarColor,
+    )
+    return finalizeIdentityRegistration(registeredAt, {
+      username,
+      avatarColor: payload.avatarColor,
+    })
+  } finally {
+    secretKey.fill(0)
+    secretKeyCopy.fill(0)
   }
 }
 
