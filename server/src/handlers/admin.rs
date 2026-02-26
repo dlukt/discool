@@ -33,6 +33,8 @@ pub struct AdminHealth {
     pub db_pool_idle: u32,
     pub db_pool_max: u32,
     pub websocket_connections: u32,
+    pub p2p_discovered_instances: u32,
+    pub p2p_connection_count: u32,
 }
 
 async fn require_admin(pool: &DbPool, username: &str) -> Result<(), AppError> {
@@ -86,6 +88,14 @@ pub async fn get_health(
     let db_pool_active = state.pool.size().saturating_sub(db_pool_idle);
 
     let db_size_bytes = db_size_bytes(&state).await;
+    let p2p_discovered_instances = crate::p2p::discovery::count_discovered_instances(&state.pool)
+        .await
+        .map_err(AppError::Internal)?;
+    let p2p_connection_count = state
+        .p2p_metadata
+        .read()
+        .map_err(|err| AppError::Internal(format!("p2p metadata lock poisoned: {err}")))?
+        .connection_count;
 
     let health = AdminHealth {
         cpu_usage_percent,
@@ -96,6 +106,8 @@ pub async fn get_health(
         db_pool_idle,
         db_pool_max,
         websocket_connections: 0,
+        p2p_discovered_instances,
+        p2p_connection_count,
     };
 
     Ok((StatusCode::OK, Json(json!({ "data": health }))).into_response())
@@ -870,6 +882,8 @@ mod tests {
         );
 
         assert_eq!(data.get("websocket_connections"), Some(&json!(0)));
+        assert_eq!(data.get("p2p_discovered_instances"), Some(&json!(0)));
+        assert_eq!(data.get("p2p_connection_count"), Some(&json!(0)));
 
         let cpu_usage_percent = data
             .get("cpu_usage_percent")

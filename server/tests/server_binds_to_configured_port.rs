@@ -362,6 +362,43 @@ fn write_server_config_with_db_url(
     fs::write(path, cfg).unwrap();
 }
 
+fn write_p2p_identity(path: &Path) -> String {
+    let keypair = libp2p::identity::Keypair::generate_ed25519();
+    let peer_id = keypair.public().to_peer_id().to_string();
+    let bytes = keypair.to_protobuf_encoding().unwrap();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(path, bytes).unwrap();
+    peer_id
+}
+
+fn write_server_config_with_p2p(
+    path: &Path,
+    host: &str,
+    port: u16,
+    db_url: &str,
+    p2p_host: &str,
+    p2p_port: u16,
+    identity_key_path: &str,
+    bootstrap_peers: &[String],
+) {
+    let mut cfg = format!(
+        "[server]\nhost = \"{host}\"\nport = {port}\n\n[log]\nlevel = \"warn\"\nformat = \"json\"\n\n[database]\nurl = \"{db_url}\"\nmax_connections = 1\n\n[p2p]\nenabled = true\nlisten_host = \"{p2p_host}\"\nlisten_port = {p2p_port}\nidentity_key_path = \"{identity_key_path}\"\ndiscovery_retry_initial_secs = 1\ndiscovery_retry_max_secs = 4\ndiscovery_retry_jitter_millis = 0\ndiscovery_refresh_interval_secs = 1\n"
+    );
+    if bootstrap_peers.is_empty() {
+        cfg.push_str("bootstrap_peers = []\n");
+    } else {
+        let joined = bootstrap_peers
+            .iter()
+            .map(|peer| format!("\"{peer}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        cfg.push_str(&format!("bootstrap_peers = [{joined}]\n"));
+    }
+    fs::write(path, cfg).unwrap();
+}
+
 #[tokio::test]
 async fn server_binds_to_port_from_config_toml() {
     let port = pick_free_port();
@@ -524,6 +561,153 @@ async fn server_stays_up_when_p2p_startup_fails() {
 
     assert_eq!(http_status(&addr, "/healthz").await, 200);
     assert_eq!(http_status(&addr, "/readyz").await, 200);
+}
+
+#[tokio::test]
+async fn server_stays_up_with_unreachable_bootstrap_peer() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let p2p_port = pick_free_port();
+
+    let dir = new_temp_dir();
+    let bootstrap_identity_path = dir.join("bootstrap-peer.key");
+    let bootstrap_peer_id = write_p2p_identity(&bootstrap_identity_path);
+    let bootstrap_addr = format!(
+        "/ip4/127.0.0.1/tcp/{}/p2p/{}",
+        pick_free_port(),
+        bootstrap_peer_id
+    );
+
+    write_server_config_with_p2p(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        "sqlite::memory:",
+        "127.0.0.1",
+        p2p_port,
+        "./data/p2p/identity.key",
+        &[bootstrap_addr],
+    );
+
+    let mut server = spawn_server(&dir, |_| {});
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let setup = json!({
+        "admin_username": "tomas",
+        "instance_name": "My Instance"
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/instance/setup", &setup).await;
+    assert_eq!(response_status(&res), 200);
+
+    let token = register_and_authenticate(&addr, "tomas", [3u8; 32]).await;
+
+    sleep(Duration::from_secs(3)).await;
+
+    let res = http_response_with_bearer(&addr, "/api/v1/admin/health", &token).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let data = value.get("data").and_then(|v| v.as_object()).unwrap();
+    assert_eq!(data.get("p2p_connection_count"), Some(&json!(0)));
+    assert_eq!(data.get("p2p_discovered_instances"), Some(&json!(0)));
+
+    assert_eq!(http_status(&addr, "/healthz").await, 200);
+    assert_eq!(http_status(&addr, "/readyz").await, 200);
+}
+
+#[tokio::test]
+async fn p2p_bootstrap_discovers_other_instance_within_startup_window() {
+    use serde_json::json;
+
+    let server_a_port = pick_free_port();
+    let server_b_port = pick_free_port();
+    let p2p_a_port = pick_free_port();
+    let p2p_b_port = pick_free_port();
+
+    let dir_a = new_temp_dir();
+    let dir_b = new_temp_dir();
+
+    let peer_id_a = write_p2p_identity(&dir_a.join("data/p2p/identity.key"));
+    let _peer_id_b = write_p2p_identity(&dir_b.join("data/p2p/identity.key"));
+
+    write_server_config_with_p2p(
+        &dir_a.join("config.toml"),
+        "127.0.0.1",
+        server_a_port,
+        "sqlite::memory:",
+        "127.0.0.1",
+        p2p_a_port,
+        "./data/p2p/identity.key",
+        &[],
+    );
+
+    let bootstrap_addr = format!("/ip4/127.0.0.1/tcp/{p2p_a_port}/p2p/{peer_id_a}");
+    write_server_config_with_p2p(
+        &dir_b.join("config.toml"),
+        "127.0.0.1",
+        server_b_port,
+        "sqlite::memory:",
+        "127.0.0.1",
+        p2p_b_port,
+        "./data/p2p/identity.key",
+        &[bootstrap_addr],
+    );
+
+    let mut server_a = spawn_server(&dir_a, |_| {});
+    let addr_a = format!("127.0.0.1:{server_a_port}");
+    wait_for_http_status(&mut server_a.child, &addr_a, "/readyz", 200).await;
+
+    let mut server_b = spawn_server(&dir_b, |_| {});
+    let addr_b = format!("127.0.0.1:{server_b_port}");
+    wait_for_http_status(&mut server_b.child, &addr_b, "/readyz", 200).await;
+
+    let setup_a = json!({
+        "admin_username": "bootstrap-admin",
+        "instance_name": "Bootstrap Instance"
+    })
+    .to_string();
+    let res = http_post(&addr_a, "/api/v1/instance/setup", &setup_a).await;
+    assert_eq!(response_status(&res), 200);
+
+    let setup_b = json!({
+        "admin_username": "tomas",
+        "instance_name": "Joining Instance"
+    })
+    .to_string();
+    let res = http_post(&addr_b, "/api/v1/instance/setup", &setup_b).await;
+    assert_eq!(response_status(&res), 200);
+
+    let token = register_and_authenticate(&addr_b, "tomas", [4u8; 32]).await;
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut discovered = false;
+    while Instant::now() < deadline {
+        let res = http_response_with_bearer(&addr_b, "/api/v1/admin/health", &token).await;
+        if response_status(&res) == 200 {
+            let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+            let data = value.get("data").and_then(|v| v.as_object()).unwrap();
+            let connection_count = data
+                .get("p2p_connection_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let discovered_instances = data
+                .get("p2p_discovered_instances")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if connection_count >= 1 && discovered_instances >= 1 {
+                discovered = true;
+                break;
+            }
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+
+    assert!(
+        discovered,
+        "expected discovery to report at least one connection and one discovered instance within 20 seconds"
+    );
 }
 
 #[tokio::test]
@@ -865,6 +1049,8 @@ async fn admin_health_returns_200_after_instance_setup() {
     let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
     let data = value.get("data").and_then(|v| v.as_object()).unwrap();
     assert_eq!(data.get("websocket_connections"), Some(&json!(0)));
+    assert_eq!(data.get("p2p_discovered_instances"), Some(&json!(0)));
+    assert_eq!(data.get("p2p_connection_count"), Some(&json!(0)));
     assert!(data.get("uptime_seconds").is_some());
     assert!(data.get("db_pool_max").is_some());
 }

@@ -65,6 +65,20 @@
 # Path to persisted instance libp2p private key (default: "./data/p2p/identity.key")
 # identity_key_path = "./data/p2p/identity.key"
 #
+# Optional bootstrap peers for Kademlia discovery (multiaddr with /p2p peer ID)
+# bootstrap_peers = [
+#   "/ip4/203.0.113.10/tcp/4001/p2p/12D3KooWExamplePeerId1111111111111111111111111",
+#   "/dns4/bootstrap.discool.example/tcp/4001/p2p/12D3KooWExamplePeerId2222222222222222222222222"
+# ]
+#
+# Exponential backoff retry settings for discovery bootstrap (defaults: 2s initial, 60s max, 500ms jitter)
+# discovery_retry_initial_secs = 2
+# discovery_retry_max_secs = 60
+# discovery_retry_jitter_millis = 500
+#
+# Periodic discovery refresh interval in seconds (default: 15)
+# discovery_refresh_interval_secs = 15
+#
 # ---------------------------------------------------------------------------
 # [log]
 # ---------------------------------------------------------------------------

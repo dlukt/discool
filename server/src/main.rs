@@ -60,7 +60,9 @@ async fn main() {
     ));
     let mut p2p_runtime = None;
     if config.p2p.enabled {
-        match discool_server::p2p::node::bootstrap(&config.p2p, p2p_metadata.clone()) {
+        match discool_server::p2p::node::bootstrap(&config.p2p, pool.clone(), p2p_metadata.clone())
+            .await
+        {
             Ok(runtime) => {
                 tracing::info!(
                     peer_id = %runtime.peer_id,

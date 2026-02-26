@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::path::Path;
 
+use libp2p::{Multiaddr, PeerId, multiaddr::Protocol};
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
@@ -148,6 +150,59 @@ impl Config {
                     format!("failed to create parent directory: {err}"),
                 ));
             }
+            if self.p2p.discovery_retry_initial_secs == 0 {
+                return Err(ConfigValidationError::new(
+                    "p2p.discovery_retry_initial_secs",
+                    "must be >= 1",
+                ));
+            }
+            if self.p2p.discovery_retry_max_secs < self.p2p.discovery_retry_initial_secs {
+                return Err(ConfigValidationError::new(
+                    "p2p.discovery_retry_max_secs",
+                    "must be >= p2p.discovery_retry_initial_secs",
+                ));
+            }
+            if self.p2p.discovery_refresh_interval_secs == 0 {
+                return Err(ConfigValidationError::new(
+                    "p2p.discovery_refresh_interval_secs",
+                    "must be >= 1",
+                ));
+            }
+            for bootstrap_peer in &self.p2p.bootstrap_peers {
+                let trimmed = bootstrap_peer.trim();
+                if trimmed.is_empty() {
+                    return Err(ConfigValidationError::new(
+                        "p2p.bootstrap_peers",
+                        "must not contain empty entries",
+                    ));
+                }
+
+                let multiaddr: Multiaddr = trimmed.parse().map_err(|err| {
+                    ConfigValidationError::new(
+                        "p2p.bootstrap_peers",
+                        format!("invalid multiaddr '{trimmed}': {err}"),
+                    )
+                })?;
+                let mut has_peer_id = false;
+                for protocol in multiaddr.iter() {
+                    if let Protocol::P2p(peer_id) = protocol {
+                        let _ = PeerId::from_bytes(&peer_id.to_bytes()).map_err(|err| {
+                            ConfigValidationError::new(
+                                "p2p.bootstrap_peers",
+                                format!("invalid peer id in '{trimmed}': {err}"),
+                            )
+                        })?;
+                        has_peer_id = true;
+                    }
+                }
+
+                if !has_peer_id {
+                    return Err(ConfigValidationError::new(
+                        "p2p.bootstrap_peers",
+                        format!("multiaddr '{trimmed}' must include /p2p/<peer-id>"),
+                    ));
+                }
+            }
         }
 
         if self.email.smtp_host.trim().is_empty() {
@@ -252,6 +307,11 @@ impl Config {
             p2p_listen_host = %self.p2p.listen_host,
             p2p_listen_port = self.p2p.listen_port,
             p2p_identity_key_path = %self.p2p.identity_key_path,
+            p2p_bootstrap_peer_count = self.p2p.bootstrap_peers.len(),
+            p2p_discovery_retry_initial_secs = self.p2p.discovery_retry_initial_secs,
+            p2p_discovery_retry_max_secs = self.p2p.discovery_retry_max_secs,
+            p2p_discovery_retry_jitter_millis = self.p2p.discovery_retry_jitter_millis,
+            p2p_discovery_refresh_interval_secs = self.p2p.discovery_refresh_interval_secs,
             "Configuration loaded"
         );
     }
@@ -313,6 +373,16 @@ pub struct P2pConfig {
     pub listen_port: u16,
     #[serde(default = "default_p2p_identity_key_path")]
     pub identity_key_path: String,
+    #[serde(default)]
+    pub bootstrap_peers: Vec<String>,
+    #[serde(default = "default_p2p_discovery_retry_initial_secs")]
+    pub discovery_retry_initial_secs: u64,
+    #[serde(default = "default_p2p_discovery_retry_max_secs")]
+    pub discovery_retry_max_secs: u64,
+    #[serde(default = "default_p2p_discovery_retry_jitter_millis")]
+    pub discovery_retry_jitter_millis: u64,
+    #[serde(default = "default_p2p_discovery_refresh_interval_secs")]
+    pub discovery_refresh_interval_secs: u64,
 }
 
 impl Default for P2pConfig {
@@ -322,6 +392,11 @@ impl Default for P2pConfig {
             listen_host: default_p2p_listen_host(),
             listen_port: default_p2p_listen_port(),
             identity_key_path: default_p2p_identity_key_path(),
+            bootstrap_peers: Vec::new(),
+            discovery_retry_initial_secs: default_p2p_discovery_retry_initial_secs(),
+            discovery_retry_max_secs: default_p2p_discovery_retry_max_secs(),
+            discovery_retry_jitter_millis: default_p2p_discovery_retry_jitter_millis(),
+            discovery_refresh_interval_secs: default_p2p_discovery_refresh_interval_secs(),
         }
     }
 }
@@ -414,6 +489,22 @@ fn default_p2p_listen_port() -> u16 {
 
 fn default_p2p_identity_key_path() -> String {
     "./data/p2p/identity.key".to_string()
+}
+
+fn default_p2p_discovery_retry_initial_secs() -> u64 {
+    2
+}
+
+fn default_p2p_discovery_retry_max_secs() -> u64 {
+    60
+}
+
+fn default_p2p_discovery_retry_jitter_millis() -> u64 {
+    500
+}
+
+fn default_p2p_discovery_refresh_interval_secs() -> u64 {
+    15
 }
 
 fn default_email_smtp_host() -> String {
@@ -624,6 +715,11 @@ mod tests {
         assert_eq!(cfg.p2p.listen_host, "0.0.0.0");
         assert_eq!(cfg.p2p.listen_port, 4001);
         assert_eq!(cfg.p2p.identity_key_path, "./data/p2p/identity.key");
+        assert!(cfg.p2p.bootstrap_peers.is_empty());
+        assert_eq!(cfg.p2p.discovery_retry_initial_secs, 2);
+        assert_eq!(cfg.p2p.discovery_retry_max_secs, 60);
+        assert_eq!(cfg.p2p.discovery_retry_jitter_millis, 500);
+        assert_eq!(cfg.p2p.discovery_refresh_interval_secs, 15);
     }
 
     #[test]
@@ -674,6 +770,10 @@ mod tests {
         cfg.p2p.listen_host = String::new();
         cfg.p2p.listen_port = 0;
         cfg.p2p.identity_key_path = String::new();
+        cfg.p2p.discovery_retry_initial_secs = 0;
+        cfg.p2p.discovery_retry_max_secs = 0;
+        cfg.p2p.discovery_refresh_interval_secs = 0;
+        cfg.p2p.bootstrap_peers = vec!["not-a-multiaddr".to_string()];
         assert!(cfg.validate().is_ok());
     }
 
@@ -698,6 +798,52 @@ mod tests {
         assert!(cfg.validate().is_ok());
         assert!(nested.is_dir());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn valid_bootstrap_peer() -> String {
+        let peer_id = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        format!("/ip4/127.0.0.1/tcp/4001/p2p/{peer_id}")
+    }
+
+    #[test]
+    fn validate_rejects_bootstrap_peer_without_peer_id() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+        cfg.p2p.bootstrap_peers = vec!["/ip4/127.0.0.1/tcp/4001".to_string()];
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("p2p.bootstrap_peers"));
+    }
+
+    #[test]
+    fn validate_accepts_bootstrap_peers_with_peer_id() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+        cfg.p2p.bootstrap_peers = vec![valid_bootstrap_peer()];
+
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_discovery_retry_max_less_than_initial() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+        cfg.p2p.discovery_retry_initial_secs = 10;
+        cfg.p2p.discovery_retry_max_secs = 5;
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("p2p.discovery_retry_max_secs"));
     }
 
     #[test]

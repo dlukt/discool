@@ -1,3 +1,4 @@
+pub mod discovery;
 pub mod identity;
 pub mod node;
 
@@ -5,4 +6,7 @@ pub mod node;
 pub struct P2pMetadata {
     pub peer_id: Option<String>,
     pub listen_addrs: Vec<String>,
+    pub discovered_instances: u32,
+    pub connection_count: u32,
+    pub standalone_mode: bool,
 }
