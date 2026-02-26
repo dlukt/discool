@@ -97,6 +97,7 @@ mod tests {
             pool,
             start_time: Instant::now(),
             challenges: Arc::new(DashMap::new()),
+            p2p_metadata: Arc::new(std::sync::RwLock::new(crate::p2p::P2pMetadata::default())),
         }
     }
 

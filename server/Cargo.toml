@@ -24,4 +24,5 @@ uuid = { version = "1", features = ["v4", "serde"] }
 aes-gcm = { version = "0.10", features = ["aes"] }
 base64 = "0.22"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls"] }
+libp2p = { version = "0.56", features = ["noise", "tcp", "tokio", "yamux"] }
 sha2 = "0.10"

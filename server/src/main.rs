@@ -55,6 +55,30 @@ async fn main() {
         "Database connected and migrations complete"
     );
 
+    let p2p_metadata = std::sync::Arc::new(std::sync::RwLock::new(
+        discool_server::p2p::P2pMetadata::default(),
+    ));
+    let mut p2p_runtime = None;
+    if config.p2p.enabled {
+        match discool_server::p2p::node::bootstrap(&config.p2p, p2p_metadata.clone()) {
+            Ok(runtime) => {
+                tracing::info!(
+                    peer_id = %runtime.peer_id,
+                    "P2P runtime started successfully"
+                );
+                p2p_runtime = Some(runtime);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "P2P startup failed; continuing in local-only mode"
+                );
+            }
+        }
+    } else {
+        tracing::info!("P2P runtime disabled by configuration");
+    }
+
     let listener = match TcpListener::bind((config.server.host.as_str(), config.server.port)).await
     {
         Ok(listener) => listener,
@@ -75,6 +99,7 @@ async fn main() {
         pool: pool.clone(),
         start_time: std::time::Instant::now(),
         challenges: std::sync::Arc::new(DashMap::new()),
+        p2p_metadata: p2p_metadata.clone(),
     };
     let app = handlers::router(state.clone());
 
@@ -85,10 +110,15 @@ async fn main() {
     };
     tracing::info!(%addr, "Starting server");
 
-    if let Err(err) = axum::serve(listener, app)
+    let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
-        .await
-    {
+        .await;
+
+    if let Some(runtime) = p2p_runtime {
+        runtime.shutdown().await;
+    }
+
+    if let Err(err) = serve_result {
         tracing::error!(%err, "Server error");
         pool.close().await;
         std::process::exit(1);

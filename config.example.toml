@@ -51,6 +51,21 @@
 # port = 3000
 #
 # ---------------------------------------------------------------------------
+# [p2p]
+# ---------------------------------------------------------------------------
+# Enable P2P subsystem startup (default: true)
+# enabled = true
+#
+# P2P listen host (default: "0.0.0.0")
+# listen_host = "0.0.0.0"
+#
+# P2P listen port (default: 4001; separate from [server].port)
+# listen_port = 4001
+#
+# Path to persisted instance libp2p private key (default: "./data/p2p/identity.key")
+# identity_key_path = "./data/p2p/identity.key"
+#
+# ---------------------------------------------------------------------------
 # [log]
 # ---------------------------------------------------------------------------
 # Log filter directive (default: "info")

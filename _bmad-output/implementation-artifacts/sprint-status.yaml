@@ -65,8 +65,8 @@ development_status:
   epic-2-retrospective: optional
 
   # Epic 3: P2P Discovery & Federation Foundation
-  epic-3: backlog
-  3-1-libp2p-node-bootstrap-and-instance-identity: backlog
+  epic-3: in-progress
+  3-1-libp2p-node-bootstrap-and-instance-identity: done
   3-2-kademlia-dht-instance-discovery: backlog
   3-3-gossipsub-inter-instance-communication: backlog
   3-4-sybil-resistance-and-network-health: backlog

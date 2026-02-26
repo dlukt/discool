@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
@@ -16,6 +17,8 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default)]
     pub avatar: AvatarConfig,
+    #[serde(default)]
+    pub p2p: P2pConfig,
     #[serde(default)]
     pub email: EmailConfig,
 }
@@ -107,6 +110,44 @@ impl Config {
                 "avatar.upload_dir",
                 format!("failed to create directory: {err}"),
             ));
+        }
+
+        if self.p2p.enabled {
+            if self.p2p.listen_host.trim().is_empty() {
+                return Err(ConfigValidationError::new(
+                    "p2p.listen_host",
+                    "must not be empty",
+                ));
+            }
+            if self.p2p.listen_port == 0 {
+                return Err(ConfigValidationError::new(
+                    "p2p.listen_port",
+                    "must be between 1 and 65535",
+                ));
+            }
+            if self.p2p.listen_port == self.server.port {
+                return Err(ConfigValidationError::new(
+                    "p2p.listen_port",
+                    "must be different from server.port",
+                ));
+            }
+            let identity_key_path = self.p2p.identity_key_path.trim();
+            if identity_key_path.is_empty() {
+                return Err(ConfigValidationError::new(
+                    "p2p.identity_key_path",
+                    "must not be empty",
+                ));
+            }
+            let parent_dir = Path::new(identity_key_path)
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            if let Err(err) = std::fs::create_dir_all(parent_dir) {
+                return Err(ConfigValidationError::new(
+                    "p2p.identity_key_path",
+                    format!("failed to create parent directory: {err}"),
+                ));
+            }
         }
 
         if self.email.smtp_host.trim().is_empty() {
@@ -207,6 +248,10 @@ impl Config {
             log_level = %self.log.level,
             log_format = %self.log.format,
             database_url = %db_url,
+            p2p_enabled = self.p2p.enabled,
+            p2p_listen_host = %self.p2p.listen_host,
+            p2p_listen_port = self.p2p.listen_port,
+            p2p_identity_key_path = %self.p2p.identity_key_path,
             "Configuration loaded"
         );
     }
@@ -254,6 +299,29 @@ impl Default for AvatarConfig {
         Self {
             upload_dir: default_avatar_upload_dir(),
             max_size_bytes: default_avatar_max_size_bytes(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct P2pConfig {
+    #[serde(default = "default_p2p_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_p2p_listen_host")]
+    pub listen_host: String,
+    #[serde(default = "default_p2p_listen_port")]
+    pub listen_port: u16,
+    #[serde(default = "default_p2p_identity_key_path")]
+    pub identity_key_path: String,
+}
+
+impl Default for P2pConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_p2p_enabled(),
+            listen_host: default_p2p_listen_host(),
+            listen_port: default_p2p_listen_port(),
+            identity_key_path: default_p2p_identity_key_path(),
         }
     }
 }
@@ -330,6 +398,22 @@ fn default_avatar_upload_dir() -> String {
 
 fn default_avatar_max_size_bytes() -> usize {
     2 * 1024 * 1024
+}
+
+fn default_p2p_enabled() -> bool {
+    true
+}
+
+fn default_p2p_listen_host() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_p2p_listen_port() -> u16 {
+    4001
+}
+
+fn default_p2p_identity_key_path() -> String {
+    "./data/p2p/identity.key".to_string()
 }
 
 fn default_email_smtp_host() -> String {
@@ -536,6 +620,10 @@ mod tests {
         assert!(cfg.database.is_none());
         assert_eq!(cfg.avatar.upload_dir, "./data/avatars");
         assert_eq!(cfg.avatar.max_size_bytes, 2 * 1024 * 1024);
+        assert!(cfg.p2p.enabled);
+        assert_eq!(cfg.p2p.listen_host, "0.0.0.0");
+        assert_eq!(cfg.p2p.listen_port, 4001);
+        assert_eq!(cfg.p2p.identity_key_path, "./data/p2p/identity.key");
     }
 
     #[test]
@@ -549,6 +637,67 @@ mod tests {
         cfg.server.port = 0;
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("server.port"));
+    }
+
+    #[test]
+    fn validate_rejects_p2p_port_0() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+        cfg.p2p.listen_port = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("p2p.listen_port"));
+    }
+
+    #[test]
+    fn validate_rejects_p2p_port_matching_server_port() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+        cfg.p2p.listen_port = cfg.server.port;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("p2p.listen_port"));
+    }
+
+    #[test]
+    fn validate_skips_p2p_checks_when_disabled() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+        cfg.p2p.enabled = false;
+        cfg.p2p.listen_host = String::new();
+        cfg.p2p.listen_port = 0;
+        cfg.p2p.identity_key_path = String::new();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_creates_p2p_identity_parent_dir() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let mut root = std::env::temp_dir();
+        root.push(format!("discool-config-p2p-{nanos}"));
+        let nested = root.join("nested");
+        let identity_path = nested.join("identity.key");
+        cfg.p2p.identity_key_path = identity_path.to_string_lossy().to_string();
+
+        assert!(cfg.validate().is_ok());
+        assert!(nested.is_dir());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -507,6 +507,26 @@ async fn cold_start_readyz_is_under_5_seconds() {
 }
 
 #[tokio::test]
+async fn server_stays_up_when_p2p_startup_fails() {
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    let cfg_path = dir.join("config.toml");
+    write_server_config(&cfg_path, "127.0.0.1", port, None);
+
+    let mut cfg = fs::read_to_string(&cfg_path).unwrap();
+    cfg.push_str("\n[p2p]\nlisten_host = \"not-an-ip\"\n");
+    fs::write(&cfg_path, cfg).unwrap();
+
+    let mut server = spawn_server(&dir, |_| {});
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    assert_eq!(http_status(&addr, "/healthz").await, 200);
+    assert_eq!(http_status(&addr, "/readyz").await, 200);
+}
+
+#[tokio::test]
 async fn env_vars_override_config_toml() {
     let file_port = pick_free_port();
     let mut env_port = pick_free_port();

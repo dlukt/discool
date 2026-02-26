@@ -5,12 +5,13 @@ pub mod handlers;
 pub mod identity;
 pub mod middleware;
 pub mod models;
+pub mod p2p;
 pub mod services;
 pub mod static_files;
 
 pub use error::AppError;
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use dashmap::DashMap;
@@ -26,4 +27,5 @@ pub struct AppState {
     pub pool: DbPool,
     pub start_time: Instant,
     pub challenges: Arc<DashMap<String, ChallengeRecord>>,
+    pub p2p_metadata: Arc<RwLock<p2p::P2pMetadata>>,
 }
