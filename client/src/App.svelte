@@ -1,9 +1,9 @@
 <script lang="ts">
+// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
+import { goto, Router } from '@mateothegreat/svelte5-router'
 import { onMount } from 'svelte'
 import { ApiError, getInstanceStatus, type InstanceStatus } from '$lib/api'
 
-// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
-import AdminPanel from '$lib/components/AdminPanel.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import SetupPage from '$lib/components/SetupPage.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
@@ -18,20 +18,25 @@ import {
   saveLastLocation,
 } from '$lib/features/identity/navigationState'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
-import ProfileSettingsView from '$lib/features/identity/ProfileSettingsView.svelte'
-// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import RecoveryPrompt from '$lib/features/identity/RecoveryPrompt.svelte'
+import {
+  createAuthenticatedRoutes,
+  isPersistableLocation,
+  resolveInitialLocation,
+} from './routes/routes'
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let loading = $state(true)
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let errorMessage = $state<string | null>(null)
 let status = $state<InstanceStatus | null>(null)
-let view = $state<'home' | 'admin' | 'settings'>('home')
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let reRegistering = $state(false)
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let showIdentityRecovery = $state(false)
+let initialRouteResolved = $state(false)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let shellBootstrapping = $state(true)
 
 function readRecoveryTokenFromLocation(): string | null {
   if (typeof window === 'undefined') return null
@@ -41,15 +46,6 @@ function readRecoveryTokenFromLocation(): string | null {
   return token || null
 }
 
-let currentPath = $derived(
-  typeof window !== 'undefined'
-    ? window.location.pathname
-    : view === 'admin'
-      ? '/admin'
-      : '/',
-)
-// biome-ignore lint/correctness/noUnusedVariables: Reserved for Epic 4 router integration.
-let lastLocation = $state<string | null>(null)
 let joinGuildName = $derived(
   (() => {
     if (typeof window === 'undefined') return null
@@ -64,7 +60,6 @@ let joinGuildName = $derived(
 let showRecoveryNudge = $derived(
   Boolean(
     identityState.session &&
-      view === 'home' &&
       !identityState.recoveryEmailLoading &&
       !identityState.recoveryNudgeDismissed &&
       !identityState.recoveryEmailStatus?.associated,
@@ -81,6 +76,16 @@ let inviteContextInvalid = $derived(
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let recoveryToken = $state(readRecoveryTokenFromLocation())
 
+let isAdminUser = $derived(
+  Boolean(
+    status?.admin &&
+      identityState.session &&
+      status.admin.username === identityState.session.user.username,
+  ),
+)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let authenticatedRoutes = $derived(createAuthenticatedRoutes(isAdminUser))
+
 $effect(() => {
   if (typeof window === 'undefined') return
   const syncRecoveryToken = () => {
@@ -91,48 +96,54 @@ $effect(() => {
 })
 
 $effect(() => {
-  const adminUsername = status?.admin?.username
-  const currentUsername = identityState.session?.user.username
-  if (
-    view === 'admin' &&
-    adminUsername &&
-    currentUsername &&
-    adminUsername !== currentUsername
-  ) {
-    view = 'home'
-  }
+  if (identityState.session) return
+  initialRouteResolved = false
+  shellBootstrapping = true
 })
 
 $effect(() => {
-  if (!identityState.session) return
   if (
-    currentPath === '/' ||
-    currentPath.startsWith('/admin') ||
-    currentPath.startsWith('/settings')
+    !identityState.session ||
+    typeof window === 'undefined' ||
+    initialRouteResolved
   )
     return
-  saveLastLocation(currentPath)
+
+  shellBootstrapping = true
+  const targetPath = resolveInitialLocation(
+    window.location.pathname,
+    getLastLocation(),
+  )
+  if (targetPath !== window.location.pathname) {
+    goto(targetPath)
+  }
+
+  initialRouteResolved = true
+  const timer = window.setTimeout(() => {
+    shellBootstrapping = false
+  }, 120)
+  return () => window.clearTimeout(timer)
 })
 
 $effect(() => {
-  if (!identityState.session) {
-    lastLocation = null
+  if (!identityState.session || typeof window === 'undefined' || isAdminUser)
     return
+  if (window.location.pathname.startsWith('/admin')) {
+    goto('/')
   }
-
-  const stored = getLastLocation()
-  if (
-    !stored ||
-    stored === '/' ||
-    stored.startsWith('/admin') ||
-    stored.startsWith('/settings')
-  ) {
-    lastLocation = null
-    return
-  }
-
-  lastLocation = stored
 })
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function handleShellRouteResolved(path: string): void {
+  if (!identityState.session) return
+  if (!isPersistableLocation(path)) return
+  saveLastLocation(path)
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function handleOpenSettings(): void {
+  goto('/settings')
+}
 
 async function loadStatus() {
   loading = true
@@ -186,137 +197,27 @@ onMount(() => {
 {:else if status && !status.initialized}
   <SetupPage on:complete={() => void loadStatus()} />
 {:else if status && status.initialized && identityState.session}
-  <main class="min-h-screen bg-background">
-    <div class="flex min-h-screen">
-      <aside class="w-56 border-r border-border bg-sidebar p-4">
-        <div class="mb-4 text-sm font-semibold text-sidebar-foreground">Discool</div>
-        <nav class="space-y-1">
-          <button
-            type="button"
-            class={`w-full rounded-md px-3 py-2 text-left text-sm transition-colors ${
-              view === 'home'
-                ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                : 'text-muted-foreground hover:bg-muted'
-            }`}
-            onclick={() => (view = 'home')}
-          >
-            Home
-          </button>
-          {#if status.admin && status.admin.username === identityState.session.user.username}
-            <button
-              type="button"
-              class={`w-full rounded-md px-3 py-2 text-left text-sm transition-colors ${
-                view === 'admin'
-                  ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                  : 'text-muted-foreground hover:bg-muted'
-              }`}
-              onclick={() => (view = 'admin')}
-              >
-                Admin
-              </button>
-          {/if}
-          <button
-            type="button"
-            class={`w-full rounded-md px-3 py-2 text-left text-sm transition-colors ${
-              view === 'settings'
-                ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                : 'text-muted-foreground hover:bg-muted'
-            }`}
-            onclick={() => (view = 'settings')}
-          >
-            Settings
-          </button>
-        </nav>
-
-        <div class="mt-6 border-t border-border pt-4">
-          <button
-            type="button"
-            class="inline-flex w-full items-center justify-center rounded-md bg-destructive px-3 py-2 text-sm font-medium text-destructive-foreground transition-opacity hover:opacity-90"
-            onclick={() => void identityState.logout()}
-          >
-            Log out
-          </button>
-        </div>
-      </aside>
-
-      <section class="flex-1 p-8">
-        {#if view === 'admin'}
-          <AdminPanel />
-        {:else if view === 'settings'}
-          <ProfileSettingsView />
-        {:else}
-          <div class="mx-auto flex w-full max-w-xl flex-col gap-6 rounded-lg border border-border bg-card p-8">
-            <header class="space-y-2">
-              <h1 class="text-4xl font-semibold tracking-tight">Discool</h1>
-              <p class="text-sm text-muted-foreground">
-                Signed in as {identityState.session.user.displayName}.
-              </p>
-              <p class="text-sm text-muted-foreground">
-                Dual Core theme scaffold (Ice navigation, Fire actions, Zinc foundation).
-              </p>
-            </header>
-
-            {#if showRecoveryNudge}
-              <section class="rounded-md border border-border bg-muted p-4">
-                <p class="text-sm font-medium text-foreground">
-                  Add a recovery email to protect this identity.
-                </p>
-                <p class="mt-1 text-sm text-muted-foreground">
-                  Optional, and only shown after your first successful session.
-                </p>
-                <div class="mt-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    class="inline-flex items-center justify-center rounded-md bg-fire px-3 py-2 text-sm font-medium text-fire-foreground transition-opacity hover:opacity-90"
-                    onclick={() => {
-                      identityState.recoveryNudgeDismissed = false
-                      view = 'settings'
-                    }}
-                  >
-                    Set up recovery email
-                  </button>
-                  <button
-                    type="button"
-                    class="inline-flex items-center justify-center rounded-md bg-background px-3 py-2 text-sm font-medium text-foreground transition-opacity hover:opacity-90"
-                    onclick={() => identityState.dismissRecoveryNudge()}
-                  >
-                    Not now
-                  </button>
-                </div>
-              </section>
-            {/if}
-
-            <section class="flex flex-wrap gap-3">
-              <button
-                type="button"
-                class="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-              >
-                Ice action
-              </button>
-
-              <button
-                type="button"
-                class="inline-flex items-center justify-center rounded-md bg-fire px-4 py-2 text-sm font-medium text-fire-foreground transition-opacity hover:opacity-90"
-              >
-                Fire action
-              </button>
-
-              <button
-                type="button"
-                class="inline-flex items-center justify-center rounded-md bg-destructive px-4 py-2 text-sm font-medium text-destructive-foreground transition-opacity hover:opacity-90"
-              >
-                Destructive
-              </button>
-            </section>
-
-            <section class="rounded-md bg-muted p-4 text-sm text-muted-foreground">
-              Try inspecting CSS variables in <code class="text-foreground">src/app.css</code>.
-            </section>
-          </div>
-        {/if}
-      </section>
-    </div>
-  </main>
+  {#if shellBootstrapping}
+    <main class="min-h-screen bg-background p-8">
+      <div class="mx-auto w-full max-w-2xl space-y-4 rounded-lg border border-border bg-card p-6">
+        <p class="text-sm text-muted-foreground">Loading workspace...</p>
+        <div class="h-2 w-full animate-pulse rounded bg-muted"></div>
+        <div class="h-2 w-11/12 animate-pulse rounded bg-muted"></div>
+        <div class="h-2 w-4/5 animate-pulse rounded bg-muted"></div>
+      </div>
+    </main>
+  {:else}
+    <Router
+      routes={authenticatedRoutes}
+      isAdmin={isAdminUser}
+      displayName={identityState.session.user.displayName}
+      showRecoveryNudge={showRecoveryNudge}
+      onOpenSettings={handleOpenSettings}
+      onDismissRecoveryNudge={() => identityState.dismissRecoveryNudge()}
+      onLogout={() => identityState.logout()}
+      onRouteResolved={handleShellRouteResolved}
+    />
+  {/if}
 {:else if status && status.initialized && identityState.identityCorrupted}
   {#if showIdentityRecovery || recoveryToken}
     <IdentityRecoveryView
@@ -357,7 +258,7 @@ onMount(() => {
     oncomplete={() => {
       reRegistering = false
       showIdentityRecovery = false
-      view = 'home'
+      goto('/')
     }}
   />
 {:else if status && status.initialized && !identityState.identity}
@@ -379,7 +280,7 @@ onMount(() => {
       }}
       oncomplete={() => {
         showIdentityRecovery = false
-        view = 'home'
+        goto('/')
       }}
     />
   {/if}
