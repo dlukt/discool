@@ -612,6 +612,9 @@ async fn server_stays_up_with_unreachable_bootstrap_peer() {
     let data = value.get("data").and_then(|v| v.as_object()).unwrap();
     assert_eq!(data.get("p2p_connection_count"), Some(&json!(0)));
     assert_eq!(data.get("p2p_discovered_instances"), Some(&json!(0)));
+    assert_eq!(data.get("p2p_message_rate_per_minute"), Some(&json!(0.0)));
+    assert_eq!(data.get("p2p_rejected_total"), Some(&json!(0)));
+    assert_eq!(data.get("p2p_throttled_total"), Some(&json!(0)));
 
     assert_eq!(http_status(&addr, "/healthz").await, 200);
     assert_eq!(http_status(&addr, "/readyz").await, 200);
@@ -1051,6 +1054,9 @@ async fn admin_health_returns_200_after_instance_setup() {
     assert_eq!(data.get("websocket_connections"), Some(&json!(0)));
     assert_eq!(data.get("p2p_discovered_instances"), Some(&json!(0)));
     assert_eq!(data.get("p2p_connection_count"), Some(&json!(0)));
+    assert_eq!(data.get("p2p_message_rate_per_minute"), Some(&json!(0.0)));
+    assert_eq!(data.get("p2p_rejected_total"), Some(&json!(0)));
+    assert_eq!(data.get("p2p_throttled_total"), Some(&json!(0)));
     assert!(data.get("uptime_seconds").is_some());
     assert!(data.get("db_pool_max").is_some());
 }

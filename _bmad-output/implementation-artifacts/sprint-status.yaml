@@ -69,7 +69,7 @@ development_status:
   3-1-libp2p-node-bootstrap-and-instance-identity: done
   3-2-kademlia-dht-instance-discovery: done
   3-3-gossipsub-inter-instance-communication: done
-  3-4-sybil-resistance-and-network-health: backlog
+  3-4-sybil-resistance-and-network-health: done
   3-5-private-instance-and-discovery-opt-out: backlog
   epic-3-retrospective: optional
 

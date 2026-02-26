@@ -194,6 +194,75 @@ impl Config {
                     "must satisfy p2p.gossip_mesh_n_low <= p2p.gossip_mesh_n <= p2p.gossip_mesh_n_high",
                 ));
             }
+            if self.p2p.ingress_rate_window_secs == 0 {
+                return Err(ConfigValidationError::new(
+                    "p2p.ingress_rate_window_secs",
+                    "must be >= 1",
+                ));
+            }
+            if self.p2p.ingress_rate_per_peer_limit == 0 {
+                return Err(ConfigValidationError::new(
+                    "p2p.ingress_rate_per_peer_limit",
+                    "must be >= 1",
+                ));
+            }
+            if self.p2p.ingress_rate_global_limit < self.p2p.ingress_rate_per_peer_limit {
+                return Err(ConfigValidationError::new(
+                    "p2p.ingress_rate_global_limit",
+                    "must be >= p2p.ingress_rate_per_peer_limit",
+                ));
+            }
+            if self.p2p.throttle_base_secs == 0 {
+                return Err(ConfigValidationError::new(
+                    "p2p.throttle_base_secs",
+                    "must be >= 1",
+                ));
+            }
+            if self.p2p.throttle_max_secs < self.p2p.throttle_base_secs {
+                return Err(ConfigValidationError::new(
+                    "p2p.throttle_max_secs",
+                    "must be >= p2p.throttle_base_secs",
+                ));
+            }
+            if self.p2p.peer_retention_capacity == 0 {
+                return Err(ConfigValidationError::new(
+                    "p2p.peer_retention_capacity",
+                    "must be >= 1",
+                ));
+            }
+            if self.p2p.stable_peer_min_age_secs == 0 {
+                return Err(ConfigValidationError::new(
+                    "p2p.stable_peer_min_age_secs",
+                    "must be >= 1",
+                ));
+            }
+            if !self.p2p.degraded_reject_ratio_threshold.is_finite()
+                || self.p2p.degraded_reject_ratio_threshold <= 0.0
+                || self.p2p.degraded_reject_ratio_threshold > 1.0
+            {
+                return Err(ConfigValidationError::new(
+                    "p2p.degraded_reject_ratio_threshold",
+                    "must be > 0.0 and <= 1.0",
+                ));
+            }
+            if self.p2p.degraded_min_samples == 0 {
+                return Err(ConfigValidationError::new(
+                    "p2p.degraded_min_samples",
+                    "must be >= 1",
+                ));
+            }
+            if self.p2p.degraded_min_healthy_peers == 0 {
+                return Err(ConfigValidationError::new(
+                    "p2p.degraded_min_healthy_peers",
+                    "must be >= 1",
+                ));
+            }
+            if self.p2p.degraded_bootstrap_failure_threshold == 0 {
+                return Err(ConfigValidationError::new(
+                    "p2p.degraded_bootstrap_failure_threshold",
+                    "must be >= 1",
+                ));
+            }
             for bootstrap_peer in &self.p2p.bootstrap_peers {
                 let trimmed = bootstrap_peer.trim();
                 if trimmed.is_empty() {
@@ -341,6 +410,17 @@ impl Config {
             p2p_gossip_mesh_n_low = self.p2p.gossip_mesh_n_low,
             p2p_gossip_mesh_n = self.p2p.gossip_mesh_n,
             p2p_gossip_mesh_n_high = self.p2p.gossip_mesh_n_high,
+            p2p_ingress_rate_window_secs = self.p2p.ingress_rate_window_secs,
+            p2p_ingress_rate_per_peer_limit = self.p2p.ingress_rate_per_peer_limit,
+            p2p_ingress_rate_global_limit = self.p2p.ingress_rate_global_limit,
+            p2p_throttle_base_secs = self.p2p.throttle_base_secs,
+            p2p_throttle_max_secs = self.p2p.throttle_max_secs,
+            p2p_peer_retention_capacity = self.p2p.peer_retention_capacity,
+            p2p_stable_peer_min_age_secs = self.p2p.stable_peer_min_age_secs,
+            p2p_degraded_reject_ratio_threshold = self.p2p.degraded_reject_ratio_threshold,
+            p2p_degraded_min_samples = self.p2p.degraded_min_samples,
+            p2p_degraded_min_healthy_peers = self.p2p.degraded_min_healthy_peers,
+            p2p_degraded_bootstrap_failure_threshold = self.p2p.degraded_bootstrap_failure_threshold,
             "Configuration loaded"
         );
     }
@@ -418,6 +498,28 @@ pub struct P2pConfig {
     pub gossip_mesh_n: usize,
     #[serde(default = "default_p2p_gossip_mesh_n_high")]
     pub gossip_mesh_n_high: usize,
+    #[serde(default = "default_p2p_ingress_rate_window_secs")]
+    pub ingress_rate_window_secs: u64,
+    #[serde(default = "default_p2p_ingress_rate_per_peer_limit")]
+    pub ingress_rate_per_peer_limit: u32,
+    #[serde(default = "default_p2p_ingress_rate_global_limit")]
+    pub ingress_rate_global_limit: u32,
+    #[serde(default = "default_p2p_throttle_base_secs")]
+    pub throttle_base_secs: u64,
+    #[serde(default = "default_p2p_throttle_max_secs")]
+    pub throttle_max_secs: u64,
+    #[serde(default = "default_p2p_peer_retention_capacity")]
+    pub peer_retention_capacity: usize,
+    #[serde(default = "default_p2p_stable_peer_min_age_secs")]
+    pub stable_peer_min_age_secs: u64,
+    #[serde(default = "default_p2p_degraded_reject_ratio_threshold")]
+    pub degraded_reject_ratio_threshold: f64,
+    #[serde(default = "default_p2p_degraded_min_samples")]
+    pub degraded_min_samples: u32,
+    #[serde(default = "default_p2p_degraded_min_healthy_peers")]
+    pub degraded_min_healthy_peers: u32,
+    #[serde(default = "default_p2p_degraded_bootstrap_failure_threshold")]
+    pub degraded_bootstrap_failure_threshold: u32,
 }
 
 impl Default for P2pConfig {
@@ -435,6 +537,18 @@ impl Default for P2pConfig {
             gossip_mesh_n_low: default_p2p_gossip_mesh_n_low(),
             gossip_mesh_n: default_p2p_gossip_mesh_n(),
             gossip_mesh_n_high: default_p2p_gossip_mesh_n_high(),
+            ingress_rate_window_secs: default_p2p_ingress_rate_window_secs(),
+            ingress_rate_per_peer_limit: default_p2p_ingress_rate_per_peer_limit(),
+            ingress_rate_global_limit: default_p2p_ingress_rate_global_limit(),
+            throttle_base_secs: default_p2p_throttle_base_secs(),
+            throttle_max_secs: default_p2p_throttle_max_secs(),
+            peer_retention_capacity: default_p2p_peer_retention_capacity(),
+            stable_peer_min_age_secs: default_p2p_stable_peer_min_age_secs(),
+            degraded_reject_ratio_threshold: default_p2p_degraded_reject_ratio_threshold(),
+            degraded_min_samples: default_p2p_degraded_min_samples(),
+            degraded_min_healthy_peers: default_p2p_degraded_min_healthy_peers(),
+            degraded_bootstrap_failure_threshold: default_p2p_degraded_bootstrap_failure_threshold(
+            ),
         }
     }
 }
@@ -555,6 +669,50 @@ fn default_p2p_gossip_mesh_n() -> usize {
 
 fn default_p2p_gossip_mesh_n_high() -> usize {
     12
+}
+
+fn default_p2p_ingress_rate_window_secs() -> u64 {
+    10
+}
+
+fn default_p2p_ingress_rate_per_peer_limit() -> u32 {
+    60
+}
+
+fn default_p2p_ingress_rate_global_limit() -> u32 {
+    400
+}
+
+fn default_p2p_throttle_base_secs() -> u64 {
+    5
+}
+
+fn default_p2p_throttle_max_secs() -> u64 {
+    300
+}
+
+fn default_p2p_peer_retention_capacity() -> usize {
+    2048
+}
+
+fn default_p2p_stable_peer_min_age_secs() -> u64 {
+    300
+}
+
+fn default_p2p_degraded_reject_ratio_threshold() -> f64 {
+    0.35
+}
+
+fn default_p2p_degraded_min_samples() -> u32 {
+    50
+}
+
+fn default_p2p_degraded_min_healthy_peers() -> u32 {
+    1
+}
+
+fn default_p2p_degraded_bootstrap_failure_threshold() -> u32 {
+    5
 }
 
 fn default_email_smtp_host() -> String {
@@ -773,6 +931,17 @@ mod tests {
         assert_eq!(cfg.p2p.gossip_mesh_n_low, 5);
         assert_eq!(cfg.p2p.gossip_mesh_n, 6);
         assert_eq!(cfg.p2p.gossip_mesh_n_high, 12);
+        assert_eq!(cfg.p2p.ingress_rate_window_secs, 10);
+        assert_eq!(cfg.p2p.ingress_rate_per_peer_limit, 60);
+        assert_eq!(cfg.p2p.ingress_rate_global_limit, 400);
+        assert_eq!(cfg.p2p.throttle_base_secs, 5);
+        assert_eq!(cfg.p2p.throttle_max_secs, 300);
+        assert_eq!(cfg.p2p.peer_retention_capacity, 2048);
+        assert_eq!(cfg.p2p.stable_peer_min_age_secs, 300);
+        assert_eq!(cfg.p2p.degraded_reject_ratio_threshold, 0.35);
+        assert_eq!(cfg.p2p.degraded_min_samples, 50);
+        assert_eq!(cfg.p2p.degraded_min_healthy_peers, 1);
+        assert_eq!(cfg.p2p.degraded_bootstrap_failure_threshold, 5);
     }
 
     #[test]
@@ -912,6 +1081,36 @@ mod tests {
 
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("p2p.gossip_mesh_n"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_p2p_ingress_limits() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+        cfg.p2p.ingress_rate_per_peer_limit = 100;
+        cfg.p2p.ingress_rate_global_limit = 10;
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("p2p.ingress_rate_global_limit"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_p2p_degraded_ratio_threshold() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+        cfg.p2p.degraded_reject_ratio_threshold = 1.2;
+
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("p2p.degraded_reject_ratio_threshold")
+        );
     }
 
     #[test]

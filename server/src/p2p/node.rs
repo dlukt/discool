@@ -1,12 +1,12 @@
 use std::path::Path;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub;
 use libp2p::kad::{self, QueryResult, Quorum};
 use libp2p::swarm::SwarmEvent;
-use libp2p::{Multiaddr, SwarmBuilder, identify, noise, tcp, yamux};
+use libp2p::{Multiaddr, PeerId, SwarmBuilder, identify, noise, tcp, yamux};
 
 use crate::config::P2pConfig;
 use crate::db::DbPool;
@@ -23,6 +23,7 @@ use super::gossip::{
     decode_and_validate_envelope, gossip_topic, gossip_topic_from_hash,
 };
 use super::identity::{IdentityError, load_or_create_identity};
+use super::sybil::{IngressDecision, SybilGuard, SybilSettings};
 
 pub struct P2pRuntime {
     pub peer_id: String,
@@ -119,6 +120,14 @@ pub async fn bootstrap(
         guard.discovered_instances = discovered_instances;
         guard.connection_count = 0;
         guard.standalone_mode = bootstrap_peers.is_empty();
+        guard.message_rate_per_minute = 0.0;
+        guard.ingress_total = 0;
+        guard.rejected_total = 0;
+        guard.throttled_total = 0;
+        guard.healthy_peer_count = 0;
+        guard.bootstrap_failures = 0;
+        guard.degraded = false;
+        guard.degraded_reason = None;
     }
 
     for bootstrap_peer in &bootstrap_peers {
@@ -164,7 +173,11 @@ pub async fn bootstrap(
     let retry_max_secs = config.discovery_retry_max_secs;
     let retry_jitter_millis = config.discovery_retry_jitter_millis;
     let refresh_interval = Duration::from_secs(config.discovery_refresh_interval_secs);
+    let sybil_settings = SybilSettings::from_config(config);
     let task = tokio::spawn(async move {
+        let mut sybil_guard = SybilGuard::new(sybil_settings);
+        let mut bootstrap_failures = 0u32;
+        let mut last_degraded_reason: Option<String> = None;
         let mut refresh_tick = tokio::time::interval(refresh_interval);
         refresh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut retry_attempt = 0u32;
@@ -262,6 +275,7 @@ pub async fn bootstrap(
                             guard.standalone_mode = true;
                         }
                         if let Err(err) = swarm.behaviour_mut().kademlia.bootstrap() {
+                            bootstrap_failures = bootstrap_failures.saturating_add(1);
                             tracing::warn!(
                                 peer_id = %task_peer_id,
                                 error = %err,
@@ -269,6 +283,7 @@ pub async fn bootstrap(
                                 "DHT bootstrap retry failed; running in standalone mode"
                             );
                         } else {
+                            bootstrap_failures = 0;
                             tracing::info!(
                                 peer_id = %task_peer_id,
                                 retry_in_secs = delay.as_secs_f64(),
@@ -299,9 +314,13 @@ pub async fn bootstrap(
                             tracing::warn!(peer_id = %task_peer_id, error = %error, "P2P listener error");
                         }
                         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                            let remote_peer_id = peer_id.to_string();
+                            sybil_guard.observe_peer(&remote_peer_id, Instant::now());
+                            handle_retention_eviction(&mut swarm, &mut sybil_guard, &task_peer_id);
                             let connection_count = u32::try_from(swarm.connected_peers().count()).unwrap_or(u32::MAX);
                             retry_attempt = 0;
                             next_retry = tokio::time::Instant::now();
+                            bootstrap_failures = 0;
                             if let Ok(mut guard) = task_metadata.write() {
                                 guard.connection_count = connection_count;
                                 guard.standalone_mode = false;
@@ -309,6 +328,9 @@ pub async fn bootstrap(
                             tracing::info!(peer_id = %task_peer_id, remote_peer_id = %peer_id, connection_count, "P2P connection established");
                         }
                         SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                            let remote_peer_id = peer_id.to_string();
+                            sybil_guard.observe_peer(&remote_peer_id, Instant::now());
+                            handle_retention_eviction(&mut swarm, &mut sybil_guard, &task_peer_id);
                             let connection_count = u32::try_from(swarm.connected_peers().count()).unwrap_or(u32::MAX);
                             if let Ok(mut guard) = task_metadata.write() {
                                 guard.connection_count = connection_count;
@@ -320,6 +342,21 @@ pub async fn bootstrap(
                         }
                         SwarmEvent::Behaviour(DiscoveryEvent::Identify(event)) => {
                             if let identify::Event::Received { peer_id, info, .. } = *event {
+                                let remote_peer_id = peer_id.to_string();
+                                match sybil_guard.check_ingress(&remote_peer_id, Instant::now()) {
+                                    IngressDecision::Allow => {}
+                                    IngressDecision::Reject(rejection) => {
+                                        tracing::warn!(
+                                            peer_id = %task_peer_id,
+                                            remote_peer_id = %remote_peer_id,
+                                            reason = rejection.reason,
+                                            throttle_expires_in_secs = rejection.throttle_expires_in_secs(Instant::now()),
+                                            "Rejected inbound identify event due to anti-abuse controls"
+                                        );
+                                        continue;
+                                    }
+                                }
+                                handle_retention_eviction(&mut swarm, &mut sybil_guard, &task_peer_id);
                                 let mut addresses = Vec::with_capacity(info.listen_addrs.len());
                                 for address in &info.listen_addrs {
                                     swarm
@@ -354,6 +391,7 @@ pub async fn bootstrap(
                             if let kad::Event::OutboundQueryProgressed { result, .. } = *event {
                                 match result {
                                     QueryResult::Bootstrap(Ok(_)) => {
+                                        bootstrap_failures = 0;
                                         if swarm.connected_peers().count() > 0 {
                                             retry_attempt = 0;
                                             next_retry = tokio::time::Instant::now();
@@ -367,6 +405,7 @@ pub async fn bootstrap(
                                         );
                                     }
                                     QueryResult::Bootstrap(Err(err)) => {
+                                        bootstrap_failures = bootstrap_failures.saturating_add(1);
                                         if let Ok(mut guard) = task_metadata.write() {
                                             guard.standalone_mode = true;
                                         }
@@ -381,6 +420,13 @@ pub async fn bootstrap(
                                             if peer_info.peer_id == *swarm.local_peer_id() {
                                                 continue;
                                             }
+                                            let remote_peer_id = peer_info.peer_id.to_string();
+                                            sybil_guard.observe_peer(&remote_peer_id, Instant::now());
+                                            handle_retention_eviction(
+                                                &mut swarm,
+                                                &mut sybil_guard,
+                                                &task_peer_id,
+                                            );
                                             let addresses = peer_info
                                                 .addrs
                                                 .iter()
@@ -429,16 +475,45 @@ pub async fn bootstrap(
                                 message,
                             } = *event
                             {
+                                let remote_peer_id = propagation_source.to_string();
+                                match sybil_guard.check_ingress(&remote_peer_id, Instant::now()) {
+                                    IngressDecision::Allow => {}
+                                    IngressDecision::Reject(rejection) => {
+                                        let _ = swarm.behaviour_mut().gossipsub.report_message_validation_result(
+                                            &message_id,
+                                            &propagation_source,
+                                            gossipsub::MessageAcceptance::Reject,
+                                        );
+                                        tracing::warn!(
+                                            peer_id = %task_peer_id,
+                                            remote_peer_id = %remote_peer_id,
+                                            reason = rejection.reason,
+                                            throttle_expires_in_secs = rejection.throttle_expires_in_secs(Instant::now()),
+                                            "Rejected inbound gossip message due to anti-abuse controls"
+                                        );
+                                        continue;
+                                    }
+                                }
+                                handle_retention_eviction(&mut swarm, &mut sybil_guard, &task_peer_id);
                                 let Some(topic) = gossip_topic_from_hash(&message.topic) else {
                                     let _ = swarm.behaviour_mut().gossipsub.report_message_validation_result(
                                         &message_id,
                                         &propagation_source,
                                         gossipsub::MessageAcceptance::Reject,
                                     );
+                                    let rejection = sybil_guard
+                                        .register_invalid_message(&remote_peer_id, Instant::now());
+                                    handle_retention_eviction(
+                                        &mut swarm,
+                                        &mut sybil_guard,
+                                        &task_peer_id,
+                                    );
                                     tracing::warn!(
                                         peer_id = %task_peer_id,
-                                        remote_peer_id = %propagation_source,
+                                        remote_peer_id = %remote_peer_id,
                                         topic = %message.topic,
+                                        reason = rejection.reason,
+                                        throttle_expires_in_secs = rejection.throttle_expires_in_secs(Instant::now()),
                                         "Rejected inbound gossip message with unknown topic"
                                     );
                                     continue;
@@ -471,10 +546,19 @@ pub async fn bootstrap(
                                             &propagation_source,
                                             gossipsub::MessageAcceptance::Reject,
                                         );
+                                        let rejection = sybil_guard
+                                            .register_invalid_message(&remote_peer_id, Instant::now());
+                                        handle_retention_eviction(
+                                            &mut swarm,
+                                            &mut sybil_guard,
+                                            &task_peer_id,
+                                        );
                                         tracing::warn!(
                                             peer_id = %task_peer_id,
-                                            remote_peer_id = %propagation_source,
+                                            remote_peer_id = %remote_peer_id,
                                             reason = %reason,
+                                            throttle_reason = rejection.reason,
+                                            throttle_expires_in_secs = rejection.throttle_expires_in_secs(Instant::now()),
                                             "Rejected inbound gossip message"
                                         );
                                     }
@@ -485,6 +569,14 @@ pub async fn bootstrap(
                     }
                 }
             }
+
+            sync_sybil_health(
+                &task_metadata,
+                &mut sybil_guard,
+                bootstrap_failures,
+                &task_peer_id,
+                &mut last_degraded_reason,
+            );
 
             if !startup_discovery_logged && tokio::time::Instant::now() >= startup_deadline {
                 startup_discovery_logged = true;
@@ -508,6 +600,84 @@ pub async fn bootstrap(
         shutdown_tx,
         task,
     })
+}
+
+fn sync_sybil_health(
+    metadata: &Arc<RwLock<P2pMetadata>>,
+    sybil_guard: &mut SybilGuard,
+    bootstrap_failures: u32,
+    local_peer_id: &str,
+    last_degraded_reason: &mut Option<String>,
+) {
+    let standalone_mode = metadata
+        .read()
+        .map(|guard| guard.standalone_mode)
+        .unwrap_or(false);
+    let now = Instant::now();
+    let snapshot = sybil_guard.health_snapshot(now, bootstrap_failures, standalone_mode);
+    let degraded_reason = sybil_guard.degraded_reason(&snapshot);
+
+    if degraded_reason != *last_degraded_reason {
+        let reject_ratio = if snapshot.ingress_total == 0 {
+            0.0
+        } else {
+            snapshot.rejected_total as f64 / snapshot.ingress_total as f64
+        };
+        match degraded_reason.as_deref() {
+            Some(reason) => tracing::warn!(
+                peer_id = %local_peer_id,
+                reason = %reason,
+                ingress_total = snapshot.ingress_total,
+                rejected_total = snapshot.rejected_total,
+                throttled_total = snapshot.throttled_total,
+                reject_ratio,
+                healthy_peer_count = snapshot.healthy_peer_count,
+                bootstrap_failures = snapshot.bootstrap_failures,
+                "P2P network health degraded; apply remediation guidance from warning reason"
+            ),
+            None => tracing::info!(
+                peer_id = %local_peer_id,
+                "P2P network health recovered"
+            ),
+        }
+        *last_degraded_reason = degraded_reason.clone();
+    }
+
+    if let Ok(mut guard) = metadata.write() {
+        guard.message_rate_per_minute = snapshot.message_rate_per_minute;
+        guard.ingress_total = snapshot.ingress_total;
+        guard.rejected_total = snapshot.rejected_total;
+        guard.throttled_total = snapshot.throttled_total;
+        guard.healthy_peer_count = snapshot.healthy_peer_count;
+        guard.bootstrap_failures = snapshot.bootstrap_failures;
+        guard.degraded = degraded_reason.is_some();
+        guard.degraded_reason = degraded_reason;
+    }
+}
+
+fn handle_retention_eviction(
+    swarm: &mut libp2p::Swarm<super::discovery::DiscoveryBehaviour>,
+    sybil_guard: &mut SybilGuard,
+    local_peer_id: &str,
+) {
+    while let Some(evicted_peer) = sybil_guard.take_next_evicted_peer() {
+        if evicted_peer == local_peer_id {
+            continue;
+        }
+
+        let disconnected = evicted_peer
+            .parse::<PeerId>()
+            .ok()
+            .and_then(|peer_id| swarm.disconnect_peer_id(peer_id).ok())
+            .is_some();
+
+        tracing::warn!(
+            peer_id = %local_peer_id,
+            evicted_peer_id = %evicted_peer,
+            disconnected,
+            "Evicted peer from anti-abuse retention cache under capacity pressure"
+        );
+    }
 }
 
 fn put_local_instance_record(

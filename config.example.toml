@@ -85,6 +85,28 @@
 # gossip_mesh_n = 6
 # gossip_mesh_n_high = 12
 #
+# Anti-abuse ingress controls (defaults shown)
+# Sliding window duration used for rate checks (seconds)
+# ingress_rate_window_secs = 10
+#
+# Maximum inbound events per peer and globally within the window
+# ingress_rate_per_peer_limit = 60
+# ingress_rate_global_limit = 400
+#
+# Temporary throttle cooldown bounds for violating peers (seconds)
+# throttle_base_secs = 5
+# throttle_max_secs = 300
+#
+# Runtime peer metadata retention policy
+# peer_retention_capacity = 2048
+# stable_peer_min_age_secs = 300
+#
+# Degraded-network detection thresholds
+# degraded_reject_ratio_threshold = 0.35 # > 0.0 and <= 1.0
+# degraded_min_samples = 50
+# degraded_min_healthy_peers = 1
+# degraded_bootstrap_failure_threshold = 5
+#
 # ---------------------------------------------------------------------------
 # [log]
 # ---------------------------------------------------------------------------
