@@ -30,6 +30,8 @@ export type AdminHealth = {
   dbPoolIdle: number
   dbPoolMax: number
   websocketConnections: number
+  p2pDiscoveryEnabled: boolean
+  p2pDiscoveryLabel: string
 }
 
 type AdminInfoWire = {
@@ -62,6 +64,8 @@ type AdminHealthWire = {
   db_pool_idle: number
   db_pool_max: number
   websocket_connections: number
+  p2p_discovery_enabled: boolean
+  p2p_discovery_label: string
 }
 
 function toInstanceStatus(wire: InstanceStatusWire): InstanceStatus {
@@ -86,6 +90,8 @@ function toAdminHealth(wire: AdminHealthWire): AdminHealth {
     dbPoolIdle: wire.db_pool_idle,
     dbPoolMax: wire.db_pool_max,
     websocketConnections: wire.websocket_connections,
+    p2pDiscoveryEnabled: wire.p2p_discovery_enabled,
+    p2pDiscoveryLabel: wire.p2p_discovery_label,
   }
 }
 

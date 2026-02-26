@@ -23,6 +23,8 @@ const sampleHealth = {
   dbPoolIdle: 0,
   dbPoolMax: 5,
   websocketConnections: 0,
+  p2pDiscoveryEnabled: true,
+  p2pDiscoveryLabel: 'Enabled',
 }
 
 describe('AdminPanel', () => {
@@ -37,6 +39,7 @@ describe('AdminPanel', () => {
 
     expect(await findByText('CPU')).toBeInTheDocument()
     expect(await findByText('12.3%')).toBeInTheDocument()
+    expect(await findByText('Enabled')).toBeInTheDocument()
     expect(getAdminHealth).toHaveBeenCalledTimes(1)
   })
 
@@ -94,6 +97,17 @@ describe('AdminPanel', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('shows disabled discovery label from health payload', async () => {
+    vi.mocked(getAdminHealth).mockResolvedValue({
+      ...sampleHealth,
+      p2pDiscoveryEnabled: false,
+      p2pDiscoveryLabel: 'Disabled (Unlisted)',
+    })
+
+    const { findByText } = render(AdminPanel)
+    expect(await findByText('Disabled (Unlisted)')).toBeInTheDocument()
   })
 
   it('shows backup error and allows retry', async () => {

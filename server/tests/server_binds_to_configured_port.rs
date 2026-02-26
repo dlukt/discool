@@ -615,6 +615,8 @@ async fn server_stays_up_with_unreachable_bootstrap_peer() {
     assert_eq!(data.get("p2p_message_rate_per_minute"), Some(&json!(0.0)));
     assert_eq!(data.get("p2p_rejected_total"), Some(&json!(0)));
     assert_eq!(data.get("p2p_throttled_total"), Some(&json!(0)));
+    assert_eq!(data.get("p2p_discovery_enabled"), Some(&json!(true)));
+    assert_eq!(data.get("p2p_discovery_label"), Some(&json!("Enabled")));
 
     assert_eq!(http_status(&addr, "/healthz").await, 200);
     assert_eq!(http_status(&addr, "/readyz").await, 200);
@@ -710,6 +712,236 @@ async fn p2p_bootstrap_discovers_other_instance_within_startup_window() {
     assert!(
         discovered,
         "expected discovery to report at least one connection and one discovered instance within 20 seconds"
+    );
+}
+
+#[tokio::test]
+async fn p2p_discovery_disabled_runs_unlisted_without_bootstrap_advertisement() {
+    use serde_json::json;
+
+    let server_a_port = pick_free_port();
+    let server_b_port = pick_free_port();
+    let p2p_a_port = pick_free_port();
+    let p2p_b_port = pick_free_port();
+
+    let dir_a = new_temp_dir();
+    let dir_b = new_temp_dir();
+
+    let peer_id_a = write_p2p_identity(&dir_a.join("data/p2p/identity.key"));
+    let _peer_id_b = write_p2p_identity(&dir_b.join("data/p2p/identity.key"));
+
+    write_server_config_with_p2p(
+        &dir_a.join("config.toml"),
+        "127.0.0.1",
+        server_a_port,
+        "sqlite::memory:",
+        "127.0.0.1",
+        p2p_a_port,
+        "./data/p2p/identity.key",
+        &[],
+    );
+
+    let bootstrap_addr = format!("/ip4/127.0.0.1/tcp/{p2p_a_port}/p2p/{peer_id_a}");
+    let config_b_path = dir_b.join("config.toml");
+    write_server_config_with_p2p(
+        &config_b_path,
+        "127.0.0.1",
+        server_b_port,
+        "sqlite::memory:",
+        "127.0.0.1",
+        p2p_b_port,
+        "./data/p2p/identity.key",
+        &[bootstrap_addr],
+    );
+    let mut cfg_b = fs::read_to_string(&config_b_path).unwrap();
+    cfg_b.push_str("discovery.enabled = false\n");
+    fs::write(&config_b_path, cfg_b).unwrap();
+
+    let mut server_a = spawn_server(&dir_a, |_| {});
+    let addr_a = format!("127.0.0.1:{server_a_port}");
+    wait_for_http_status(&mut server_a.child, &addr_a, "/readyz", 200).await;
+
+    let mut server_b = spawn_server(&dir_b, |_| {});
+    let addr_b = format!("127.0.0.1:{server_b_port}");
+    wait_for_http_status(&mut server_b.child, &addr_b, "/readyz", 200).await;
+
+    let setup_a = json!({
+        "admin_username": "bootstrap-admin",
+        "instance_name": "Bootstrap Instance"
+    })
+    .to_string();
+    let res = http_post(&addr_a, "/api/v1/instance/setup", &setup_a).await;
+    assert_eq!(response_status(&res), 200);
+
+    let setup_b = json!({
+        "admin_username": "private-admin",
+        "instance_name": "Private Instance",
+        "discovery_enabled": false
+    })
+    .to_string();
+    let res = http_post(&addr_b, "/api/v1/instance/setup", &setup_b).await;
+    assert_eq!(response_status(&res), 200);
+
+    let token_a = register_and_authenticate(&addr_a, "bootstrap-admin", [5u8; 32]).await;
+    let token_b = register_and_authenticate(&addr_b, "private-admin", [6u8; 32]).await;
+
+    sleep(Duration::from_secs(3)).await;
+
+    let instance_res = http_response(&addr_b, "/api/v1/instance").await;
+    assert_eq!(response_status(&instance_res), 200);
+    let instance_value: serde_json::Value =
+        serde_json::from_str(response_body(&instance_res)).unwrap();
+    assert_eq!(instance_value["data"]["discovery_enabled"], json!(false));
+
+    let health_b = http_response_with_bearer(&addr_b, "/api/v1/admin/health", &token_b).await;
+    assert_eq!(response_status(&health_b), 200);
+    let value_b: serde_json::Value = serde_json::from_str(response_body(&health_b)).unwrap();
+    let data_b = value_b.get("data").and_then(|v| v.as_object()).unwrap();
+    assert_eq!(data_b.get("p2p_discovery_enabled"), Some(&json!(false)));
+    assert_eq!(
+        data_b.get("p2p_discovery_label"),
+        Some(&json!("Disabled (Unlisted)"))
+    );
+    assert_eq!(data_b.get("p2p_connection_count"), Some(&json!(0)));
+    assert_eq!(data_b.get("p2p_discovered_instances"), Some(&json!(0)));
+
+    let health_a = http_response_with_bearer(&addr_a, "/api/v1/admin/health", &token_a).await;
+    assert_eq!(response_status(&health_a), 200);
+    let value_a: serde_json::Value = serde_json::from_str(response_body(&health_a)).unwrap();
+    let data_a = value_a.get("data").and_then(|v| v.as_object()).unwrap();
+    assert_eq!(data_a.get("p2p_discovered_instances"), Some(&json!(0)));
+}
+
+#[tokio::test]
+async fn p2p_discovery_reenabled_after_restart_resumes_discovery() {
+    use serde_json::json;
+
+    let server_a_port = pick_free_port();
+    let server_b_port = pick_free_port();
+    let p2p_a_port = pick_free_port();
+    let p2p_b_port = pick_free_port();
+
+    let dir_a = new_temp_dir();
+    let dir_b = new_temp_dir();
+
+    let peer_id_a = write_p2p_identity(&dir_a.join("data/p2p/identity.key"));
+    let _peer_id_b = write_p2p_identity(&dir_b.join("data/p2p/identity.key"));
+
+    write_server_config_with_p2p(
+        &dir_a.join("config.toml"),
+        "127.0.0.1",
+        server_a_port,
+        "sqlite::memory:",
+        "127.0.0.1",
+        p2p_a_port,
+        "./data/p2p/identity.key",
+        &[],
+    );
+
+    let bootstrap_addr = format!("/ip4/127.0.0.1/tcp/{p2p_a_port}/p2p/{peer_id_a}");
+    let config_b_path = dir_b.join("config.toml");
+    write_server_config_with_p2p(
+        &config_b_path,
+        "127.0.0.1",
+        server_b_port,
+        "sqlite::memory:",
+        "127.0.0.1",
+        p2p_b_port,
+        "./data/p2p/identity.key",
+        &[bootstrap_addr],
+    );
+    let mut cfg_b = fs::read_to_string(&config_b_path).unwrap();
+    cfg_b.push_str("discovery.enabled = false\n");
+    fs::write(&config_b_path, cfg_b).unwrap();
+
+    let mut server_a = spawn_server(&dir_a, |_| {});
+    let addr_a = format!("127.0.0.1:{server_a_port}");
+    wait_for_http_status(&mut server_a.child, &addr_a, "/readyz", 200).await;
+
+    let mut server_b = spawn_server(&dir_b, |_| {});
+    let addr_b = format!("127.0.0.1:{server_b_port}");
+    wait_for_http_status(&mut server_b.child, &addr_b, "/readyz", 200).await;
+
+    let setup_a = json!({
+        "admin_username": "bootstrap-admin",
+        "instance_name": "Bootstrap Instance"
+    })
+    .to_string();
+    let res = http_post(&addr_a, "/api/v1/instance/setup", &setup_a).await;
+    assert_eq!(response_status(&res), 200);
+
+    let setup_b = json!({
+        "admin_username": "private-admin",
+        "instance_name": "Private Instance",
+        "discovery_enabled": false
+    })
+    .to_string();
+    let res = http_post(&addr_b, "/api/v1/instance/setup", &setup_b).await;
+    assert_eq!(response_status(&res), 200);
+
+    let token_b = register_and_authenticate(&addr_b, "private-admin", [7u8; 32]).await;
+
+    sleep(Duration::from_secs(3)).await;
+
+    let health_b = http_response_with_bearer(&addr_b, "/api/v1/admin/health", &token_b).await;
+    assert_eq!(response_status(&health_b), 200);
+    let value_b: serde_json::Value = serde_json::from_str(response_body(&health_b)).unwrap();
+    let data_b = value_b.get("data").and_then(|v| v.as_object()).unwrap();
+    assert_eq!(data_b.get("p2p_discovery_enabled"), Some(&json!(false)));
+    assert_eq!(data_b.get("p2p_connection_count"), Some(&json!(0)));
+    assert_eq!(data_b.get("p2p_discovered_instances"), Some(&json!(0)));
+
+    server_b.child.kill().unwrap();
+    let _ = server_b.child.wait();
+
+    let cfg_b = fs::read_to_string(&config_b_path).unwrap();
+    let cfg_b = cfg_b.replace("discovery.enabled = false\n", "discovery.enabled = true\n");
+    fs::write(&config_b_path, cfg_b).unwrap();
+
+    let mut server_b_restarted = spawn_server(&dir_b, |_| {});
+    wait_for_http_status(&mut server_b_restarted.child, &addr_b, "/readyz", 200).await;
+
+    let setup_b_restarted = json!({
+        "admin_username": "private-admin-2",
+        "instance_name": "Private Instance Reenabled"
+    })
+    .to_string();
+    let res = http_post(&addr_b, "/api/v1/instance/setup", &setup_b_restarted).await;
+    assert_eq!(response_status(&res), 200);
+
+    let token_b_restarted = register_and_authenticate(&addr_b, "private-admin-2", [8u8; 32]).await;
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut discovered = false;
+    while Instant::now() < deadline {
+        let res =
+            http_response_with_bearer(&addr_b, "/api/v1/admin/health", &token_b_restarted).await;
+        if response_status(&res) == 200 {
+            let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+            let data = value.get("data").and_then(|v| v.as_object()).unwrap();
+            let discovery_enabled = data
+                .get("p2p_discovery_enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let connection_count = data
+                .get("p2p_connection_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let discovered_instances = data
+                .get("p2p_discovered_instances")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if discovery_enabled && connection_count >= 1 && discovered_instances >= 1 {
+                discovered = true;
+                break;
+            }
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+
+    assert!(
+        discovered,
+        "expected discovery to resume after re-enabling config and restarting instance"
     );
 }
 
@@ -1057,8 +1289,50 @@ async fn admin_health_returns_200_after_instance_setup() {
     assert_eq!(data.get("p2p_message_rate_per_minute"), Some(&json!(0.0)));
     assert_eq!(data.get("p2p_rejected_total"), Some(&json!(0)));
     assert_eq!(data.get("p2p_throttled_total"), Some(&json!(0)));
+    assert_eq!(data.get("p2p_discovery_enabled"), Some(&json!(true)));
+    assert_eq!(data.get("p2p_discovery_label"), Some(&json!("Enabled")));
     assert!(data.get("uptime_seconds").is_some());
     assert!(data.get("db_pool_max").is_some());
+}
+
+#[tokio::test]
+async fn admin_health_reports_discovery_disabled_when_p2p_runtime_disabled() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+
+    let dir = new_temp_dir();
+    let cfg_path = dir.join("config.toml");
+    write_server_config(&cfg_path, "127.0.0.1", port, None);
+
+    let mut cfg = fs::read_to_string(&cfg_path).unwrap();
+    cfg.push_str("\n[p2p]\nenabled = false\ndiscovery.enabled = true\n");
+    fs::write(&cfg_path, cfg).unwrap();
+
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let setup = json!({
+        "admin_username": "tomas",
+        "instance_name": "My Instance"
+    })
+    .to_string();
+    let res = http_post(&addr, "/api/v1/instance/setup", &setup).await;
+    assert_eq!(response_status(&res), 200);
+
+    let token = register_and_authenticate(&addr, "tomas", [11u8; 32]).await;
+    let res = http_response_with_bearer(&addr, "/api/v1/admin/health", &token).await;
+    assert_eq!(response_status(&res), 200);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let data = value.get("data").and_then(|v| v.as_object()).unwrap();
+    assert_eq!(data.get("p2p_discovery_enabled"), Some(&json!(false)));
+    assert_eq!(
+        data.get("p2p_discovery_label"),
+        Some(&json!("Disabled (Unlisted)"))
+    );
 }
 
 #[tokio::test]

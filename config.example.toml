@@ -56,6 +56,10 @@
 # Enable P2P subsystem startup (default: true)
 # enabled = true
 #
+# Enable discovery advertisement/query behavior while keeping P2P runtime on (default: true)
+# Set to false for private/unlisted mode (suppresses DHT publish/query + bootstrap discovery)
+# discovery.enabled = true
+#
 # P2P listen host (default: "0.0.0.0")
 # listen_host = "0.0.0.0"
 #

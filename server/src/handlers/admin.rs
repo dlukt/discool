@@ -43,6 +43,8 @@ pub struct AdminHealth {
     pub p2p_bootstrap_failures: u32,
     pub p2p_degraded: bool,
     pub p2p_degraded_reason: Option<String>,
+    pub p2p_discovery_enabled: bool,
+    pub p2p_discovery_label: String,
 }
 
 async fn require_admin(pool: &DbPool, username: &str) -> Result<(), AppError> {
@@ -99,10 +101,49 @@ pub async fn get_health(
     let p2p_discovered_instances = crate::p2p::discovery::count_discovered_instances(&state.pool)
         .await
         .map_err(AppError::Internal)?;
-    let p2p_metadata = state
-        .p2p_metadata
-        .read()
-        .map_err(|err| AppError::Internal(format!("p2p metadata lock poisoned: {err}")))?;
+    let (
+        runtime_discovery_enabled,
+        p2p_connection_count,
+        p2p_message_rate_per_minute,
+        p2p_ingress_total,
+        p2p_rejected_total,
+        p2p_throttled_total,
+        p2p_healthy_peer_count,
+        p2p_bootstrap_failures,
+        p2p_degraded,
+        p2p_degraded_reason,
+    ) = {
+        let p2p_metadata = state
+            .p2p_metadata
+            .read()
+            .map_err(|err| AppError::Internal(format!("p2p metadata lock poisoned: {err}")))?;
+        (
+            p2p_metadata.discovery_enabled,
+            p2p_metadata.connection_count,
+            p2p_metadata.message_rate_per_minute,
+            p2p_metadata.ingress_total,
+            p2p_metadata.rejected_total,
+            p2p_metadata.throttled_total,
+            p2p_metadata.healthy_peer_count,
+            p2p_metadata.bootstrap_failures,
+            p2p_metadata.degraded,
+            p2p_metadata.degraded_reason.clone(),
+        )
+    };
+    let p2p_discovery_enabled = if let Some(enabled) = runtime_discovery_enabled {
+        enabled
+    } else if !state.config.p2p.enabled {
+        false
+    } else {
+        let instance_discovery_enabled =
+            crate::p2p::discovery::load_instance_discovery_enabled(&state.pool)
+                .await
+                .map_err(AppError::Internal)?;
+        crate::p2p::discovery::resolve_effective_discovery_enabled(
+            state.config.p2p.discovery.enabled,
+            instance_discovery_enabled,
+        )
+    };
 
     let health = AdminHealth {
         cpu_usage_percent,
@@ -114,15 +155,18 @@ pub async fn get_health(
         db_pool_max,
         websocket_connections: 0,
         p2p_discovered_instances,
-        p2p_connection_count: p2p_metadata.connection_count,
-        p2p_message_rate_per_minute: p2p_metadata.message_rate_per_minute,
-        p2p_ingress_total: p2p_metadata.ingress_total,
-        p2p_rejected_total: p2p_metadata.rejected_total,
-        p2p_throttled_total: p2p_metadata.throttled_total,
-        p2p_healthy_peer_count: p2p_metadata.healthy_peer_count,
-        p2p_bootstrap_failures: p2p_metadata.bootstrap_failures,
-        p2p_degraded: p2p_metadata.degraded,
-        p2p_degraded_reason: p2p_metadata.degraded_reason.clone(),
+        p2p_connection_count,
+        p2p_message_rate_per_minute,
+        p2p_ingress_total,
+        p2p_rejected_total,
+        p2p_throttled_total,
+        p2p_healthy_peer_count,
+        p2p_bootstrap_failures,
+        p2p_degraded,
+        p2p_degraded_reason,
+        p2p_discovery_enabled,
+        p2p_discovery_label: crate::p2p::discovery::discovery_mode_label(p2p_discovery_enabled)
+            .to_string(),
     };
 
     Ok((StatusCode::OK, Json(json!({ "data": health }))).into_response())
@@ -907,6 +951,8 @@ mod tests {
         assert_eq!(data.get("p2p_bootstrap_failures"), Some(&json!(0)));
         assert_eq!(data.get("p2p_degraded"), Some(&json!(false)));
         assert_eq!(data.get("p2p_degraded_reason"), Some(&json!(null)));
+        assert_eq!(data.get("p2p_discovery_enabled"), Some(&json!(true)));
+        assert_eq!(data.get("p2p_discovery_label"), Some(&json!("Enabled")));
 
         let cpu_usage_percent = data
             .get("cpu_usage_percent")
@@ -924,6 +970,69 @@ mod tests {
         assert!(
             data.get("db_size_bytes").and_then(|v| v.as_u64()).is_some(),
             "expected db_size_bytes to be a number"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_health_prefers_runtime_discovery_mode_when_available() {
+        let state = test_state().await;
+        match &state.pool {
+            DbPool::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO instance_settings (key, value)\nVALUES ('initialized_at', CURRENT_TIMESTAMP)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "INSERT INTO instance_settings (key, value)\nVALUES ('discovery_enabled', 'true')",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "INSERT INTO admin_users (id, username, avatar_color)\nVALUES ('admin-1', 'tomas', NULL)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            DbPool::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO instance_settings (key, value)\nVALUES ('initialized_at', CURRENT_TIMESTAMP)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "INSERT INTO instance_settings (key, value)\nVALUES ('discovery_enabled', 'true')",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "INSERT INTO admin_users (id, username, avatar_color)\nVALUES ('admin-1', 'tomas', NULL)",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+
+        {
+            let mut metadata = state.p2p_metadata.write().unwrap();
+            metadata.discovery_enabled = Some(false);
+        }
+
+        let res = get_health(State(state), test_user()).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let value = json_value(res).await;
+        let data = value.get("data").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(data.get("p2p_discovery_enabled"), Some(&json!(false)));
+        assert_eq!(
+            data.get("p2p_discovery_label"),
+            Some(&json!("Disabled (Unlisted)"))
         );
     }
 

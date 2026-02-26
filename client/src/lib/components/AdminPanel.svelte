@@ -267,6 +267,11 @@ onDestroy(() => {
             <p class="mt-1 text-sm tabular-nums">{health.websocketConnections}</p>
           </div>
 
+          <div>
+            <p class="text-xs text-muted-foreground">Discovery</p>
+            <p class="mt-1 text-sm">{health.p2pDiscoveryLabel}</p>
+          </div>
+
           {#if lastUpdatedAtMs}
             <p class="text-xs text-muted-foreground">
               Last updated: {Math.max(0, Math.floor((nowMs - lastUpdatedAtMs) / 1000))}s

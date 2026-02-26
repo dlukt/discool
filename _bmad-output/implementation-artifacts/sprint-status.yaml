@@ -70,7 +70,7 @@ development_status:
   3-2-kademlia-dht-instance-discovery: done
   3-3-gossipsub-inter-instance-communication: done
   3-4-sybil-resistance-and-network-health: done
-  3-5-private-instance-and-discovery-opt-out: backlog
+  3-5-private-instance-and-discovery-opt-out: done
   epic-3-retrospective: optional
 
   # Epic 4: Guilds, Channels & Invites

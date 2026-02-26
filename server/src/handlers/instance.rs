@@ -115,11 +115,9 @@ pub async fn get_instance(State(state): State<AppState>) -> Result<Response, App
                     description = Some(value);
                 }
             }
-            "discovery_enabled" => match value.to_ascii_lowercase().as_str() {
-                "true" => discovery_enabled = Some(true),
-                "false" => discovery_enabled = Some(false),
-                _ => {}
-            },
+            "discovery_enabled" => {
+                discovery_enabled = crate::p2p::discovery::parse_discovery_enabled_setting(&value);
+            }
             _ => {}
         }
     }

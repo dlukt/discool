@@ -399,6 +399,7 @@ impl Config {
             log_format = %self.log.format,
             database_url = %db_url,
             p2p_enabled = self.p2p.enabled,
+            p2p_discovery_enabled = self.p2p.discovery.enabled,
             p2p_listen_host = %self.p2p.listen_host,
             p2p_listen_port = self.p2p.listen_port,
             p2p_identity_key_path = %self.p2p.identity_key_path,
@@ -476,6 +477,8 @@ impl Default for AvatarConfig {
 pub struct P2pConfig {
     #[serde(default = "default_p2p_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_p2p_discovery")]
+    pub discovery: P2pDiscoveryConfig,
     #[serde(default = "default_p2p_listen_host")]
     pub listen_host: String,
     #[serde(default = "default_p2p_listen_port")]
@@ -526,6 +529,7 @@ impl Default for P2pConfig {
     fn default() -> Self {
         Self {
             enabled: default_p2p_enabled(),
+            discovery: default_p2p_discovery(),
             listen_host: default_p2p_listen_host(),
             listen_port: default_p2p_listen_port(),
             identity_key_path: default_p2p_identity_key_path(),
@@ -549,6 +553,20 @@ impl Default for P2pConfig {
             degraded_min_healthy_peers: default_p2p_degraded_min_healthy_peers(),
             degraded_bootstrap_failure_threshold: default_p2p_degraded_bootstrap_failure_threshold(
             ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct P2pDiscoveryConfig {
+    #[serde(default = "default_p2p_discovery_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for P2pDiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_p2p_discovery_enabled(),
         }
     }
 }
@@ -628,6 +646,14 @@ fn default_avatar_max_size_bytes() -> usize {
 }
 
 fn default_p2p_enabled() -> bool {
+    true
+}
+
+fn default_p2p_discovery() -> P2pDiscoveryConfig {
+    P2pDiscoveryConfig::default()
+}
+
+fn default_p2p_discovery_enabled() -> bool {
     true
 }
 
@@ -920,6 +946,7 @@ mod tests {
         assert_eq!(cfg.avatar.upload_dir, "./data/avatars");
         assert_eq!(cfg.avatar.max_size_bytes, 2 * 1024 * 1024);
         assert!(cfg.p2p.enabled);
+        assert!(cfg.p2p.discovery.enabled);
         assert_eq!(cfg.p2p.listen_host, "0.0.0.0");
         assert_eq!(cfg.p2p.listen_port, 4001);
         assert_eq!(cfg.p2p.identity_key_path, "./data/p2p/identity.key");
@@ -942,6 +969,21 @@ mod tests {
         assert_eq!(cfg.p2p.degraded_min_samples, 50);
         assert_eq!(cfg.p2p.degraded_min_healthy_peers, 1);
         assert_eq!(cfg.p2p.degraded_bootstrap_failure_threshold, 5);
+    }
+
+    #[test]
+    fn config_loads_p2p_discovery_enabled_override() {
+        let cfg: Config = ConfigBuilder::builder()
+            .add_source(File::from_str(
+                "[p2p]\ndiscovery.enabled = false",
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+
+        assert!(!cfg.p2p.discovery.enabled);
     }
 
     #[test]

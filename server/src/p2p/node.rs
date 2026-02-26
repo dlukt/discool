@@ -16,7 +16,8 @@ use super::P2pMetadata;
 use super::discovery::{
     DiscoveredInstance, DiscoveryEvent, LocalInstanceRecord, backoff_delay,
     build_discovery_behaviour, count_discovered_instances, decode_local_instance_record,
-    load_instance_name, local_record_key, parse_bootstrap_peers, upsert_discovered_instance,
+    discovery_mode_label, load_instance_discovery_enabled, load_instance_name, local_record_key,
+    parse_bootstrap_peers, resolve_effective_discovery_enabled, upsert_discovered_instance,
 };
 use super::gossip::{
     GossipMeshSettings, GossipTopic, build_guild_discovery_announcement,
@@ -80,6 +81,13 @@ pub async fn bootstrap(
     let peer_id = identity.peer_id;
     let bootstrap_peers =
         parse_bootstrap_peers(&config.bootstrap_peers).map_err(NodeError::Discovery)?;
+    // Discovery mode is resolved once per runtime bootstrap; config/instance changes require restart.
+    let instance_discovery_enabled = load_instance_discovery_enabled(&pool)
+        .await
+        .map_err(NodeError::Discovery)?;
+    let effective_discovery_enabled =
+        resolve_effective_discovery_enabled(config.discovery.enabled, instance_discovery_enabled);
+    let effective_discovery_label = discovery_mode_label(effective_discovery_enabled);
     let gossip_mesh_settings = GossipMeshSettings::new(
         config.gossip_mesh_n_low,
         config.gossip_mesh_n,
@@ -116,10 +124,11 @@ pub async fn bootstrap(
             .write()
             .expect("p2p metadata lock poisoned before startup");
         guard.peer_id = Some(peer_id_text.clone());
+        guard.discovery_enabled = Some(effective_discovery_enabled);
         guard.listen_addrs = vec![listen_addr.to_string()];
         guard.discovered_instances = discovered_instances;
         guard.connection_count = 0;
-        guard.standalone_mode = bootstrap_peers.is_empty();
+        guard.standalone_mode = standalone_mode(effective_discovery_enabled, 0);
         guard.message_rate_per_minute = 0.0;
         guard.ingress_total = 0;
         guard.rejected_total = 0;
@@ -130,38 +139,41 @@ pub async fn bootstrap(
         guard.degraded_reason = None;
     }
 
-    for bootstrap_peer in &bootstrap_peers {
-        swarm
-            .behaviour_mut()
-            .kademlia
-            .add_address(&bootstrap_peer.peer_id, bootstrap_peer.kad_addr.clone());
-        match swarm.dial(bootstrap_peer.dial_addr.clone()) {
-            Ok(()) => tracing::info!(
-                peer_id = %bootstrap_peer.peer_id,
-                address = %bootstrap_peer.dial_addr,
-                "Dialing bootstrap peer"
-            ),
-            Err(err) => tracing::warn!(
-                peer_id = %bootstrap_peer.peer_id,
-                address = %bootstrap_peer.dial_addr,
-                error = %err,
-                "Failed to dial bootstrap peer"
-            ),
+    if effective_discovery_enabled {
+        for bootstrap_peer in &bootstrap_peers {
+            swarm
+                .behaviour_mut()
+                .kademlia
+                .add_address(&bootstrap_peer.peer_id, bootstrap_peer.kad_addr.clone());
+            match swarm.dial(bootstrap_peer.dial_addr.clone()) {
+                Ok(()) => tracing::info!(
+                    peer_id = %bootstrap_peer.peer_id,
+                    address = %bootstrap_peer.dial_addr,
+                    "Dialing bootstrap peer"
+                ),
+                Err(err) => tracing::warn!(
+                    peer_id = %bootstrap_peer.peer_id,
+                    address = %bootstrap_peer.dial_addr,
+                    error = %err,
+                    "Failed to dial bootstrap peer"
+                ),
+            }
         }
-    }
-
-    if !bootstrap_peers.is_empty()
-        && let Err(err) = swarm.behaviour_mut().kademlia.bootstrap()
-    {
-        tracing::warn!(
-            error = %err,
-            "Initial DHT bootstrap query failed; retry loop will continue"
-        );
+        if !bootstrap_peers.is_empty()
+            && let Err(err) = swarm.behaviour_mut().kademlia.bootstrap()
+        {
+            tracing::warn!(
+                error = %err,
+                "Initial DHT bootstrap query failed; retry loop will continue"
+            );
+        }
     }
 
     tracing::info!(
         peer_id = %peer_id_text,
         listen_addr = %listen_addr,
+        discovery_enabled = effective_discovery_enabled,
+        discovery_mode = effective_discovery_label,
         "P2P startup initialized"
     );
 
@@ -198,97 +210,99 @@ pub async fn bootstrap(
                     }
                 }
                 _ = refresh_tick.tick() => {
-                    if let Ok(Some(name)) = load_instance_name(&task_pool).await
-                        && !name.trim().is_empty()
-                    {
-                        instance_name = name;
-                    }
-
-                    let addresses = task_metadata
-                        .read()
-                        .map(|guard| guard.listen_addrs.clone())
-                        .unwrap_or_default();
-                    if let Err(err) = put_local_instance_record(
-                        &mut swarm,
-                        &task_peer_id,
-                        &instance_name,
-                        &addresses,
-                    ) {
-                        tracing::warn!(peer_id = %task_peer_id, error = %err, "Failed to publish local instance metadata to DHT");
-                    }
-                    if let Ok(payload) = build_guild_discovery_announcement(
-                        &task_peer_id,
-                        &instance_name,
-                        &addresses,
-                    ) {
-                        if let Err(err) = swarm
-                            .behaviour_mut()
-                            .gossipsub
-                            .publish(gossip_topic(GossipTopic::GuildDiscovery), payload)
+                    if effective_discovery_enabled {
+                        if let Ok(Some(name)) = load_instance_name(&task_pool).await
+                            && !name.trim().is_empty()
                         {
-                            tracing::debug!(
-                                peer_id = %task_peer_id,
-                                error = %err,
-                                "Skipping gossip guild discovery announcement publish"
-                            );
+                            instance_name = name;
                         }
-                    } else {
-                        tracing::warn!(
-                            peer_id = %task_peer_id,
-                            "Failed to build gossip guild discovery announcement payload"
-                        );
-                    }
 
-                    let local_peer_id = *swarm.local_peer_id();
-                    swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .get_closest_peers(local_peer_id);
-
-                    if !bootstrap_peers.is_empty()
-                        && swarm.connected_peers().count() == 0
-                        && tokio::time::Instant::now() >= next_retry
-                    {
-                        for bootstrap_peer in &bootstrap_peers {
-                            swarm.behaviour_mut().kademlia.add_address(
-                                &bootstrap_peer.peer_id,
-                                bootstrap_peer.kad_addr.clone(),
-                            );
-                            if let Err(err) = swarm.dial(bootstrap_peer.dial_addr.clone()) {
-                                tracing::warn!(
-                                    peer_id = %bootstrap_peer.peer_id,
-                                    address = %bootstrap_peer.dial_addr,
+                        let addresses = task_metadata
+                            .read()
+                            .map(|guard| guard.listen_addrs.clone())
+                            .unwrap_or_default();
+                        if let Err(err) = put_local_instance_record(
+                            &mut swarm,
+                            &task_peer_id,
+                            &instance_name,
+                            &addresses,
+                        ) {
+                            tracing::warn!(peer_id = %task_peer_id, error = %err, "Failed to publish local instance metadata to DHT");
+                        }
+                        if let Ok(payload) = build_guild_discovery_announcement(
+                            &task_peer_id,
+                            &instance_name,
+                            &addresses,
+                        ) {
+                            if let Err(err) = swarm
+                                .behaviour_mut()
+                                .gossipsub
+                                .publish(gossip_topic(GossipTopic::GuildDiscovery), payload)
+                            {
+                                tracing::debug!(
+                                    peer_id = %task_peer_id,
                                     error = %err,
-                                    "Bootstrap retry dial failed"
+                                    "Skipping gossip guild discovery announcement publish"
                                 );
                             }
-                        }
-                        retry_attempt = retry_attempt.saturating_add(1);
-                        let delay = backoff_delay(
-                            retry_attempt,
-                            retry_initial_secs,
-                            retry_max_secs,
-                            retry_jitter_millis,
-                        );
-                        next_retry = tokio::time::Instant::now() + delay;
-                        if let Ok(mut guard) = task_metadata.write() {
-                            guard.standalone_mode = true;
-                        }
-                        if let Err(err) = swarm.behaviour_mut().kademlia.bootstrap() {
-                            bootstrap_failures = bootstrap_failures.saturating_add(1);
+                        } else {
                             tracing::warn!(
                                 peer_id = %task_peer_id,
-                                error = %err,
-                                retry_in_secs = delay.as_secs_f64(),
-                                "DHT bootstrap retry failed; running in standalone mode"
+                                "Failed to build gossip guild discovery announcement payload"
                             );
-                        } else {
-                            bootstrap_failures = 0;
-                            tracing::info!(
-                                peer_id = %task_peer_id,
-                                retry_in_secs = delay.as_secs_f64(),
-                                "DHT bootstrap retry started"
+                        }
+
+                        let local_peer_id = *swarm.local_peer_id();
+                        swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .get_closest_peers(local_peer_id);
+
+                        if !bootstrap_peers.is_empty()
+                            && swarm.connected_peers().count() == 0
+                            && tokio::time::Instant::now() >= next_retry
+                        {
+                            for bootstrap_peer in &bootstrap_peers {
+                                swarm.behaviour_mut().kademlia.add_address(
+                                    &bootstrap_peer.peer_id,
+                                    bootstrap_peer.kad_addr.clone(),
+                                );
+                                if let Err(err) = swarm.dial(bootstrap_peer.dial_addr.clone()) {
+                                    tracing::warn!(
+                                        peer_id = %bootstrap_peer.peer_id,
+                                        address = %bootstrap_peer.dial_addr,
+                                        error = %err,
+                                        "Bootstrap retry dial failed"
+                                    );
+                                }
+                            }
+                            retry_attempt = retry_attempt.saturating_add(1);
+                            let delay = backoff_delay(
+                                retry_attempt,
+                                retry_initial_secs,
+                                retry_max_secs,
+                                retry_jitter_millis,
                             );
+                            next_retry = tokio::time::Instant::now() + delay;
+                            if let Ok(mut guard) = task_metadata.write() {
+                                guard.standalone_mode = true;
+                            }
+                            if let Err(err) = swarm.behaviour_mut().kademlia.bootstrap() {
+                                bootstrap_failures = bootstrap_failures.saturating_add(1);
+                                tracing::warn!(
+                                    peer_id = %task_peer_id,
+                                    error = %err,
+                                    retry_in_secs = delay.as_secs_f64(),
+                                    "DHT bootstrap retry failed; running in standalone mode"
+                                );
+                            } else {
+                                bootstrap_failures = 0;
+                                tracing::info!(
+                                    peer_id = %task_peer_id,
+                                    retry_in_secs = delay.as_secs_f64(),
+                                    "DHT bootstrap retry started"
+                                );
+                            }
                         }
                     }
                 }
@@ -323,7 +337,8 @@ pub async fn bootstrap(
                             bootstrap_failures = 0;
                             if let Ok(mut guard) = task_metadata.write() {
                                 guard.connection_count = connection_count;
-                                guard.standalone_mode = false;
+                                guard.standalone_mode =
+                                    standalone_mode(effective_discovery_enabled, connection_count);
                             }
                             tracing::info!(peer_id = %task_peer_id, remote_peer_id = %peer_id, connection_count, "P2P connection established");
                         }
@@ -334,6 +349,8 @@ pub async fn bootstrap(
                             let connection_count = u32::try_from(swarm.connected_peers().count()).unwrap_or(u32::MAX);
                             if let Ok(mut guard) = task_metadata.write() {
                                 guard.connection_count = connection_count;
+                                guard.standalone_mode =
+                                    standalone_mode(effective_discovery_enabled, connection_count);
                             }
                             tracing::info!(peer_id = %task_peer_id, remote_peer_id = %peer_id, connection_count, "P2P connection closed");
                         }
@@ -396,7 +413,13 @@ pub async fn bootstrap(
                                             retry_attempt = 0;
                                             next_retry = tokio::time::Instant::now();
                                             if let Ok(mut guard) = task_metadata.write() {
-                                                guard.standalone_mode = false;
+                                                let connection_count =
+                                                    u32::try_from(swarm.connected_peers().count())
+                                                        .unwrap_or(u32::MAX);
+                                                guard.standalone_mode = standalone_mode(
+                                                    effective_discovery_enabled,
+                                                    connection_count,
+                                                );
                                             }
                                         }
                                         tracing::info!(
@@ -602,6 +625,10 @@ pub async fn bootstrap(
     })
 }
 
+fn standalone_mode(discovery_enabled: bool, connection_count: u32) -> bool {
+    !discovery_enabled || connection_count == 0
+}
+
 fn sync_sybil_health(
     metadata: &Arc<RwLock<P2pMetadata>>,
     sybil_guard: &mut SybilGuard,
@@ -730,5 +757,22 @@ async fn persist_local_record(
         && let Ok(mut guard) = metadata.write()
     {
         guard.discovered_instances = count;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::standalone_mode;
+
+    #[test]
+    fn standalone_mode_requires_connections_when_discovery_enabled() {
+        assert!(standalone_mode(true, 0));
+        assert!(!standalone_mode(true, 1));
+    }
+
+    #[test]
+    fn standalone_mode_stays_true_when_discovery_disabled() {
+        assert!(standalone_mode(false, 0));
+        assert!(standalone_mode(false, 3));
     }
 }

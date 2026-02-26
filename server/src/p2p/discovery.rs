@@ -175,6 +175,47 @@ pub async fn load_instance_name(pool: &DbPool) -> Result<Option<String>, String>
     }
 }
 
+pub fn parse_discovery_enabled_setting(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+pub async fn load_instance_discovery_enabled(pool: &DbPool) -> Result<Option<bool>, String> {
+    let value = match pool {
+        DbPool::Postgres(pool) => sqlx::query_scalar::<_, String>(
+            "SELECT value FROM instance_settings WHERE key = 'discovery_enabled' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await
+        .map_err(|err| err.to_string())?,
+        DbPool::Sqlite(pool) => sqlx::query_scalar::<_, String>(
+            "SELECT value FROM instance_settings WHERE key = 'discovery_enabled' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await
+        .map_err(|err| err.to_string())?,
+    };
+    Ok(value.and_then(|raw| parse_discovery_enabled_setting(&raw)))
+}
+
+pub fn resolve_effective_discovery_enabled(
+    config_enabled: bool,
+    instance_setting_enabled: Option<bool>,
+) -> bool {
+    config_enabled && instance_setting_enabled.unwrap_or(true)
+}
+
+pub fn discovery_mode_label(discovery_enabled: bool) -> &'static str {
+    if discovery_enabled {
+        "Enabled"
+    } else {
+        "Disabled (Unlisted)"
+    }
+}
+
 pub async fn upsert_discovered_instance(
     pool: &DbPool,
     discovered: &DiscoveredInstance,
@@ -282,5 +323,21 @@ mod tests {
         assert_eq!(first, Duration::from_secs(2));
         assert_eq!(second, Duration::from_secs(4));
         assert_eq!(sixth, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn parse_discovery_enabled_setting_accepts_true_false() {
+        assert_eq!(parse_discovery_enabled_setting("true"), Some(true));
+        assert_eq!(parse_discovery_enabled_setting("FALSE"), Some(false));
+        assert_eq!(parse_discovery_enabled_setting("other"), None);
+    }
+
+    #[test]
+    fn resolve_effective_discovery_enabled_applies_precedence() {
+        assert!(resolve_effective_discovery_enabled(true, None));
+        assert!(resolve_effective_discovery_enabled(true, Some(true)));
+        assert!(!resolve_effective_discovery_enabled(true, Some(false)));
+        assert!(!resolve_effective_discovery_enabled(false, None));
+        assert!(!resolve_effective_discovery_enabled(false, Some(true)));
     }
 }
