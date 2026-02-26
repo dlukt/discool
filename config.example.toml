@@ -79,6 +79,12 @@
 # Periodic discovery refresh interval in seconds (default: 15)
 # discovery_refresh_interval_secs = 15
 #
+# Gossipsub mesh defaults tuned for small-to-medium networks (tens to hundreds of instances)
+# Must satisfy: gossip_mesh_n_low <= gossip_mesh_n <= gossip_mesh_n_high
+# gossip_mesh_n_low = 5
+# gossip_mesh_n = 6
+# gossip_mesh_n_high = 12
+#
 # ---------------------------------------------------------------------------
 # [log]
 # ---------------------------------------------------------------------------

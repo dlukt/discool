@@ -168,6 +168,32 @@ impl Config {
                     "must be >= 1",
                 ));
             }
+            if self.p2p.gossip_mesh_n_low == 0 {
+                return Err(ConfigValidationError::new(
+                    "p2p.gossip_mesh_n_low",
+                    "must be >= 1",
+                ));
+            }
+            if self.p2p.gossip_mesh_n == 0 {
+                return Err(ConfigValidationError::new(
+                    "p2p.gossip_mesh_n",
+                    "must be >= 1",
+                ));
+            }
+            if self.p2p.gossip_mesh_n_high == 0 {
+                return Err(ConfigValidationError::new(
+                    "p2p.gossip_mesh_n_high",
+                    "must be >= 1",
+                ));
+            }
+            if !(self.p2p.gossip_mesh_n_low <= self.p2p.gossip_mesh_n
+                && self.p2p.gossip_mesh_n <= self.p2p.gossip_mesh_n_high)
+            {
+                return Err(ConfigValidationError::new(
+                    "p2p.gossip_mesh_n",
+                    "must satisfy p2p.gossip_mesh_n_low <= p2p.gossip_mesh_n <= p2p.gossip_mesh_n_high",
+                ));
+            }
             for bootstrap_peer in &self.p2p.bootstrap_peers {
                 let trimmed = bootstrap_peer.trim();
                 if trimmed.is_empty() {
@@ -312,6 +338,9 @@ impl Config {
             p2p_discovery_retry_max_secs = self.p2p.discovery_retry_max_secs,
             p2p_discovery_retry_jitter_millis = self.p2p.discovery_retry_jitter_millis,
             p2p_discovery_refresh_interval_secs = self.p2p.discovery_refresh_interval_secs,
+            p2p_gossip_mesh_n_low = self.p2p.gossip_mesh_n_low,
+            p2p_gossip_mesh_n = self.p2p.gossip_mesh_n,
+            p2p_gossip_mesh_n_high = self.p2p.gossip_mesh_n_high,
             "Configuration loaded"
         );
     }
@@ -383,6 +412,12 @@ pub struct P2pConfig {
     pub discovery_retry_jitter_millis: u64,
     #[serde(default = "default_p2p_discovery_refresh_interval_secs")]
     pub discovery_refresh_interval_secs: u64,
+    #[serde(default = "default_p2p_gossip_mesh_n_low")]
+    pub gossip_mesh_n_low: usize,
+    #[serde(default = "default_p2p_gossip_mesh_n")]
+    pub gossip_mesh_n: usize,
+    #[serde(default = "default_p2p_gossip_mesh_n_high")]
+    pub gossip_mesh_n_high: usize,
 }
 
 impl Default for P2pConfig {
@@ -397,6 +432,9 @@ impl Default for P2pConfig {
             discovery_retry_max_secs: default_p2p_discovery_retry_max_secs(),
             discovery_retry_jitter_millis: default_p2p_discovery_retry_jitter_millis(),
             discovery_refresh_interval_secs: default_p2p_discovery_refresh_interval_secs(),
+            gossip_mesh_n_low: default_p2p_gossip_mesh_n_low(),
+            gossip_mesh_n: default_p2p_gossip_mesh_n(),
+            gossip_mesh_n_high: default_p2p_gossip_mesh_n_high(),
         }
     }
 }
@@ -505,6 +543,18 @@ fn default_p2p_discovery_retry_jitter_millis() -> u64 {
 
 fn default_p2p_discovery_refresh_interval_secs() -> u64 {
     15
+}
+
+fn default_p2p_gossip_mesh_n_low() -> usize {
+    5
+}
+
+fn default_p2p_gossip_mesh_n() -> usize {
+    6
+}
+
+fn default_p2p_gossip_mesh_n_high() -> usize {
+    12
 }
 
 fn default_email_smtp_host() -> String {
@@ -720,6 +770,9 @@ mod tests {
         assert_eq!(cfg.p2p.discovery_retry_max_secs, 60);
         assert_eq!(cfg.p2p.discovery_retry_jitter_millis, 500);
         assert_eq!(cfg.p2p.discovery_refresh_interval_secs, 15);
+        assert_eq!(cfg.p2p.gossip_mesh_n_low, 5);
+        assert_eq!(cfg.p2p.gossip_mesh_n, 6);
+        assert_eq!(cfg.p2p.gossip_mesh_n_high, 12);
     }
 
     #[test]
@@ -844,6 +897,21 @@ mod tests {
 
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("p2p.discovery_retry_max_secs"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_gossip_mesh_bounds() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+        cfg.p2p.gossip_mesh_n_low = 7;
+        cfg.p2p.gossip_mesh_n = 6;
+        cfg.p2p.gossip_mesh_n_high = 12;
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("p2p.gossip_mesh_n"));
     }
 
     #[test]

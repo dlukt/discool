@@ -3,23 +3,27 @@ use std::time::Duration;
 use chrono::Utc;
 use libp2p::multiaddr::Protocol;
 use libp2p::swarm::NetworkBehaviour;
-use libp2p::{Multiaddr, PeerId, StreamProtocol, identify, kad};
+use libp2p::{Multiaddr, PeerId, StreamProtocol, gossipsub, identify, kad};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::db::DbPool;
+
+use super::gossip::{GossipMeshSettings, build_gossipsub_behaviour};
 
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "DiscoveryEvent")]
 pub struct DiscoveryBehaviour {
     pub identify: identify::Behaviour,
     pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
+    pub gossipsub: gossipsub::Behaviour,
 }
 
 #[derive(Debug)]
 pub enum DiscoveryEvent {
     Identify(Box<identify::Event>),
     Kademlia(Box<kad::Event>),
+    Gossipsub(Box<gossipsub::Event>),
 }
 
 impl From<identify::Event> for DiscoveryEvent {
@@ -31,6 +35,12 @@ impl From<identify::Event> for DiscoveryEvent {
 impl From<kad::Event> for DiscoveryEvent {
     fn from(value: kad::Event) -> Self {
         DiscoveryEvent::Kademlia(Box::new(value))
+    }
+}
+
+impl From<gossipsub::Event> for DiscoveryEvent {
+    fn from(value: gossipsub::Event) -> Self {
+        DiscoveryEvent::Gossipsub(Box::new(value))
     }
 }
 
@@ -58,9 +68,11 @@ pub struct DiscoveredInstance {
 }
 
 pub fn build_discovery_behaviour(
-    local_peer_id: PeerId,
-    local_public_key: libp2p::identity::PublicKey,
+    local_keypair: libp2p::identity::Keypair,
+    gossip_mesh_settings: GossipMeshSettings,
 ) -> DiscoveryBehaviour {
+    let local_peer_id = local_keypair.public().to_peer_id();
+    let local_public_key = local_keypair.public();
     let identify_config = identify::Config::new("/discool/1.0.0".to_string(), local_public_key)
         .with_agent_version(format!("discool/{}", env!("CARGO_PKG_VERSION")));
     let identify = identify::Behaviour::new(identify_config);
@@ -70,8 +82,13 @@ pub fn build_discovery_behaviour(
     let store = kad::store::MemoryStore::new(local_peer_id);
     let mut kademlia = kad::Behaviour::with_config(local_peer_id, store, kad_config);
     kademlia.set_mode(Some(kad::Mode::Server));
+    let gossipsub = build_gossipsub_behaviour(local_keypair, gossip_mesh_settings);
 
-    DiscoveryBehaviour { identify, kademlia }
+    DiscoveryBehaviour {
+        identify,
+        kademlia,
+        gossipsub,
+    }
 }
 
 pub fn parse_bootstrap_peers(values: &[String]) -> Result<Vec<BootstrapPeer>, String> {

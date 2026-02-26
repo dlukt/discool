@@ -3,18 +3,24 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use libp2p::futures::StreamExt;
+use libp2p::gossipsub;
 use libp2p::kad::{self, QueryResult, Quorum};
 use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, SwarmBuilder, identify, noise, tcp, yamux};
 
 use crate::config::P2pConfig;
 use crate::db::DbPool;
+use crate::services::p2p_event_service::handle_gossip_event;
 
 use super::P2pMetadata;
 use super::discovery::{
     DiscoveredInstance, DiscoveryEvent, LocalInstanceRecord, backoff_delay,
     build_discovery_behaviour, count_discovered_instances, decode_local_instance_record,
     load_instance_name, local_record_key, parse_bootstrap_peers, upsert_discovered_instance,
+};
+use super::gossip::{
+    GossipMeshSettings, GossipTopic, build_guild_discovery_announcement,
+    decode_and_validate_envelope, gossip_topic, gossip_topic_from_hash,
 };
 use super::identity::{IdentityError, load_or_create_identity};
 
@@ -73,6 +79,12 @@ pub async fn bootstrap(
     let peer_id = identity.peer_id;
     let bootstrap_peers =
         parse_bootstrap_peers(&config.bootstrap_peers).map_err(NodeError::Discovery)?;
+    let gossip_mesh_settings = GossipMeshSettings::new(
+        config.gossip_mesh_n_low,
+        config.gossip_mesh_n,
+        config.gossip_mesh_n_high,
+    )
+    .map_err(NodeError::Discovery)?;
 
     let listen_addr: Multiaddr = format!("/ip4/{}/tcp/{}", config.listen_host, config.listen_port)
         .parse()
@@ -86,10 +98,10 @@ pub async fn bootstrap(
             yamux::Config::default,
         )
         .map_err(|err| NodeError::Transport(err.to_string()))?
-        .with_behaviour(|keypair| {
-            build_discovery_behaviour(keypair.public().to_peer_id(), keypair.public().clone())
+        .with_behaviour(move |keypair| {
+            build_discovery_behaviour(keypair.clone(), gossip_mesh_settings)
         })
-        .map_err(|err| NodeError::Transport(err.to_string()))?
+        .map_err(|err| NodeError::Discovery(err.to_string()))?
         .build();
 
     swarm
@@ -190,6 +202,28 @@ pub async fn bootstrap(
                         &addresses,
                     ) {
                         tracing::warn!(peer_id = %task_peer_id, error = %err, "Failed to publish local instance metadata to DHT");
+                    }
+                    if let Ok(payload) = build_guild_discovery_announcement(
+                        &task_peer_id,
+                        &instance_name,
+                        &addresses,
+                    ) {
+                        if let Err(err) = swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .publish(gossip_topic(GossipTopic::GuildDiscovery), payload)
+                        {
+                            tracing::debug!(
+                                peer_id = %task_peer_id,
+                                error = %err,
+                                "Skipping gossip guild discovery announcement publish"
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            peer_id = %task_peer_id,
+                            "Failed to build gossip guild discovery announcement payload"
+                        );
                     }
 
                     let local_peer_id = *swarm.local_peer_id();
@@ -385,6 +419,65 @@ pub async fn bootstrap(
                                         tracing::info!(peer_id = %task_peer_id, "Local instance metadata published to DHT");
                                     }
                                     _ => {}
+                                }
+                            }
+                        }
+                        SwarmEvent::Behaviour(DiscoveryEvent::Gossipsub(event)) => {
+                            if let gossipsub::Event::Message {
+                                propagation_source,
+                                message_id,
+                                message,
+                            } = *event
+                            {
+                                let Some(topic) = gossip_topic_from_hash(&message.topic) else {
+                                    let _ = swarm.behaviour_mut().gossipsub.report_message_validation_result(
+                                        &message_id,
+                                        &propagation_source,
+                                        gossipsub::MessageAcceptance::Reject,
+                                    );
+                                    tracing::warn!(
+                                        peer_id = %task_peer_id,
+                                        remote_peer_id = %propagation_source,
+                                        topic = %message.topic,
+                                        "Rejected inbound gossip message with unknown topic"
+                                    );
+                                    continue;
+                                };
+
+                                match decode_and_validate_envelope(
+                                    &message.data,
+                                    message.source.as_ref(),
+                                    topic,
+                                ) {
+                                    Ok(envelope) => {
+                                        let _ = swarm.behaviour_mut().gossipsub.report_message_validation_result(
+                                            &message_id,
+                                            &propagation_source,
+                                            gossipsub::MessageAcceptance::Accept,
+                                        );
+                                        if let Err(err) = handle_gossip_event(topic, envelope).await
+                                        {
+                                            tracing::warn!(
+                                                peer_id = %task_peer_id,
+                                                remote_peer_id = %propagation_source,
+                                                error = %err,
+                                                "Failed to handle inbound gossip event"
+                                            );
+                                        }
+                                    }
+                                    Err(reason) => {
+                                        let _ = swarm.behaviour_mut().gossipsub.report_message_validation_result(
+                                            &message_id,
+                                            &propagation_source,
+                                            gossipsub::MessageAcceptance::Reject,
+                                        );
+                                        tracing::warn!(
+                                            peer_id = %task_peer_id,
+                                            remote_peer_id = %propagation_source,
+                                            reason = %reason,
+                                            "Rejected inbound gossip message"
+                                        );
+                                    }
                                 }
                             }
                         }
