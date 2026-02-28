@@ -39,6 +39,15 @@ const historyApiMock = vi.hoisted(() => {
         updatedAt: string
         optimistic: boolean
         clientNonce?: string
+        attachments: Array<{
+          id: string
+          storageKey: string
+          originalFilename: string
+          mimeType: string
+          sizeBytes: number
+          isImage: boolean
+          url: string
+        }>
         reactions: Array<{
           emoji: string
           count: number
@@ -47,13 +56,49 @@ const historyApiMock = vi.hoisted(() => {
       }>
       cursor: string | null
     }>,
+    uploadResult: null as {
+      id: string
+      guildSlug: string
+      channelSlug: string
+      authorUserId: string
+      authorUsername: string
+      authorDisplayName: string
+      authorAvatarColor: string | null
+      authorRoleColor: string
+      content: string
+      isSystem: boolean
+      createdAt: string
+      updatedAt: string
+      optimistic: boolean
+      clientNonce?: string
+      attachments: Array<{
+        id: string
+        storageKey: string
+        originalFilename: string
+        mimeType: string
+        sizeBytes: number
+        isImage: boolean
+        url: string
+      }>
+      reactions: Array<{
+        emoji: string
+        count: number
+        reacted: boolean
+      }>
+    } | null,
   }
 
   const fetchChannelHistory = vi.fn(async () => {
     return state.responses.shift() ?? { messages: [], cursor: null }
   })
+  const uploadMessageAttachment = vi.fn(async () => {
+    if (!state.uploadResult) {
+      throw new Error('uploadResult not configured')
+    }
+    return state.uploadResult
+  })
 
-  return { state, fetchChannelHistory }
+  return { state, fetchChannelHistory, uploadMessageAttachment }
 })
 
 vi.mock('$lib/ws/client', () => ({
@@ -62,6 +107,7 @@ vi.mock('$lib/ws/client', () => ({
 
 vi.mock('./messageApi', () => ({
   fetchChannelHistory: historyApiMock.fetchChannelHistory,
+  uploadMessageAttachment: historyApiMock.uploadMessageAttachment,
 }))
 
 import { messageState } from './messageStore.svelte'
@@ -81,6 +127,7 @@ function makeMessage(id: string, createdAt: string) {
     createdAt,
     updatedAt: createdAt,
     optimistic: false,
+    attachments: [],
     reactions: [],
   }
 }
@@ -91,7 +138,9 @@ describe('messageState', () => {
     wsMock.state.sendResult = true
     wsMock.wsClient.send.mockClear()
     historyApiMock.fetchChannelHistory.mockClear()
+    historyApiMock.uploadMessageAttachment.mockClear()
     historyApiMock.state.responses = []
+    historyApiMock.state.uploadResult = null
   })
 
   it('creates optimistic message and reconciles when message_create arrives', () => {
@@ -136,6 +185,7 @@ describe('messageState', () => {
         created_at: '2026-02-28T00:00:00Z',
         updated_at: '2026-02-28T00:00:00Z',
         client_nonce: payload.client_nonce,
+        attachments: [],
       },
     })
 
@@ -262,6 +312,49 @@ describe('messageState', () => {
     expect(messageState.timeline('lobby', 'general')).toHaveLength(0)
   })
 
+  it('uploads attachment via REST API and appends returned message', async () => {
+    historyApiMock.state.uploadResult = {
+      ...makeMessage('msg-upload', '2026-02-28T00:00:10Z'),
+      content: 'file upload',
+      attachments: [
+        {
+          id: 'att-1',
+          storageKey: 'attachment-1.png',
+          originalFilename: 'image.png',
+          mimeType: 'image/png',
+          sizeBytes: 1234,
+          isImage: true,
+          url: '/api/v1/guilds/lobby/channels/general/messages/attachments/att-1',
+        },
+      ],
+    }
+    const onProgress = vi.fn()
+    const file = new File(['hello'], 'image.png', { type: 'image/png' })
+
+    await messageState.uploadAttachment('lobby', 'general', {
+      file,
+      content: 'file upload',
+      onProgress,
+    })
+
+    expect(historyApiMock.uploadMessageAttachment).toHaveBeenCalledWith(
+      'lobby',
+      'general',
+      expect.objectContaining({
+        file,
+        content: 'file upload',
+        clientNonce: expect.any(String),
+      }),
+    )
+    const timeline = messageState.timeline('lobby', 'general')
+    expect(timeline).toHaveLength(1)
+    expect(timeline[0]?.attachments).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'att-1', isImage: true }),
+      ]),
+    )
+  })
+
   it('ingests message_update and message_delete without breaking ordering', () => {
     messageState.ingestServerMessage(
       makeMessage('msg-001', '2026-02-28T00:00:01Z'),
@@ -285,6 +378,7 @@ describe('messageState', () => {
         is_system: false,
         created_at: '2026-02-28T00:00:01Z',
         updated_at: '2026-02-28T00:00:05Z',
+        attachments: [],
       },
     })
 

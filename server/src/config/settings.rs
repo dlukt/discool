@@ -20,6 +20,8 @@ pub struct Config {
     #[serde(default)]
     pub avatar: AvatarConfig,
     #[serde(default)]
+    pub attachments: AttachmentConfig,
+    #[serde(default)]
     pub p2p: P2pConfig,
     #[serde(default)]
     pub email: EmailConfig,
@@ -110,6 +112,25 @@ impl Config {
         if let Err(err) = std::fs::create_dir_all(&self.avatar.upload_dir) {
             return Err(ConfigValidationError::new(
                 "avatar.upload_dir",
+                format!("failed to create directory: {err}"),
+            ));
+        }
+
+        if self.attachments.max_size_bytes == 0 {
+            return Err(ConfigValidationError::new(
+                "attachments.max_size_bytes",
+                "must be >= 1",
+            ));
+        }
+        if self.attachments.upload_dir.trim().is_empty() {
+            return Err(ConfigValidationError::new(
+                "attachments.upload_dir",
+                "must not be empty",
+            ));
+        }
+        if let Err(err) = std::fs::create_dir_all(&self.attachments.upload_dir) {
+            return Err(ConfigValidationError::new(
+                "attachments.upload_dir",
                 format!("failed to create directory: {err}"),
             ));
         }
@@ -398,6 +419,8 @@ impl Config {
             log_level = %self.log.level,
             log_format = %self.log.format,
             database_url = %db_url,
+            attachment_upload_dir = %self.attachments.upload_dir,
+            attachment_max_size_bytes = self.attachments.max_size_bytes,
             p2p_enabled = self.p2p.enabled,
             p2p_discovery_enabled = self.p2p.discovery.enabled,
             p2p_listen_host = %self.p2p.listen_host,
@@ -469,6 +492,23 @@ impl Default for AvatarConfig {
         Self {
             upload_dir: default_avatar_upload_dir(),
             max_size_bytes: default_avatar_max_size_bytes(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AttachmentConfig {
+    #[serde(default = "default_attachment_upload_dir")]
+    pub upload_dir: String,
+    #[serde(default = "default_attachment_max_size_bytes")]
+    pub max_size_bytes: usize,
+}
+
+impl Default for AttachmentConfig {
+    fn default() -> Self {
+        Self {
+            upload_dir: default_attachment_upload_dir(),
+            max_size_bytes: default_attachment_max_size_bytes(),
         }
     }
 }
@@ -643,6 +683,14 @@ fn default_avatar_upload_dir() -> String {
 
 fn default_avatar_max_size_bytes() -> usize {
     2 * 1024 * 1024
+}
+
+fn default_attachment_upload_dir() -> String {
+    "./data/attachments".to_string()
+}
+
+fn default_attachment_max_size_bytes() -> usize {
+    10 * 1024 * 1024
 }
 
 fn default_p2p_enabled() -> bool {
@@ -945,6 +993,8 @@ mod tests {
         assert!(cfg.database.is_none());
         assert_eq!(cfg.avatar.upload_dir, "./data/avatars");
         assert_eq!(cfg.avatar.max_size_bytes, 2 * 1024 * 1024);
+        assert_eq!(cfg.attachments.upload_dir, "./data/attachments");
+        assert_eq!(cfg.attachments.max_size_bytes, 10 * 1024 * 1024);
         assert!(cfg.p2p.enabled);
         assert!(cfg.p2p.discovery.enabled);
         assert_eq!(cfg.p2p.listen_host, "0.0.0.0");
@@ -1239,6 +1289,32 @@ mod tests {
 
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("avatar.upload_dir"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_attachment_max_size() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+        cfg.attachments.max_size_bytes = 0;
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("attachments.max_size_bytes"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_attachment_upload_dir() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+        cfg.attachments.upload_dir = " ".to_string();
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("attachments.upload_dir"));
     }
 
     #[test]

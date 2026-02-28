@@ -4,6 +4,10 @@
 import { onMount, tick } from 'svelte'
 import AdminPanel from '$lib/components/AdminPanel.svelte'
 import { guildState } from '$lib/features/guild/guildStore.svelte'
+import {
+  GUILD_PERMISSION_CATALOG,
+  hasGuildPermission,
+} from '$lib/features/guild/permissions'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
 import ProfileSettingsView from '$lib/features/identity/ProfileSettingsView.svelte'
 import { wsClient } from '$lib/ws/client'
@@ -38,6 +42,9 @@ type ComposerEditState = {
 const MESSAGE_ROW_HEIGHT = 74
 const COMPACT_MESSAGE_ROW_HEIGHT = 46
 const SYSTEM_ROW_HEIGHT = 36
+const IMAGE_ATTACHMENT_HEIGHT = 220
+const FILE_ATTACHMENT_ROW_HEIGHT = 60
+const ATTACHMENT_ROW_GAP = 8
 const VIRTUAL_OVERSCAN_PX = 320
 const HISTORY_LOAD_TRIGGER_PX = 120
 const JUMP_TO_PRESENT_THRESHOLD_PX = 320
@@ -77,6 +84,14 @@ let loadHistoryInFlight = $state(false)
 let lastTailMessageId = $state<string | null>(null)
 let skipNextTailChange = $state(false)
 let pendingDeleteMessage = $state<ChatMessage | null>(null)
+let attachmentInput = $state<HTMLInputElement | null>(null)
+let selectedAttachment = $state<File | null>(null)
+let attachmentUploadProgress = $state<number | null>(null)
+let attachmentUploadInFlight = $state(false)
+let attachmentError = $state<string | null>(null)
+let dragDepth = $state(0)
+let dragActive = $state(false)
+let attachmentContextKey = $state<string | null>(null)
 
 let channelKey = $derived(
   mode === 'channel' ? `${activeGuild}:${activeChannel}` : null,
@@ -103,6 +118,35 @@ let channelHistory = $derived.by(() => {
   return messageState.historyStateForChannel(activeGuild, activeChannel)
 })
 
+function estimateMessageRowHeight(
+  message: ChatMessage,
+  compact: boolean,
+): number {
+  if (message.isSystem) return SYSTEM_ROW_HEIGHT
+
+  const base = compact ? COMPACT_MESSAGE_ROW_HEIGHT : MESSAGE_ROW_HEIGHT
+  if (message.attachments.length === 0) return base
+
+  const imageCount = message.attachments.filter(
+    (attachment) => attachment.isImage,
+  ).length
+  const fileCount = message.attachments.length - imageCount
+  let extra = 0
+
+  if (imageCount > 0) {
+    extra += imageCount * IMAGE_ATTACHMENT_HEIGHT
+    extra += Math.max(0, imageCount - 1) * ATTACHMENT_ROW_GAP
+    extra += 12
+  }
+  if (fileCount > 0) {
+    extra += fileCount * FILE_ATTACHMENT_ROW_HEIGHT
+    extra += Math.max(0, fileCount - 1) * ATTACHMENT_ROW_GAP
+    extra += 12
+  }
+
+  return base + extra
+}
+
 let virtualRows = $derived.by(() => {
   let top = 0
   const rows: VirtualTimelineRow[] = []
@@ -117,11 +161,7 @@ let virtualRows = $derived.by(() => {
           previous.authorUserId === message.authorUserId &&
           message.updatedAt === message.createdAt,
       ) && !message.isSystem
-    const height = message.isSystem
-      ? SYSTEM_ROW_HEIGHT
-      : compact
-        ? COMPACT_MESSAGE_ROW_HEIGHT
-        : MESSAGE_ROW_HEIGHT
+    const height = estimateMessageRowHeight(message, compact)
 
     rows.push({
       id: message.id,
@@ -148,15 +188,51 @@ let visibleRows = $derived.by(() => {
 })
 
 let currentSessionUser = $derived(identityState.session?.user ?? null)
+let activeGuildRecord = $derived(guildState.bySlug(activeGuild))
+const attachFilesPermission = GUILD_PERMISSION_CATALOG.find(
+  (permission) => permission.key === 'ATTACH_FILES',
+)
+let memberRoleData = $derived(guildState.memberRoleDataForGuild(activeGuild))
 let currentMember = $derived(
   currentSessionUser
-    ? guildState.memberByUserId(activeGuild, currentSessionUser.id)
+    ? (memberRoleData.members.find(
+        (member) => member.userId === currentSessionUser.id,
+      ) ?? null)
     : null,
+)
+let rolePermissionMaskById = $derived(
+  new Map(
+    memberRoleData.roles.map((role) => [role.id, role.permissionsBitflag]),
+  ),
+)
+let defaultRolePermissionsBitflag = $derived(
+  memberRoleData.roles.find((role) => role.isDefault)?.permissionsBitflag ?? 0,
+)
+let currentMemberPermissionsBitflag = $derived(
+  (currentMember?.roleIds ?? []).reduce(
+    (mask, roleId) => mask | (rolePermissionMaskById.get(roleId) ?? 0),
+    defaultRolePermissionsBitflag,
+  ),
+)
+let canAttachFiles = $derived(
+  Boolean(activeGuildRecord?.isOwner) ||
+    (attachFilesPermission !== undefined &&
+      hasGuildPermission(
+        currentMemberPermissionsBitflag,
+        attachFilesPermission,
+      )),
 )
 let currentRoleColor = $derived(
   currentMember?.highestRoleColor ??
     currentSessionUser?.avatarColor ??
     '#99aab5',
+)
+let canSubmitComposer = $derived(
+  Boolean(currentSessionUser) &&
+    !attachmentUploadInFlight &&
+    (composerEdit
+      ? composerValue.trim().length > 0
+      : composerValue.trim().length > 0 || selectedAttachment !== null),
 )
 let emptyStateCopy = $derived(
   `This is the beginning of #${activeChannel}. Say something!`,
@@ -187,9 +263,90 @@ function buildCurrentAuthor(): ChatAuthorInput | null {
   }
 }
 
-function sendComposerMessage() {
+function messageFromError(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) return error.message
+  return fallback
+}
+
+function formatFileSize(sizeBytes: number): string {
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) return '0 B'
+  if (sizeBytes < 1024) return `${Math.round(sizeBytes)} B`
+  if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function clearSelectedAttachment(clearInput = true): void {
+  selectedAttachment = null
+  attachmentUploadProgress = null
+  dragDepth = 0
+  dragActive = false
+  if (clearInput && attachmentInput) {
+    attachmentInput.value = ''
+  }
+}
+
+function selectAttachment(file: File): void {
+  selectedAttachment = file
+  attachmentError = null
+}
+
+function openAttachmentPicker(): void {
+  if (!canAttachFiles || attachmentUploadInFlight) return
+  attachmentInput?.click()
+}
+
+function handleAttachmentInputChange(event: Event): void {
+  const target = event.currentTarget as HTMLInputElement | null
+  const nextFile = target?.files?.[0] ?? null
+  if (!nextFile) return
+  selectAttachment(nextFile)
+}
+
+function eventHasFiles(event: DragEvent): boolean {
+  const types = event.dataTransfer?.types
+  if (!types) return false
+  return Array.from(types).includes('Files')
+}
+
+function handleTimelineDragEnter(event: DragEvent): void {
+  if (mode !== 'channel' || !canAttachFiles || !eventHasFiles(event)) return
+  event.preventDefault()
+  dragDepth += 1
+  dragActive = true
+}
+
+function handleTimelineDragOver(event: DragEvent): void {
+  if (mode !== 'channel' || !canAttachFiles || !eventHasFiles(event)) return
+  event.preventDefault()
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'copy'
+  }
+  dragActive = true
+}
+
+function handleTimelineDragLeave(event: DragEvent): void {
+  if (mode !== 'channel' || !canAttachFiles || !eventHasFiles(event)) return
+  event.preventDefault()
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) {
+    dragActive = false
+  }
+}
+
+function handleTimelineDrop(event: DragEvent): void {
+  if (mode !== 'channel' || !canAttachFiles) return
+  event.preventDefault()
+  dragDepth = 0
+  dragActive = false
+  const dropped = event.dataTransfer?.files?.[0] ?? null
+  if (!dropped) return
+  selectAttachment(dropped)
+}
+
+async function sendComposerMessage() {
   const author = buildCurrentAuthor()
   if (!author || mode !== 'channel') return
+  attachmentError = null
 
   if (composerEdit) {
     const sent = messageState.sendMessageUpdate(
@@ -201,6 +358,32 @@ function sendComposerMessage() {
     if (sent) {
       composerValue = ''
       composerEdit = null
+    }
+    return
+  }
+
+  if (selectedAttachment) {
+    if (!canAttachFiles) {
+      attachmentError = 'Missing ATTACH_FILES permission in this channel'
+      return
+    }
+    attachmentUploadInFlight = true
+    attachmentUploadProgress = 0
+    try {
+      await messageState.uploadAttachment(activeGuild, activeChannel, {
+        file: selectedAttachment,
+        content: composerValue,
+        onProgress: (percentage) => {
+          attachmentUploadProgress = Math.max(0, Math.min(100, percentage))
+        },
+      })
+      composerValue = ''
+      clearSelectedAttachment()
+    } catch (error) {
+      attachmentError = messageFromError(error, 'Failed to upload attachment')
+    } finally {
+      attachmentUploadInFlight = false
+      attachmentUploadProgress = null
     }
     return
   }
@@ -237,6 +420,8 @@ function startEditingMessage(message: ChatMessage): void {
     message.channelSlug !== activeChannel
   )
     return
+  clearSelectedAttachment()
+  attachmentError = null
   composerEdit = { messageId: message.id }
   composerValue = message.content
   void tick().then(() => {
@@ -306,6 +491,7 @@ function handleComposerKeydown(event: KeyboardEvent) {
     const selectionStart = target?.selectionStart ?? 0
     const selectionEnd = target?.selectionEnd ?? 0
     if (
+      !selectedAttachment &&
       composerValue.trim().length === 0 &&
       selectionStart === 0 &&
       selectionEnd === 0
@@ -343,7 +529,7 @@ function handleComposerKeydown(event: KeyboardEvent) {
   }
 
   event.preventDefault()
-  sendComposerMessage()
+  void sendComposerMessage()
 }
 
 function updateViewportMetrics(
@@ -439,13 +625,22 @@ $effect(() => {
 })
 
 $effect(() => {
+  if (mode !== 'channel' || !activeGuild || activeGuildRecord?.isOwner) return
+  void guildState.loadMembers(activeGuild).catch(() => {
+    // Member role data is loaded opportunistically for attachment permission gating.
+  })
+})
+
+$effect(() => {
   if (mode !== 'channel') {
     composerEdit = null
     pendingDeleteMessage = null
+    attachmentContextKey = null
+    clearSelectedAttachment()
+    attachmentError = null
+    attachmentUploadInFlight = false
     return
   }
-  activeGuild
-  activeChannel
   if (
     pendingDeleteMessage &&
     (pendingDeleteMessage.guildSlug !== activeGuild ||
@@ -460,6 +655,16 @@ $effect(() => {
   if (!exists) {
     composerEdit = null
   }
+})
+
+$effect(() => {
+  if (mode !== 'channel') return
+  const key = `${activeGuild}:${activeChannel}`
+  if (attachmentContextKey === key) return
+  attachmentContextKey = key
+  attachmentError = null
+  attachmentUploadInFlight = false
+  clearSelectedAttachment()
 })
 
 $effect(() => {
@@ -617,7 +822,14 @@ onMount(() => {
       </section>
     {/if}
 
-    <section class="min-h-0 flex-1 rounded-md border border-border bg-card p-4">
+    <section
+      class="relative min-h-0 flex-1 rounded-md border border-border bg-card p-4"
+      ondragenter={handleTimelineDragEnter}
+      ondragover={handleTimelineDragOver}
+      ondragleave={handleTimelineDragLeave}
+      ondrop={handleTimelineDrop}
+      aria-label="Channel timeline"
+    >
       <h2 class="text-sm font-medium text-foreground">Channel Timeline</h2>
       <div class="mt-3 min-h-0 flex-1" data-testid="channel-timeline">
         <div
@@ -673,6 +885,15 @@ onMount(() => {
         </div>
       </div>
 
+      {#if dragActive}
+        <div
+          class="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-md border-2 border-dashed border-fire bg-fire/10 text-sm font-medium text-fire-foreground"
+          data-testid="message-attachment-drag-overlay"
+        >
+          Drop file to attach
+        </div>
+      {/if}
+
       {#if mode === 'channel' && showJumpToPresent}
         <div class="mt-2 flex justify-end">
           <button
@@ -699,7 +920,68 @@ onMount(() => {
         >
           Message
         </label>
+        <input
+          type="file"
+          class="hidden"
+          bind:this={attachmentInput}
+          onchange={handleAttachmentInputChange}
+          data-testid="message-attachment-input"
+        />
+        {#if selectedAttachment}
+          <div
+            class="mb-2 flex items-center gap-2 rounded-md border border-border bg-muted px-2 py-1.5 text-xs text-foreground"
+            data-testid="attachment-preview-chip"
+          >
+            <span class="truncate">{selectedAttachment.name}</span>
+            <span class="shrink-0 text-muted-foreground">
+              {formatFileSize(selectedAttachment.size)}
+            </span>
+            <button
+              type="button"
+              class="ml-auto rounded px-2 py-0.5 text-xs text-foreground hover:bg-background/70"
+              onclick={() => clearSelectedAttachment()}
+              disabled={attachmentUploadInFlight}
+              data-testid="attachment-preview-remove"
+            >
+              Remove
+            </button>
+          </div>
+        {/if}
+        {#if attachmentError}
+          <p
+            class="mb-2 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive"
+            data-testid="attachment-error"
+          >
+            {attachmentError}
+          </p>
+        {/if}
+        {#if attachmentUploadInFlight && attachmentUploadProgress !== null}
+          <div class="mb-2" data-testid="attachment-upload-progress">
+            <div class="h-1.5 w-full rounded bg-muted">
+              <div
+                class="h-full rounded bg-fire transition-all"
+                style={`width: ${Math.max(0, Math.min(100, attachmentUploadProgress))}%`}
+              ></div>
+            </div>
+            <p class="mt-1 text-xs text-muted-foreground">
+              Uploading {Math.round(attachmentUploadProgress)}%
+            </p>
+          </div>
+        {/if}
         <div class="flex items-end gap-2">
+          <button
+            type="button"
+            class="inline-flex h-[44px] shrink-0 items-center justify-center rounded-md border border-border bg-background px-3 text-lg text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+            onclick={openAttachmentPicker}
+            disabled={!canAttachFiles || attachmentUploadInFlight}
+            title={canAttachFiles
+              ? 'Attach file'
+              : 'You do not have permission to attach files'}
+            aria-label="Attach file"
+            data-testid="message-attachment-button"
+          >
+            📎
+          </button>
           <textarea
             id="message-composer"
             data-testid="message-composer-input"
@@ -708,12 +990,13 @@ onMount(() => {
             bind:this={composerInput}
             bind:value={composerValue}
             onkeydown={handleComposerKeydown}
+            disabled={attachmentUploadInFlight}
           ></textarea>
           <button
             type="button"
             class="inline-flex h-[44px] items-center justify-center rounded-md bg-fire px-4 text-sm font-medium text-fire-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-            onclick={sendComposerMessage}
-            disabled={!currentSessionUser || composerValue.trim().length === 0}
+            onclick={() => void sendComposerMessage()}
+            disabled={!canSubmitComposer}
             data-testid="message-composer-submit"
           >
             {composerEdit ? 'Save' : 'Send'}
@@ -723,7 +1006,7 @@ onMount(() => {
           {#if composerEdit}
             Editing message · Enter to save · Escape to cancel
           {:else}
-            Enter to send · Shift+Enter for newline · Up to edit latest own message
+            Enter to send · Shift+Enter for newline · Up to edit latest own message · Drag/drop or paperclip to attach files
           {/if}
         </p>
       </section>

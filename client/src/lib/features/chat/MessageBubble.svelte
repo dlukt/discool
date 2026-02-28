@@ -1,6 +1,6 @@
 <script lang="ts">
 // biome-ignore-all lint/correctness/noUnusedVariables: Svelte template usage isn't detected reliably.
-import type { ChatMessage } from './types'
+import type { ChatMessage, ChatMessageAttachment } from './types'
 
 const EMOJI_PICKER_OPTIONS = ['😀', '😂', '😍', '👍', '🎉', '🔥', '👏', '😢']
 
@@ -26,11 +26,13 @@ let {
 
 let timestampLabel = $derived(formatTimestamp(message.createdAt))
 let isEdited = $derived(message.updatedAt !== message.createdAt)
+let hasContent = $derived(message.content.trim().length > 0)
 let isOwnMessage = $derived(
   Boolean(currentUserId && currentUserId === message.authorUserId),
 )
 let contextMenuOpen = $state(false)
 let pickerOpen = $state(false)
+let imagePreviewAttachment = $state<ChatMessageAttachment | null>(null)
 
 function formatTimestamp(value: string): string {
   const date = new Date(value)
@@ -68,6 +70,26 @@ function closePopovers(): void {
   closePicker()
 }
 
+function formatFileSize(sizeBytes: number): string {
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) return '0 B'
+  if (sizeBytes < 1024) return `${Math.round(sizeBytes)} B`
+  if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function openImagePreview(attachment: ChatMessageAttachment): void {
+  imagePreviewAttachment = attachment
+}
+
+function closeImagePreview(): void {
+  imagePreviewAttachment = null
+}
+
+function handleImagePreviewBackdropClick(event: MouseEvent): void {
+  if (event.target !== event.currentTarget) return
+  closeImagePreview()
+}
+
 function requestEdit(): void {
   if (!isOwnMessage) return
   onEditRequest?.(message)
@@ -101,6 +123,12 @@ function handleRowContextMenu(event: MouseEvent): void {
 }
 
 function handleRowKeydown(event: KeyboardEvent): void {
+  if (imagePreviewAttachment && event.key === 'Escape') {
+    event.preventDefault()
+    closeImagePreview()
+    return
+  }
+
   if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
     event.preventDefault()
     openContextMenu()
@@ -180,12 +208,59 @@ function handleRowFocusOut(event: FocusEvent): void {
           {/if}
         </div>
       {/if}
-      <p
-        class="whitespace-pre-wrap break-words text-sm text-foreground"
-        data-testid={`message-content-${message.id}`}
-      >
-        {message.content}
-      </p>
+      {#if hasContent}
+        <p
+          class="whitespace-pre-wrap break-words text-sm text-foreground"
+          data-testid={`message-content-${message.id}`}
+        >
+          {message.content}
+        </p>
+      {/if}
+      {#if message.attachments.length > 0}
+        <div
+          class="mt-2 space-y-2"
+          data-testid={`message-attachments-${message.id}`}
+        >
+          {#each message.attachments as attachment, index (`${attachment.id}-${index}`)}
+            {#if attachment.isImage}
+              <button
+                type="button"
+                class="group/image relative block max-w-sm overflow-hidden rounded-md border border-border/60 bg-background"
+                onclick={() => openImagePreview(attachment)}
+                aria-label={`Open image ${attachment.originalFilename}`}
+                data-testid={`message-attachment-image-${message.id}-${index}`}
+              >
+                <img
+                  src={attachment.url}
+                  alt={attachment.originalFilename}
+                  loading="lazy"
+                  class="max-h-56 w-full object-cover transition-opacity group-hover/image:opacity-95"
+                />
+                <span class="absolute bottom-1 right-1 rounded bg-black/60 px-1.5 py-0.5 text-[11px] text-white">
+                  {formatFileSize(attachment.sizeBytes)}
+                </span>
+              </button>
+            {:else}
+              <a
+                href={attachment.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                download={attachment.originalFilename}
+                class="flex items-center gap-2 rounded-md border border-border/70 bg-background px-3 py-2 text-sm text-foreground hover:bg-muted/60"
+                data-testid={`message-attachment-file-${message.id}-${index}`}
+              >
+                <span aria-hidden="true">📄</span>
+                <span class="min-w-0 flex-1 truncate">
+                  {attachment.originalFilename}
+                </span>
+                <span class="shrink-0 text-xs text-muted-foreground">
+                  {formatFileSize(attachment.sizeBytes)}
+                </span>
+              </a>
+            {/if}
+          {/each}
+        </div>
+      {/if}
       {#if message.reactions.length > 0}
         <div
           class="mt-2 flex flex-wrap gap-1"
@@ -315,4 +390,43 @@ function handleRowFocusOut(event: FocusEvent): void {
       </div>
     {/if}
   </div>
+
+  {#if imagePreviewAttachment}
+    <div
+      class="fixed inset-0 z-40 flex items-center justify-center bg-black/85 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Attachment preview"
+      onkeydown={handleRowKeydown}
+      onclick={handleImagePreviewBackdropClick}
+      tabindex="0"
+      data-testid={`message-image-preview-${message.id}`}
+    >
+      <div class="max-h-full max-w-5xl">
+        <img
+          src={imagePreviewAttachment.url}
+          alt={imagePreviewAttachment.originalFilename}
+          class="max-h-[85vh] max-w-full rounded-md object-contain"
+        />
+        <div class="mt-3 flex justify-end gap-2">
+          <a
+            href={imagePreviewAttachment.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            download={imagePreviewAttachment.originalFilename}
+            class="rounded-md border border-border bg-card px-3 py-1.5 text-xs text-foreground hover:bg-muted"
+          >
+            Download
+          </a>
+          <button
+            type="button"
+            class="rounded-md bg-fire px-3 py-1.5 text-xs text-fire-foreground"
+            onclick={closeImagePreview}
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 {/if}

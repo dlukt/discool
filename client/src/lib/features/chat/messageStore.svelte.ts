@@ -1,6 +1,6 @@
 import { wsClient } from '$lib/ws/client'
 import type { WsEnvelope } from '$lib/ws/protocol'
-import { fetchChannelHistory } from './messageApi'
+import { fetchChannelHistory, uploadMessageAttachment } from './messageApi'
 import {
   type ChatMessage,
   type ChatMessageReaction,
@@ -29,6 +29,7 @@ type MessageCreatePayload = {
   created_at?: string
   updated_at?: string
   client_nonce?: string
+  attachments?: unknown
   reactions?: unknown
 }
 
@@ -52,6 +53,12 @@ export type ChatAuthorInput = {
   displayName: string
   avatarColor: string | null
   roleColor: string
+}
+
+export type ChatAttachmentUploadInput = {
+  file: File
+  content: string
+  onProgress?: (percentage: number) => void
 }
 
 type PendingOptimisticEntry = {
@@ -182,6 +189,17 @@ function parseMessageMutationEnvelope(
     created_at: createdAt,
     updated_at: payload.updated_at?.trim() || createdAt,
     client_nonce: payload.client_nonce?.trim() || undefined,
+    attachments: Array.isArray(payload.attachments)
+      ? (payload.attachments as Array<{
+          id?: string
+          storage_key?: string
+          original_filename?: string
+          mime_type?: string
+          size_bytes?: number
+          is_image?: boolean
+          url?: string
+        }>)
+      : undefined,
     reactions: Array.isArray(payload.reactions)
       ? (payload.reactions as Array<{
           emoji?: string
@@ -567,6 +585,7 @@ export const messageState = $state({
       updatedAt: now,
       optimistic: true,
       clientNonce: nonce,
+      attachments: [],
       reactions: [],
     }
 
@@ -603,6 +622,33 @@ export const messageState = $state({
     }
 
     return false
+  },
+
+  uploadAttachment: async (
+    guildSlug: string,
+    channelSlug: string,
+    input: ChatAttachmentUploadInput,
+  ): Promise<void> => {
+    const normalizedGuild = guildSlug.trim()
+    const normalizedChannel = channelSlug.trim()
+    if (!normalizedGuild || !normalizedChannel) {
+      throw new Error('guildSlug and channelSlug are required')
+    }
+
+    const channelKey = toChannelKey(normalizedGuild, normalizedChannel)
+    const normalizedContent = normalizeOutboundContent(input.content)
+    const uploaded = await uploadMessageAttachment(
+      normalizedGuild,
+      normalizedChannel,
+      {
+        file: input.file,
+        content: normalizedContent,
+        clientNonce: generateClientNonce(),
+        onProgress: input.onProgress,
+      },
+    )
+    messageState.ingestServerMessage(uploaded)
+    updateHistoryState(channelKey, { initialized: true })
   },
 
   sendMessageUpdate: (

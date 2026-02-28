@@ -18,6 +18,7 @@ function makeMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
     createdAt: '2026-02-28T00:00:00Z',
     updatedAt: '2026-02-28T00:00:00Z',
     optimistic: false,
+    attachments: [],
     reactions: [],
     ...overrides,
   }
@@ -107,5 +108,44 @@ describe('MessageBubble', () => {
 
     expect(getByRole('button', { name: 'Edit message' })).toBeDisabled()
     expect(getByRole('button', { name: 'Delete message' })).toBeDisabled()
+  })
+
+  it('renders image and file attachments with fullscreen preview', async () => {
+    const { getByTestId } = render(MessageBubble, {
+      message: makeMessage({
+        content: '',
+        attachments: [
+          {
+            id: 'att-image',
+            storageKey: 'attachment-image.png',
+            originalFilename: 'image.png',
+            mimeType: 'image/png',
+            sizeBytes: 2048,
+            isImage: true,
+            url: '/image.png',
+          },
+          {
+            id: 'att-file',
+            storageKey: 'attachment-file.pdf',
+            originalFilename: 'doc.pdf',
+            mimeType: 'application/pdf',
+            sizeBytes: 4096,
+            isImage: false,
+            url: '/doc.pdf',
+          },
+        ],
+      }),
+      currentUserId: 'user-1',
+    })
+
+    expect(
+      getByTestId('message-attachment-image-message-1-0'),
+    ).toBeInTheDocument()
+    expect(
+      getByTestId('message-attachment-file-message-1-1'),
+    ).toBeInTheDocument()
+
+    await fireEvent.click(getByTestId('message-attachment-image-message-1-0'))
+    expect(getByTestId('message-image-preview-message-1')).toBeInTheDocument()
   })
 })

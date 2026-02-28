@@ -5,6 +5,7 @@ pub mod guild;
 pub mod guild_invite;
 pub mod guild_member;
 pub mod message;
+pub mod message_attachment;
 pub mod message_reaction;
 pub mod recovery_email;
 pub mod role;

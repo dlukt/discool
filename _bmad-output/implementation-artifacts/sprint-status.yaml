@@ -102,7 +102,7 @@ development_status:
   6-3-message-history-and-virtual-scrolling: done
   6-4-edit-and-delete-own-messages: done
   6-5-emoji-reactions: done
-  6-6-file-upload-and-sharing: backlog
+  6-6-file-upload-and-sharing: done
   6-7-rich-embeds-and-markdown-rendering: backlog
   6-8-typing-indicators-and-channel-activity: backlog
   6-9-direct-messages: backlog

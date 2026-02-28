@@ -163,6 +163,15 @@
 # max_size_bytes = 2097152
 
 # ---------------------------------------------------------------------------
+# [attachments]
+# ---------------------------------------------------------------------------
+# Server-managed message attachment storage directory (default: "./data/attachments")
+# upload_dir = "./data/attachments"
+#
+# Maximum allowed attachment upload size in bytes (default: 10485760 = 10 MB)
+# max_size_bytes = 10485760
+
+# ---------------------------------------------------------------------------
 # [email]
 # ---------------------------------------------------------------------------
 # SMTP host. Use "stub" for local/dev tests without actual delivery.

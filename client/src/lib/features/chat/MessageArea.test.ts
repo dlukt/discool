@@ -32,6 +32,15 @@ const {
       updatedAt: string
       optimistic: boolean
       clientNonce?: string
+      attachments: Array<{
+        id: string
+        storageKey: string
+        originalFilename: string
+        mimeType: string
+        sizeBytes: number
+        isImage: boolean
+        url: string
+      }>
       reactions: Array<{
         emoji: string
         count: number
@@ -77,6 +86,13 @@ const {
       return timelineByChannel[channelKey(guildSlug, channelSlug)] ?? []
     }),
     sendMessage: vi.fn(() => true),
+    uploadAttachment: vi.fn(
+      async (
+        _guildSlug: string,
+        _channelSlug: string,
+        _input: { onProgress?: (value: number) => void },
+      ) => {},
+    ),
     sendMessageUpdate: vi.fn(() => true),
     sendMessageDelete: vi.fn(() => true),
     sendMessageReactionToggle: vi.fn(() => true),
@@ -127,7 +143,20 @@ const {
   }
 
   const guildState = {
+    bySlug: vi.fn(() => ({ isOwner: true })),
     memberByUserId: vi.fn(() => ({ highestRoleColor: '#3366ff' })),
+    memberRoleDataForGuild: vi.fn(() => ({
+      members: [],
+      roles: [],
+      assignableRoleIds: [],
+      canManageRoles: false,
+    })),
+    loadMembers: vi.fn(async () => ({
+      members: [],
+      roles: [],
+      assignableRoleIds: [],
+      canManageRoles: false,
+    })),
   }
 
   return {
@@ -183,6 +212,7 @@ function seedChannelMessages(channelKey: string, count: number): void {
     createdAt: `2026-02-28T00:00:${String(index).padStart(2, '0')}Z`,
     updatedAt: `2026-02-28T00:00:${String(index).padStart(2, '0')}Z`,
     optimistic: false,
+    attachments: [],
     reactions: [],
   }))
 }
@@ -219,6 +249,7 @@ describe('MessageArea', () => {
     messageState.version += 1
     messageState.timeline.mockClear()
     messageState.sendMessage.mockClear()
+    messageState.uploadAttachment.mockClear()
     messageState.sendMessageUpdate.mockClear()
     messageState.sendMessageDelete.mockClear()
     messageState.sendMessageReactionToggle.mockClear()
@@ -232,6 +263,9 @@ describe('MessageArea', () => {
     messageState.addPendingNew.mockClear()
     messageState.clearPendingNew.mockClear()
     guildState.memberByUserId.mockClear()
+    guildState.memberRoleDataForGuild.mockClear()
+    guildState.loadMembers.mockClear()
+    guildState.bySlug.mockClear()
   })
 
   it('sends on Enter and inserts newline on Shift+Enter', async () => {
@@ -441,6 +475,59 @@ describe('MessageArea', () => {
     await fireEvent.keyDown(composer, { key: 'Escape' })
     expect(messageState.sendMessageUpdate).not.toHaveBeenCalled()
     expect(composer.value).toBe('')
+  })
+
+  it('uploads selected attachment from composer', async () => {
+    messageState.uploadAttachment.mockImplementation(
+      (
+        _guildSlug: string,
+        _channelSlug: string,
+        input: { onProgress?: (value: number) => void },
+      ) =>
+        new Promise<void>((resolve) => {
+          input.onProgress?.(45)
+          setTimeout(resolve, 10)
+        }),
+    )
+
+    const { getByTestId, queryByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    const attachmentInput = getByTestId(
+      'message-attachment-input',
+    ) as HTMLInputElement
+    const file = new File(['image'], 'image.png', { type: 'image/png' })
+    await fireEvent.change(attachmentInput, { target: { files: [file] } })
+    expect(getByTestId('attachment-preview-chip')).toBeInTheDocument()
+
+    const composer = getByTestId(
+      'message-composer-input',
+    ) as HTMLTextAreaElement
+    await fireEvent.input(composer, { target: { value: 'with file' } })
+    await fireEvent.click(getByTestId('message-composer-submit'))
+
+    await waitFor(() => {
+      expect(messageState.uploadAttachment).toHaveBeenCalledWith(
+        'lobby',
+        'general',
+        expect.objectContaining({
+          file,
+          content: 'with file',
+          onProgress: expect.any(Function),
+        }),
+      )
+    })
+    expect(getByTestId('attachment-upload-progress')).toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(queryByTestId('attachment-upload-progress')).toBeNull()
+    })
   })
 
   it('requires confirmation before delete operation is sent', async () => {

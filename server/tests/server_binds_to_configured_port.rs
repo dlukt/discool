@@ -435,6 +435,19 @@ async fn http_post_bytes_with_bearer(
     buf
 }
 
+async fn http_get_bytes_with_bearer(addr: &str, path: &str, token: &str) -> Vec<u8> {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    buf
+}
+
 fn response_header_and_body_bytes(res: &[u8]) -> (String, &[u8]) {
     let header_end = res
         .windows(4)
@@ -4167,6 +4180,285 @@ async fn users_avatar_upload_accepts_png_and_exposes_avatar_url() {
 
     let res = http_response_with_bearer(&addr, "/api/v1/users/me/avatar", &token).await;
     assert_eq!(response_status(&res), 404);
+}
+
+#[tokio::test]
+async fn message_attachment_upload_creates_message_broadcasts_and_serves_file() {
+    use serde_json::json;
+    use std::io::Write;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    let cfg_path = dir.join("config.toml");
+    write_server_config_with_db_url(&cfg_path, "127.0.0.1", port, None, "sqlite://./discool.db");
+    let mut cfg = fs::OpenOptions::new().append(true).open(&cfg_path).unwrap();
+    cfg.write_all(
+        b"\n[attachments]\nupload_dir = \"./attachments-test\"\nmax_size_bytes = 1048576\n",
+    )
+    .unwrap();
+
+    let mut server = spawn_server(&dir, |_| {});
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "attach-owner", [201u8; 32]).await;
+    let guild_body = json!({ "name": "Attachment Guild" }).to_string();
+    let guild_res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap().to_string();
+
+    let (mut owner_stream, owner_response) =
+        websocket_connect(&addr, "/ws", Some(&owner_token)).await;
+    assert_eq!(response_status(&owner_response), 101);
+    let _ = websocket_read_json_with_op(&mut owner_stream, "hello", 1_500).await;
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_subscribe",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let _ = websocket_read_json_with_op(&mut owner_stream, "channel_update", 1_500).await;
+
+    let boundary = "----discool-attachment-boundary";
+    let png_bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02];
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"pixel.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&png_bytes);
+    body.extend_from_slice(
+        format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"content\"\r\n\r\nHello <b>file</b>")
+            .as_bytes(),
+    );
+    body.extend_from_slice(
+        format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"client_nonce\"\r\n\r\nnonce-upload-1")
+            .as_bytes(),
+    );
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let upload_path = format!("/api/v1/guilds/{guild_slug}/channels/general/messages/attachments");
+    let upload_res =
+        http_post_multipart_with_bearer(&addr, &upload_path, boundary, &body, &owner_token).await;
+    assert_eq!(response_status(&upload_res), 201);
+    let upload_payload: serde_json::Value =
+        serde_json::from_str(response_body(&upload_res)).unwrap();
+    assert_eq!(
+        upload_payload["data"]["content"],
+        json!("Hello &lt;b&gt;file&lt;/b&gt;")
+    );
+    assert_eq!(
+        upload_payload["data"]["client_nonce"],
+        json!("nonce-upload-1")
+    );
+    let attachments = upload_payload["data"]["attachments"]
+        .as_array()
+        .expect("expected attachments array");
+    assert_eq!(attachments.len(), 1);
+    let attachment = &attachments[0];
+    let attachment_id = attachment["id"].as_str().unwrap().to_string();
+    let attachment_url = attachment["url"].as_str().unwrap().to_string();
+    assert_eq!(attachment["mime_type"], json!("image/png"));
+    assert_eq!(attachment["original_filename"], json!("pixel.png"));
+    assert_eq!(attachment["is_image"], json!(true));
+
+    let ws_event = websocket_read_json_with_op(&mut owner_stream, "message_create", 1_500)
+        .await
+        .expect("expected message_create after upload");
+    assert_eq!(ws_event["d"]["id"], upload_payload["data"]["id"]);
+    assert_eq!(
+        ws_event["d"]["attachments"][0]["id"],
+        json!(attachment_id.as_str())
+    );
+
+    let download_res = http_get_bytes_with_bearer(&addr, &attachment_url, &owner_token).await;
+    let (header, downloaded_body) = response_header_and_body_bytes(&download_res);
+    assert_eq!(response_status(&header), 200);
+    let content_type = response_header(&header, "content-type").unwrap_or_default();
+    assert!(content_type.starts_with("image/png"));
+    let content_disposition = response_header(&header, "content-disposition").unwrap_or_default();
+    assert!(
+        content_disposition.contains("pixel.png"),
+        "unexpected content-disposition: {content_disposition}"
+    );
+    assert_eq!(downloaded_body, png_bytes.as_slice());
+}
+
+#[tokio::test]
+async fn message_attachment_upload_rejects_without_attach_files_permission() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "attach-owner-perm", [211u8; 32]).await;
+    let member_token = register_and_authenticate(&addr, "attach-member-perm", [212u8; 32]).await;
+    let guild_body = json!({ "name": "Attachment Permission Guild" }).to_string();
+    let guild_res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap().to_string();
+    let guild_id = guild["data"]["id"].as_str().unwrap().to_string();
+
+    let url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let member_id = sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username = ?1")
+        .bind("attach-member-perm")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO guild_members (guild_id, user_id, joined_at, joined_via_invite_code)
+         VALUES (?1, ?2, ?3, NULL)",
+    )
+    .bind(&guild_id)
+    .bind(&member_id)
+    .bind("2026-02-28T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    let default_role_id = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM roles WHERE guild_id = ?1 AND is_default = 1 LIMIT 1",
+    )
+    .bind(&guild_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let channel_id = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM channels WHERE guild_id = ?1 AND slug = ?2 LIMIT 1",
+    )
+    .bind(&guild_id)
+    .bind("general")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO channel_permission_overrides (channel_id, role_id, allow_bitflag, deny_bitflag)
+         VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(&channel_id)
+    .bind(&default_role_id)
+    .bind(0_i64)
+    .bind(512_i64)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let boundary = "----discool-attachment-perm";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"blocked.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let upload_path = format!("/api/v1/guilds/{guild_slug}/channels/general/messages/attachments");
+    let upload_res =
+        http_post_multipart_with_bearer(&addr, &upload_path, boundary, &body, &member_token).await;
+    assert_eq!(response_status(&upload_res), 403);
+    let payload: serde_json::Value = serde_json::from_str(response_body(&upload_res)).unwrap();
+    assert_eq!(payload["error"]["code"], json!("FORBIDDEN"));
+}
+
+#[tokio::test]
+async fn message_attachment_upload_rejects_mime_mismatch_and_oversized_payload() {
+    use serde_json::json;
+    use std::io::Write;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let cfg_path = dir.join("config.toml");
+    write_server_config(&cfg_path, "127.0.0.1", port, None);
+    let mut cfg = fs::OpenOptions::new().append(true).open(&cfg_path).unwrap();
+    cfg.write_all(b"\n[attachments]\nmax_size_bytes = 12\n")
+        .unwrap();
+    let mut server = spawn_server(&dir, |_| {});
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "attach-owner-validate", [221u8; 32]).await;
+    let guild_body = json!({ "name": "Attachment Validation Guild" }).to_string();
+    let guild_res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap().to_string();
+
+    let mismatch_boundary = "----discool-attachment-mismatch";
+    let mut mismatch_body = Vec::new();
+    mismatch_body.extend_from_slice(
+        format!(
+            "--{mismatch_boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"mismatch.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    mismatch_body.extend_from_slice(b"%PDF-1.7");
+    mismatch_body.extend_from_slice(format!("\r\n--{mismatch_boundary}--\r\n").as_bytes());
+    let upload_path = format!("/api/v1/guilds/{guild_slug}/channels/general/messages/attachments");
+    let mismatch_res = http_post_multipart_with_bearer(
+        &addr,
+        &upload_path,
+        mismatch_boundary,
+        &mismatch_body,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&mismatch_res), 422);
+    let mismatch_payload: serde_json::Value =
+        serde_json::from_str(response_body(&mismatch_res)).unwrap();
+    assert_eq!(mismatch_payload["error"]["code"], json!("VALIDATION_ERROR"));
+
+    let oversized_boundary = "----discool-attachment-oversized";
+    let mut oversized_body = Vec::new();
+    oversized_body.extend_from_slice(
+        format!(
+            "--{oversized_boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"large.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    oversized_body.extend_from_slice(&[
+        0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4, 5, 6,
+    ]);
+    oversized_body.extend_from_slice(format!("\r\n--{oversized_boundary}--\r\n").as_bytes());
+    let oversized_res = http_post_multipart_with_bearer(
+        &addr,
+        &upload_path,
+        oversized_boundary,
+        &oversized_body,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&oversized_res), 422);
+    let oversized_payload: serde_json::Value =
+        serde_json::from_str(response_body(&oversized_res)).unwrap();
+    assert_eq!(
+        oversized_payload["error"]["code"],
+        json!("VALIDATION_ERROR")
+    );
 }
 
 #[tokio::test]

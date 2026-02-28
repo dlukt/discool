@@ -1,4 +1,4 @@
-import { ApiError, apiFetchCursorList } from '$lib/api'
+import { ApiError, apiFetch, apiFetchCursorList } from '$lib/api'
 import { type ChatMessage, type ChatMessageWire, toChatMessage } from './types'
 
 export type FetchChannelHistoryInput = {
@@ -9,6 +9,13 @@ export type FetchChannelHistoryInput = {
 export type ChannelHistoryPage = {
   messages: ChatMessage[]
   cursor: string | null
+}
+
+export type UploadMessageAttachmentInput = {
+  file: File
+  content?: string
+  clientNonce?: string
+  onProgress?: (percentage: number) => void
 }
 
 function normalizePathPart(value: string, field: string): string {
@@ -39,6 +46,15 @@ function buildHistoryPath(
   return query ? `${base}?${query}` : base
 }
 
+function buildAttachmentUploadPath(
+  guildSlug: string,
+  channelSlug: string,
+): string {
+  const guild = normalizePathPart(guildSlug, 'guildSlug')
+  const channel = normalizePathPart(channelSlug, 'channelSlug')
+  return `/api/v1/guilds/${guild}/channels/${channel}/messages/attachments`
+}
+
 export async function fetchChannelHistory(
   guildSlug: string,
   channelSlug: string,
@@ -53,5 +69,40 @@ export async function fetchChannelHistory(
   return {
     messages: response.data.map(toChatMessage),
     cursor: response.cursor,
+  }
+}
+
+export async function uploadMessageAttachment(
+  guildSlug: string,
+  channelSlug: string,
+  input: UploadMessageAttachmentInput,
+): Promise<ChatMessage> {
+  const path = buildAttachmentUploadPath(guildSlug, channelSlug)
+  const formData = new FormData()
+  formData.append('file', input.file)
+  if (typeof input.content === 'string') {
+    formData.append('content', input.content)
+  }
+  if (typeof input.clientNonce === 'string' && input.clientNonce.trim()) {
+    formData.append('client_nonce', input.clientNonce.trim())
+  }
+
+  const reportProgress = input.onProgress
+  let progress = 0
+  reportProgress?.(progress)
+  const timer = globalThis.setInterval(() => {
+    progress = Math.min(progress + 10, 90)
+    reportProgress?.(progress)
+  }, 120)
+
+  try {
+    const response = await apiFetch<ChatMessageWire>(path, {
+      method: 'POST',
+      body: formData,
+    })
+    reportProgress?.(100)
+    return toChatMessage(response)
+  } finally {
+    globalThis.clearInterval(timer)
   }
 }

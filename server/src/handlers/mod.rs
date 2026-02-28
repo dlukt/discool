@@ -105,6 +105,14 @@ pub fn router(state: AppState) -> Router {
             get(messages::list_messages),
         )
         .route(
+            "/guilds/{guild_slug}/channels/{channel_slug}/messages/attachments",
+            post(messages::create_message_attachment),
+        )
+        .route(
+            "/guilds/{guild_slug}/channels/{channel_slug}/messages/attachments/{attachment_id}",
+            get(messages::get_message_attachment),
+        )
+        .route(
             "/guilds/{guild_slug}/channels/{channel_slug}/permission-overrides",
             get(channels::list_channel_permission_overrides),
         )

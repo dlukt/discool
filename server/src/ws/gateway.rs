@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     AppError,
+    config::AttachmentConfig,
     db::DbPool,
     services::{message_service, presence_service},
 };
@@ -251,11 +252,13 @@ async fn handle_message_update(
 
 async fn handle_message_delete(
     pool: &DbPool,
+    attachment_config: &AttachmentConfig,
     user_id: &str,
     payload: MessageDeletePayload,
 ) -> Result<(), AppError> {
     let deleted = message_service::delete_message(
         pool,
+        attachment_config,
         user_id,
         message_service::DeleteMessageInput {
             guild_slug: payload.guild_slug,
@@ -356,6 +359,7 @@ fn handle_resume(connection_id: &str, envelope: &ClientEnvelope) {
 
 async fn process_client_message(
     pool: &DbPool,
+    attachment_config: &AttachmentConfig,
     connection_id: &str,
     user_id: &str,
     envelope: ClientEnvelope,
@@ -426,7 +430,9 @@ async fn process_client_message(
         ClientOp::MessageDelete => {
             match parse_payload::<MessageDeletePayload>(envelope.d, &envelope.op) {
                 Ok(payload) => {
-                    if let Err(error) = handle_message_delete(pool, user_id, payload).await {
+                    if let Err(error) =
+                        handle_message_delete(pool, attachment_config, user_id, payload).await
+                    {
                         send_app_error(connection_id, error);
                     }
                 }
@@ -459,6 +465,7 @@ pub async fn handle_socket(
     user_id: String,
     session_id: String,
     pool: DbPool,
+    attachment_config: AttachmentConfig,
 ) {
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let connection_id = presence_service::register_connection(&user_id, &session_id, sender);
@@ -496,6 +503,7 @@ pub async fn handle_socket(
                             Ok(envelope) => {
                                 process_client_message(
                                     &pool,
+                                    &attachment_config,
                                     &connection_id,
                                     &user_id,
                                     envelope,

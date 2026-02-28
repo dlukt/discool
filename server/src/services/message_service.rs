@@ -7,19 +7,22 @@ use uuid::Uuid;
 
 use crate::{
     AppError,
+    config::AttachmentConfig,
     db::DbPool,
     models::{
         channel::{self, Channel},
         channel_permission_override,
         guild::{self, Guild},
-        guild_member, message, message_reaction, role,
+        guild_member, message, message_attachment, message_reaction, role,
     },
     permissions,
+    services::file_storage_service::{self, FileStorageProvider},
 };
 
 const MAX_MESSAGE_CHARS: usize = 2_000;
 const MAX_CLIENT_NONCE_CHARS: usize = 120;
 const MAX_REACTION_EMOJI_CHARS: usize = 64;
+const MAX_ATTACHMENT_FILENAME_CHARS: usize = 255;
 const DEFAULT_ROLE_COLOR: &str = "#99aab5";
 const OWNER_ROLE_COLOR: &str = "#f59e0b";
 const MAX_LIST_MESSAGES_LIMIT: i64 = 200;
@@ -41,6 +44,17 @@ pub struct UpdateMessageInput {
 }
 
 #[derive(Debug, Clone)]
+pub struct CreateAttachmentMessageInput {
+    pub guild_slug: String,
+    pub channel_slug: String,
+    pub content: Option<String>,
+    pub client_nonce: Option<String>,
+    pub filename: String,
+    pub declared_content_type: Option<String>,
+    pub file_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
 pub struct DeleteMessageInput {
     pub guild_slug: String,
     pub channel_slug: String,
@@ -53,6 +67,17 @@ pub struct ToggleMessageReactionInput {
     pub channel_slug: String,
     pub message_id: String,
     pub emoji: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageAttachmentResponse {
+    pub id: String,
+    pub storage_key: String,
+    pub original_filename: String,
+    pub mime_type: String,
+    pub size_bytes: i64,
+    pub is_image: bool,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,6 +113,7 @@ pub struct MessageResponse {
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_nonce: Option<String>,
+    pub attachments: Vec<MessageAttachmentResponse>,
     pub reactions: Vec<MessageReactionSummaryResponse>,
 }
 
@@ -165,8 +191,208 @@ pub async fn create_message(
         user_id,
         normalized_nonce,
         None,
+        None,
     )
     .await
+}
+
+pub async fn create_attachment_message(
+    pool: &DbPool,
+    attachment_config: &AttachmentConfig,
+    user_id: &str,
+    input: CreateAttachmentMessageInput,
+) -> Result<MessageResponse, AppError> {
+    if input.file_bytes.is_empty() {
+        return Err(AppError::ValidationError(
+            "file field is required".to_string(),
+        ));
+    }
+    if input.file_bytes.len() > attachment_config.max_size_bytes {
+        return Err(AppError::ValidationError(format!(
+            "Attachment exceeds the {} byte limit",
+            attachment_config.max_size_bytes
+        )));
+    }
+
+    let normalized_nonce = normalize_client_nonce(input.client_nonce)?;
+    let normalized_content =
+        normalize_message_content_allow_empty(input.content.as_deref().unwrap_or_default())?;
+    let normalized_filename = normalize_attachment_filename(&input.filename)?;
+    let sniffed_mime = sniff_attachment_mime(&input.file_bytes)
+        .ok_or_else(|| AppError::ValidationError("Unsupported attachment file type".to_string()))?;
+    let declared_mime = match input.declared_content_type {
+        Some(value) => Some(normalize_declared_attachment_mime(&value)?),
+        None => None,
+    };
+    if let Some(declared_mime) = declared_mime
+        && declared_mime != sniffed_mime
+    {
+        return Err(AppError::ValidationError(
+            "Attachment MIME type does not match file content".to_string(),
+        ));
+    }
+
+    let access =
+        load_channel_with_send_access(pool, user_id, &input.guild_slug, &input.channel_slug)
+            .await?;
+    if !permissions::has_permission(access.effective_permissions, permissions::ATTACH_FILES) {
+        return Err(AppError::Forbidden(
+            "Missing ATTACH_FILES permission in this channel".to_string(),
+        ));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let message_id = Uuid::new_v4().to_string();
+    let inserted = message::insert_message(
+        pool,
+        &message_id,
+        &access.guild.id,
+        &access.channel.id,
+        user_id,
+        &normalized_content,
+        false,
+        &now,
+        &now,
+    )
+    .await?;
+    if !inserted {
+        return Err(AppError::Conflict(
+            "Message id collision while creating attachment message".to_string(),
+        ));
+    }
+
+    let attachment_id = Uuid::new_v4().to_string();
+    let storage_key = format!(
+        "attachment-{}.{}",
+        Uuid::new_v4(),
+        extension_for_attachment_mime(sniffed_mime)
+    );
+    file_storage_service::validate_storage_key(&storage_key).map_err(|_| {
+        AppError::Internal("Generated attachment storage key is invalid".to_string())
+    })?;
+    let size_bytes = i64::try_from(input.file_bytes.len())
+        .map_err(|_| AppError::Internal("Attachment file size is too large".to_string()))?;
+
+    let inserted_attachment = message_attachment::insert_message_attachment(
+        pool,
+        &attachment_id,
+        &message_id,
+        &storage_key,
+        &normalized_filename,
+        sniffed_mime,
+        size_bytes,
+        &now,
+    )
+    .await?;
+    if !inserted_attachment {
+        if let Err(err) = message::delete_message_by_id_channel_and_author(
+            pool,
+            &message_id,
+            &access.channel.id,
+            user_id,
+        )
+        .await
+        {
+            tracing::warn!(
+                error = ?err,
+                message_id = %message_id,
+                "Failed to roll back message after attachment insert conflict"
+            );
+        }
+        return Err(AppError::Conflict(
+            "Attachment id collision while creating attachment message".to_string(),
+        ));
+    }
+
+    let storage = FileStorageProvider::local(attachment_config.upload_dir.clone());
+    if let Err(storage_err) = storage.write(&storage_key, &input.file_bytes).await {
+        let rollback_deleted = match message::delete_message_by_id_channel_and_author(
+            pool,
+            &message_id,
+            &access.channel.id,
+            user_id,
+        )
+        .await
+        {
+            Ok(deleted) => deleted,
+            Err(err) => {
+                tracing::warn!(
+                    error = ?err,
+                    message_id = %message_id,
+                    "Failed to roll back message after attachment write failure"
+                );
+                false
+            }
+        };
+        if rollback_deleted {
+            if let Err(err) = storage.delete(&storage_key).await {
+                tracing::warn!(
+                    error = ?err,
+                    message_id = %message_id,
+                    storage_key = %storage_key,
+                    "Failed to clean up attachment file after attachment write failure"
+                );
+            }
+        } else {
+            tracing::warn!(
+                message_id = %message_id,
+                "Message rollback after attachment write failure did not delete a row"
+            );
+        }
+        return Err(storage_err);
+    }
+
+    let stored = message::find_message_by_id(pool, &message_id)
+        .await?
+        .ok_or_else(|| AppError::Internal("Created attachment message not found".to_string()))?;
+    build_message_response(
+        pool,
+        &access.guild,
+        &access.channel,
+        stored,
+        user_id,
+        normalized_nonce,
+        Some(vec![message_attachment::MessageAttachment {
+            id: attachment_id,
+            message_id: message_id.clone(),
+            storage_key,
+            original_filename: normalized_filename,
+            mime_type: sniffed_mime.to_string(),
+            size_bytes,
+            created_at: now,
+        }]),
+        None,
+    )
+    .await
+}
+
+pub async fn load_message_attachment(
+    pool: &DbPool,
+    attachment_config: &AttachmentConfig,
+    user_id: &str,
+    guild_slug: &str,
+    channel_slug: &str,
+    attachment_id: &str,
+) -> Result<(Vec<u8>, String, String), AppError> {
+    let normalized_attachment_id = normalize_message_id(attachment_id)?;
+    let access = load_channel_with_view_access(pool, user_id, guild_slug, channel_slug).await?;
+    let attachment =
+        message_attachment::find_message_attachment_by_id(pool, &normalized_attachment_id)
+            .await?
+            .ok_or(AppError::NotFound)?;
+    let parent_message = message::find_message_by_id(pool, &attachment.message_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if parent_message.guild_id != access.guild.id || parent_message.channel_id != access.channel.id
+    {
+        return Err(AppError::NotFound);
+    }
+    file_storage_service::validate_storage_key(&attachment.storage_key)
+        .map_err(|_| AppError::Internal("Invalid attachment storage key".to_string()))?;
+
+    let storage = FileStorageProvider::local(attachment_config.upload_dir.clone());
+    let bytes = storage.read(&attachment.storage_key).await?;
+    Ok((bytes, attachment.mime_type, attachment.original_filename))
 }
 
 pub async fn update_message(
@@ -217,12 +443,14 @@ pub async fn update_message(
         user_id,
         None,
         None,
+        None,
     )
     .await
 }
 
 pub async fn delete_message(
     pool: &DbPool,
+    attachment_config: &AttachmentConfig,
     user_id: &str,
     input: DeleteMessageInput,
 ) -> Result<MessageDeleteResponse, AppError> {
@@ -242,6 +470,14 @@ pub async fn delete_message(
             "You can only delete your own messages".to_string(),
         ));
     }
+    let attachments = message_attachment::list_message_attachments_by_message_ids(
+        pool,
+        std::slice::from_ref(&normalized_message_id),
+    )
+    .await?
+    .get(&normalized_message_id)
+    .cloned()
+    .unwrap_or_default();
 
     let deleted = message::delete_message_by_id_channel_and_author(
         pool,
@@ -252,6 +488,20 @@ pub async fn delete_message(
     .await?;
     if !deleted {
         return Err(AppError::NotFound);
+    }
+    if !attachments.is_empty() {
+        let storage = FileStorageProvider::local(attachment_config.upload_dir.clone());
+        for attachment in attachments {
+            if let Err(err) = storage.delete(&attachment.storage_key).await {
+                tracing::warn!(
+                    error = ?err,
+                    message_id = %normalized_message_id,
+                    attachment_id = %attachment.id,
+                    storage_key = %attachment.storage_key,
+                    "Failed to delete attachment file after message delete"
+                );
+            }
+        }
     }
 
     Ok(MessageDeleteResponse {
@@ -429,10 +679,13 @@ pub async fn list_channel_messages(
     let reaction_map =
         message_reaction::list_reaction_summaries_by_message_ids(pool, &message_ids, user_id)
             .await?;
+    let attachment_map =
+        message_attachment::list_message_attachments_by_message_ids(pool, &message_ids).await?;
 
     let mut responses = Vec::with_capacity(page.messages.len());
     for item in page.messages {
         let preloaded_reactions = Some(reaction_map.get(&item.id).cloned().unwrap_or_default());
+        let preloaded_attachments = Some(attachment_map.get(&item.id).cloned().unwrap_or_default());
         responses.push(
             build_message_response(
                 pool,
@@ -441,6 +694,7 @@ pub async fn list_channel_messages(
                 item,
                 user_id,
                 None,
+                preloaded_attachments,
                 preloaded_reactions,
             )
             .await?,
@@ -500,6 +754,24 @@ fn to_message_reaction_response(
     }
 }
 
+fn to_message_attachment_response(
+    guild_slug: &str,
+    channel_slug: &str,
+    attachment: message_attachment::MessageAttachment,
+) -> MessageAttachmentResponse {
+    let id = attachment.id;
+    let mime_type = attachment.mime_type;
+    MessageAttachmentResponse {
+        id: id.clone(),
+        storage_key: attachment.storage_key,
+        original_filename: attachment.original_filename,
+        size_bytes: attachment.size_bytes,
+        is_image: is_image_attachment_mime(&mime_type),
+        url: attachment_url_for_message(guild_slug, channel_slug, &id),
+        mime_type,
+    }
+}
+
 async fn build_message_reaction_summaries(
     pool: &DbPool,
     message_id: &str,
@@ -514,6 +786,7 @@ async fn build_message_reaction_summaries(
         .collect())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_message_response(
     pool: &DbPool,
     guild: &Guild,
@@ -521,6 +794,7 @@ async fn build_message_response(
     message: message::Message,
     viewer_user_id: &str,
     client_nonce: Option<String>,
+    preloaded_attachments: Option<Vec<message_attachment::MessageAttachment>>,
     preloaded_reactions: Option<Vec<message_reaction::MessageReactionSummary>>,
 ) -> Result<MessageResponse, AppError> {
     let profile = guild_member::find_user_profile_by_id(pool, &message.author_user_id)
@@ -540,6 +814,20 @@ async fn build_message_response(
         .filter(|value| !value.is_empty())
         .unwrap_or(&profile.username)
         .to_string();
+    let attachments = match preloaded_attachments {
+        Some(items) => items,
+        None => {
+            let mut grouped = message_attachment::list_message_attachments_by_message_ids(
+                pool,
+                std::slice::from_ref(&message.id),
+            )
+            .await?;
+            grouped.remove(&message.id).unwrap_or_default()
+        }
+    }
+    .into_iter()
+    .map(|item| to_message_attachment_response(&guild.slug, &channel.slug, item))
+    .collect();
     let reactions = match preloaded_reactions {
         Some(items) => items
             .into_iter()
@@ -562,6 +850,7 @@ async fn build_message_response(
         created_at: message.created_at,
         updated_at: message.updated_at,
         client_nonce,
+        attachments,
         reactions,
     })
 }
@@ -759,10 +1048,18 @@ fn normalize_reaction_emoji(value: &str) -> Result<String, AppError> {
 }
 
 fn normalize_message_content(value: &str) -> Result<String, AppError> {
+    let normalized = normalize_message_content_allow_empty(value)?;
+    if normalized.trim().is_empty() {
+        return Err(AppError::ValidationError("content is required".to_string()));
+    }
+    Ok(normalized)
+}
+
+fn normalize_message_content_allow_empty(value: &str) -> Result<String, AppError> {
     let normalized_newlines = value.replace("\r\n", "\n").replace('\r', "\n");
     let trimmed = normalized_newlines.trim();
     if trimmed.is_empty() {
-        return Err(AppError::ValidationError("content is required".to_string()));
+        return Ok(String::new());
     }
     if trimmed.chars().count() > MAX_MESSAGE_CHARS {
         return Err(AppError::ValidationError(format!(
@@ -779,10 +1076,91 @@ fn normalize_message_content(value: &str) -> Result<String, AppError> {
     }
 
     let escaped = escape_html(trimmed);
-    if escaped.trim().is_empty() {
-        return Err(AppError::ValidationError("content is required".to_string()));
-    }
     Ok(escaped)
+}
+
+fn normalize_attachment_filename(value: &str) -> Result<String, AppError> {
+    let basename = value
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if basename.is_empty() {
+        return Err(AppError::ValidationError(
+            "Attachment filename is required".to_string(),
+        ));
+    }
+    if basename.chars().count() > MAX_ATTACHMENT_FILENAME_CHARS {
+        return Err(AppError::ValidationError(format!(
+            "Attachment filename must be {MAX_ATTACHMENT_FILENAME_CHARS} characters or less"
+        )));
+    }
+    if basename.chars().any(|ch| ch.is_control()) {
+        return Err(AppError::ValidationError(
+            "Attachment filename contains invalid characters".to_string(),
+        ));
+    }
+    Ok(basename)
+}
+
+fn normalize_declared_attachment_mime(value: &str) -> Result<&'static str, AppError> {
+    let base = value
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "image/png" => Ok("image/png"),
+        "image/jpeg" | "image/jpg" => Ok("image/jpeg"),
+        "image/webp" => Ok("image/webp"),
+        "image/gif" => Ok("image/gif"),
+        "application/pdf" => Ok("application/pdf"),
+        _ => Err(AppError::ValidationError(
+            "Unsupported attachment file type".to_string(),
+        )),
+    }
+}
+
+fn sniff_attachment_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some("image/png");
+    }
+    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.starts_with(b"%PDF-") {
+        return Some("application/pdf");
+    }
+    None
+}
+
+fn extension_for_attachment_mime(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "application/pdf" => "pdf",
+        _ => "bin",
+    }
+}
+
+fn is_image_attachment_mime(mime: &str) -> bool {
+    mime.starts_with("image/")
+}
+
+fn attachment_url_for_message(guild_slug: &str, channel_slug: &str, attachment_id: &str) -> String {
+    format!(
+        "/api/v1/guilds/{guild_slug}/channels/{channel_slug}/messages/attachments/{attachment_id}"
+    )
 }
 
 fn escape_html(value: &str) -> String {
@@ -1008,6 +1386,11 @@ mod tests {
     }
 
     #[test]
+    fn normalize_message_content_allow_empty_returns_empty_string() {
+        assert_eq!(normalize_message_content_allow_empty("   ").unwrap(), "");
+    }
+
+    #[test]
     fn normalize_client_nonce_validates_length_and_whitespace() {
         assert_eq!(
             normalize_client_nonce(Some("   ".to_string())).unwrap(),
@@ -1035,6 +1418,39 @@ mod tests {
         let too_long = "😀".repeat(MAX_REACTION_EMOJI_CHARS + 1);
         assert!(normalize_reaction_emoji(&too_long).is_err());
         assert_eq!(normalize_reaction_emoji(" 😀 ").unwrap(), "😀");
+    }
+
+    #[test]
+    fn normalize_attachment_filename_rejects_invalid_values() {
+        assert!(normalize_attachment_filename("   ").is_err());
+        assert!(normalize_attachment_filename("a/b.png").is_ok());
+        assert!(normalize_attachment_filename("a\\b.png").is_ok());
+        assert!(normalize_attachment_filename("file\u{0007}.png").is_err());
+        assert_eq!(
+            normalize_attachment_filename("  ./avatar.png  ").unwrap(),
+            "avatar.png"
+        );
+    }
+
+    #[test]
+    fn attachment_mime_helpers_detect_and_validate_supported_types() {
+        assert_eq!(
+            normalize_declared_attachment_mime("image/jpeg").unwrap(),
+            "image/jpeg"
+        );
+        assert_eq!(
+            normalize_declared_attachment_mime("application/pdf").unwrap(),
+            "application/pdf"
+        );
+        assert!(normalize_declared_attachment_mime("text/plain").is_err());
+
+        assert_eq!(
+            sniff_attachment_mime(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1]),
+            Some("image/png")
+        );
+        assert_eq!(sniff_attachment_mime(b"GIF89a"), Some("image/gif"));
+        assert_eq!(sniff_attachment_mime(b"%PDF-1.7"), Some("application/pdf"));
+        assert_eq!(sniff_attachment_mime(b"hello"), None);
     }
 
     #[test]
@@ -1114,9 +1530,11 @@ mod tests {
     async fn delete_message_enforces_ownership() {
         let pool = setup_service_pool().await;
         insert_fixture_message(&pool, "message-2", "delete-me").await;
+        let attachment_config = AttachmentConfig::default();
 
         let forbidden = delete_message(
             &pool,
+            &attachment_config,
             "member-user-id",
             DeleteMessageInput {
                 guild_slug: "test-guild".to_string(),
@@ -1130,6 +1548,7 @@ mod tests {
 
         let deleted = delete_message(
             &pool,
+            &attachment_config,
             "author-user-id",
             DeleteMessageInput {
                 guild_slug: "test-guild".to_string(),
@@ -1147,6 +1566,64 @@ mod tests {
             .await
             .unwrap();
         assert!(persisted.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_message_removes_attachment_file_from_storage() {
+        let pool = setup_service_pool().await;
+        insert_fixture_message(&pool, "message-delete-attachment", "delete-attachment").await;
+
+        let inserted_attachment = message_attachment::insert_message_attachment(
+            &pool,
+            "attachment-delete-1",
+            "message-delete-attachment",
+            "attachment-delete-1.png",
+            "delete.png",
+            "image/png",
+            3,
+            "2026-02-28T00:00:03Z",
+        )
+        .await
+        .unwrap();
+        assert!(inserted_attachment);
+
+        let upload_dir = std::env::temp_dir().join(format!(
+            "discool-message-delete-attachment-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let upload_dir_str = upload_dir.to_string_lossy().to_string();
+        let storage = FileStorageProvider::local(upload_dir_str.clone());
+        storage
+            .write("attachment-delete-1.png", b"png")
+            .await
+            .unwrap();
+        assert!(upload_dir.join("attachment-delete-1.png").exists());
+
+        let deleted = delete_message(
+            &pool,
+            &AttachmentConfig {
+                upload_dir: upload_dir_str,
+                max_size_bytes: 1024,
+            },
+            "author-user-id",
+            DeleteMessageInput {
+                guild_slug: "test-guild".to_string(),
+                channel_slug: "general".to_string(),
+                message_id: "message-delete-attachment".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(deleted.id, "message-delete-attachment");
+        assert!(
+            message_attachment::find_message_attachment_by_id(&pool, "attachment-delete-1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!upload_dir.join("attachment-delete-1.png").exists());
+
+        let _ = std::fs::remove_dir_all(&upload_dir);
     }
 
     #[tokio::test]

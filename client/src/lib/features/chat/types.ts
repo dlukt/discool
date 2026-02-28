@@ -6,10 +6,30 @@ export type ChatMessageReaction = {
   reacted: boolean
 }
 
+export type ChatMessageAttachment = {
+  id: string
+  storageKey: string
+  originalFilename: string
+  mimeType: string
+  sizeBytes: number
+  isImage: boolean
+  url: string
+}
+
 export type ChatMessageReactionWire = {
   emoji?: string
   count?: number
   reacted?: boolean
+}
+
+export type ChatMessageAttachmentWire = {
+  id?: string
+  storage_key?: string
+  original_filename?: string
+  mime_type?: string
+  size_bytes?: number
+  is_image?: boolean
+  url?: string
 }
 
 export type ChatMessage = {
@@ -27,6 +47,7 @@ export type ChatMessage = {
   updatedAt: string
   optimistic: boolean
   clientNonce?: string
+  attachments: ChatMessageAttachment[]
   reactions: ChatMessageReaction[]
 }
 
@@ -44,6 +65,7 @@ export type ChatMessageWire = {
   created_at: string
   updated_at?: string
   client_nonce?: string | null
+  attachments?: ChatMessageAttachmentWire[]
   reactions?: ChatMessageReactionWire[]
 }
 
@@ -76,6 +98,44 @@ export function toChatMessageReactions(
   return normalized
 }
 
+export function toChatMessageAttachments(
+  wireAttachments: ChatMessageAttachmentWire[] | undefined,
+): ChatMessageAttachment[] {
+  if (!Array.isArray(wireAttachments)) return []
+
+  return wireAttachments
+    .map((attachment) => {
+      const id = attachment.id?.trim()
+      const storageKey = attachment.storage_key?.trim()
+      const originalFilename = attachment.original_filename?.trim()
+      const mimeType = attachment.mime_type?.trim()
+      const url = attachment.url?.trim()
+      if (!id || !storageKey || !originalFilename || !mimeType || !url) {
+        return null
+      }
+      const sizeBytes =
+        typeof attachment.size_bytes === 'number' &&
+        Number.isFinite(attachment.size_bytes)
+          ? Math.max(0, Math.trunc(attachment.size_bytes))
+          : 0
+      if (sizeBytes <= 0) return null
+      return {
+        id,
+        storageKey,
+        originalFilename,
+        mimeType,
+        sizeBytes,
+        isImage:
+          attachment.is_image === true ||
+          mimeType.toLowerCase().startsWith('image/'),
+        url,
+      }
+    })
+    .filter(
+      (attachment): attachment is ChatMessageAttachment => attachment !== null,
+    )
+}
+
 export function toChatMessage(wire: ChatMessageWire): ChatMessage {
   return {
     id: wire.id,
@@ -95,6 +155,7 @@ export function toChatMessage(wire: ChatMessageWire): ChatMessage {
     updatedAt: wire.updated_at || wire.created_at,
     optimistic: false,
     clientNonce: wire.client_nonce || undefined,
+    attachments: toChatMessageAttachments(wire.attachments),
     reactions: toChatMessageReactions(wire.reactions),
   }
 }

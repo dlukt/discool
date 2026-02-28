@@ -2,6 +2,7 @@ pub mod auth_service;
 pub mod category_service;
 pub mod channel_service;
 pub mod email_service;
+pub mod file_storage_service;
 pub mod guild_invite_service;
 pub mod guild_service;
 pub mod message_service;
