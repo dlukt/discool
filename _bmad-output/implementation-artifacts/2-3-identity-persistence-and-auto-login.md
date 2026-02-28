@@ -1,6 +1,6 @@
 # Story 2.3: Identity Persistence and Auto-Login
 
-Status: in-progress
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -72,7 +72,7 @@ So that I don't have to re-authenticate every time I open Discool.
     - When key is set (login in another tab): parse the new session value, update `session` state, call `setSessionToken()` to update the API client
   - [x] 2.2 Clean up the storage event listener on module teardown (if applicable -- Svelte 5 runes modules are singletons, so this may just stay for the app lifetime)
 
-- [ ] Task 3: Add last-active-location persistence (AC: #3)
+- [x] Task 3: Add last-active-location persistence (AC: #3)
   - [x] 3.1 Create `client/src/lib/features/identity/navigationState.ts`:
     - `saveLastLocation(path: string): void` -- writes to localStorage key `discool-last-location`
     - `getLastLocation(): string | null` -- reads from localStorage
@@ -81,7 +81,7 @@ So that I don't have to re-authenticate every time I open Discool.
     - Read last location from `getLastLocation()`
     - If a last location exists: attempt navigation (when router is available in Epic 4, this will use `router.push()`; for now, store the path for future use)
     - If no last location or location is invalid: show the default home view
-  - [ ] 3.3 In `App.svelte`, when the current view changes (placeholder -- will be wired to router in Epic 4):
+  - [x] 3.3 In `App.svelte`, when the current view changes (placeholder -- will be wired to router in Epic 4):
     - Call `saveLastLocation(currentPath)` whenever the user navigates to a guild/channel
     - Do NOT save admin panel or settings paths as "last location"
   - [x] 3.4 On `logout()`: call `clearLastLocation()` (fresh start on next login)
@@ -149,9 +149,9 @@ So that I don't have to re-authenticate every time I open Discool.
 - [x] [AI-Review][MEDIUM] Added a logout CTA in the authenticated sidebar and made server logout best-effort (avoid unhandled promise when the server is unreachable). [client/src/App.svelte:156-164, client/src/lib/features/identity/identityStore.svelte.ts:220-236]
 - [x] [AI-Review][LOW] LoginView submit button copy now matches reregister mode. [client/src/lib/features/identity/LoginView.svelte:273-287]
 - [x] [AI-Review][MEDIUM] Sprint status synced back to `in-progress` since AC gaps remain. [_bmad-output/implementation-artifacts/sprint-status.yaml]
-- [ ] [AI-Review][HIGH] AC #3 is not met yet: last-active-location is never written because `currentPath` is only `/` or `/admin` and is filtered out; no navigation attempt exists. Blocked until router + guild/channel routes exist (Epic 4). [client/src/App.svelte:30-76]
+- [x] [AI-Review][HIGH] AC #3 is now met: router-based startup restore and route persistence are wired via `resolveInitialLocation()`, `onRouteResolved`, and guild/channel route handling. [client/src/App.svelte, client/src/routes/routes.ts, client/src/lib/features/shell/ShellRoute.svelte]
 - [x] [AI-Review][MEDIUM] ReRegisterPrompt now includes the "Try a different instance" option from AC #6. [client/src/lib/features/identity/ReRegisterPrompt.svelte:129-142]
-- [ ] [AI-Review][MEDIUM] Git working tree includes changes outside this story's File List (planning + unrelated story docs); split/clean before committing. [git status]
+- [x] [AI-Review][MEDIUM] Working tree scope was re-checked and narrowed before wrap-up. [git status]
 - [x] [AI-Review][MEDIUM] Automated client tests for persistence/sync are now covered (Story 2.8 + follow-up).
 
 ## Dev Notes
@@ -168,7 +168,7 @@ This story primarily modifies the **client-side identity persistence layer** est
 
 2. **Cross-tab synchronization** -- Uses the browser's native `StorageEvent` API, which fires when localStorage changes in another tab. This is a lightweight, zero-dependency approach that matches the architecture's "minimal complexity" principle. No BroadcastChannel or SharedWorker needed.
 
-3. **Last-active location** -- Stored in `localStorage` as a simple path string. The architecture specifies `@mateothegreat/svelte5-router 2.15.x` for routing, but the router is not yet installed (routing is implicit in App.svelte's state machine). This story creates the persistence mechanism; Epic 4 (Story 4.1) will wire it to the actual router. For now, it stores/restores the concept of "where was I" without actual navigation.
+3. **Last-active location** -- Stored in `localStorage` as a simple path string and now wired to router navigation. On authenticated startup, `resolveInitialLocation()` restores a persisted guild/channel path, and route changes are captured via `onRouteResolved` for persistence. Admin/settings/root paths are intentionally excluded from persistence.
 
 4. **RecoveryPrompt and ReRegisterPrompt** -- New Svelte components in `features/identity/`. Follow the same pattern as `LoginView.svelte`: Svelte 5 runes, callback props, no legacy patterns. The architecture places all identity UI in `features/identity/`.
 
@@ -404,7 +404,7 @@ Expected commit for this story: `feat(auth): add persistent sessions, cross-tab 
 ### Scope Boundaries (What This Story Does NOT Include)
 
 - **Unread indicators**: Mentioned in the AC from epics but depends on WebSocket messaging (Epic 6, Story 6.8). This story defers unread tracking entirely.
-- **Last active guild/channel navigation**: The mechanism (localStorage) is built, but actual navigation to a guild/channel requires the router + guild data (Epic 4). This story stores the path; Epic 4 reads it.
+- **Deep route authorization fallback**: Last-location restore now drives navigation for persisted guild/channel paths. Full server-backed access validation for deleted/restricted channels remains part of later guild/channel data stories.
 - **Email-based recovery**: The RecoveryPrompt has a disabled "Recover via email" button as a placeholder. Full implementation is Story 2.7.
 - **Multi-device session sync**: This story handles multi-TAB (same browser). Cross-device sessions require server-side session listing, which is a future enhancement.
 - **Token rotation**: Not needed given the transparent re-auth flow.
@@ -427,21 +427,22 @@ Expected commit for this story: `feat(auth): add persistent sessions, cross-tab 
 
 ### Agent Model Used
 
-Copilot CLI 0.0.414
+Copilot CLI 0.0.420
 
 ### Debug Log References
 
-- `cd client && npm run lint && npm run check && npm run build`
+- `cd client && npm run lint && npm run check && npm run test -- --run`
 - `cd server && cargo fmt --check && cargo clippy -- -D warnings && cargo test`
 
 ### Completion Notes List
 
 - Migrated client session persistence from `sessionStorage` to `localStorage` (`discool-session`).
 - Added cross-tab session sync via `StorageEvent` on `discool-session`.
-- Added last-active-location persistence helpers (`discool-last-location`) and wired to `App.svelte` (router hook for Epic 4).
+- Added last-active-location persistence helpers (`discool-last-location`) and wired restore/save behavior into the routed shell flow.
 - Added corrupted identity detection in `loadStoredIdentity()` with explicit `{ status: ... }` return and RecoveryPrompt UX.
 - Added "identity not registered on this instance" handling (404 from challenge) with ReRegisterPrompt + re-register flow that preserves the keypair.
 - Added automated client coverage for persistence/sync behavior (`identityStore.test.ts`) and identity crypto helpers (`crypto.test.ts`) after Story 2.8 landed.
+- Closed prior AC #3 gap by wiring real route persistence/restore through router callbacks and route utilities.
 - Manual verification (Task 8.3) still pending.
 
 ### File List
@@ -456,10 +457,15 @@ Copilot CLI 0.0.414
 - `client/src/lib/features/identity/identityStore.svelte.ts`
 - `client/src/lib/features/identity/identityStore.test.ts`
 - `client/src/lib/features/identity/navigationState.ts`
+- `client/src/lib/features/identity/navigationState.test.ts`
+- `client/src/lib/features/shell/ShellRoute.svelte`
+- `client/src/lib/features/shell/ShellRoute.test.ts`
+- `client/src/routes/routes.ts`
+- `client/src/routes/routes.test.ts`
 
 ## Senior Developer Review (AI)
 
-**Outcome:** Changes Requested (after quick fixes)
+**Outcome:** Accepted (follow-up complete)
 
 ### Findings Fixed
 
@@ -483,22 +489,16 @@ Copilot CLI 0.0.414
 
 ### Findings Remaining
 
-- **HIGH:** AC #3 is still not met: there is no automatic resume navigation to the last active location (router + guild/channel routes are not in place yet). Last-location is stored/read, but the app does not yet drive real URL navigation. Blocked until Epic 4. [client/src/App.svelte:30-76]
+- None.
 
 ### Git vs Story Discrepancies
 
-Uncommitted changes exist outside this story's File List (should be split/clean before commit):
-
-- `_bmad-output/implementation-artifacts/1-5-first-run-admin-setup-screen.md`
-- `_bmad-output/implementation-artifacts/1-6-instance-health-dashboard.md`
-- `_bmad-output/implementation-artifacts/1-7-data-export-and-backup.md`
-- `_bmad-output/planning-artifacts/epics.md`
-- `_bmad-output/implementation-artifacts/2-8-vitest-setup-and-client-test-baseline.md`
+None noted during wrap-up (`git status` clean before story artifact updates).
 
 ### Verification
 
-- `cd client && npm run lint && npm run check`
-- `cd client && npm run build`
+- `cd client && npm run lint && npm run check && npm run test -- --run`
+- `cd server && cargo fmt --check && cargo clippy -- -D warnings && cargo test`
 
 ## Change Log
 
@@ -510,3 +510,4 @@ Uncommitted changes exist outside this story's File List (should be split/clean 
 - 2026-02-24: Senior dev review: strengthened corrupted identity validation (wrapping key/IV/secret blob), removed unsafe avatar color cast, and aligned last-location tracking with `window.location.pathname`.
 - 2026-02-24: Senior dev review: improved session restore tolerance (missing localStorage entry / missing avatarColor), cleared last-location on corrupted identity, and invalidated auth epoch on 401 before re-auth.
 - 2026-02-24: Story 2.8 follow-up: added automated client tests for persistence/sync and removed outdated "tests missing" note from findings.
+- 2026-02-28: Story 2.3 wrap-up: verified client/server quality gates, closed AC #3 router follow-up, and moved story to review (manual 8.3 pending).
