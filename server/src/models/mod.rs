@@ -4,5 +4,6 @@ pub mod guild;
 pub mod guild_invite;
 pub mod guild_member;
 pub mod recovery_email;
+pub mod role;
 pub mod session;
 pub mod user;

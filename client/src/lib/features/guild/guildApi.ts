@@ -3,9 +3,14 @@ import { apiFetch } from '$lib/api'
 import {
   type CreateGuildInput,
   type CreateGuildInviteInput,
+  type CreateGuildRoleInput,
+  type DeleteGuildRoleResult,
+  type DeleteGuildRoleResultWire,
   type Guild,
   type GuildInvite,
   type GuildInviteWire,
+  type GuildRole,
+  type GuildRoleWire,
   type GuildWire,
   type InviteMetadata,
   type InviteMetadataWire,
@@ -15,13 +20,18 @@ import {
   type RevokeGuildInviteResultWire,
   toCreateGuildInputWire,
   toCreateGuildInviteInputWire,
+  toCreateGuildRoleInputWire,
+  toDeleteGuildRoleResult,
   toGuild,
   toGuildInvite,
+  toGuildRole,
   toInviteMetadata,
   toJoinGuildByInviteResult,
   toRevokeGuildInviteResult,
   toUpdateGuildInputWire,
+  toUpdateGuildRoleInputWire,
   type UpdateGuildInput,
+  type UpdateGuildRoleInput,
 } from './types'
 
 export function listGuilds(): Promise<Guild[]> {
@@ -60,6 +70,51 @@ export function uploadGuildIcon(guildSlug: string, file: File): Promise<Guild> {
       body: formData,
     },
   ).then(toGuild)
+}
+
+export function listRoles(guildSlug: string): Promise<GuildRole[]> {
+  return apiFetch<GuildRoleWire[]>(
+    `/api/v1/guilds/${encodeURIComponent(guildSlug)}/roles`,
+  ).then((roles) => roles.map(toGuildRole))
+}
+
+export function createRole(
+  guildSlug: string,
+  input: CreateGuildRoleInput,
+): Promise<GuildRole> {
+  return apiFetch<GuildRoleWire>(
+    `/api/v1/guilds/${encodeURIComponent(guildSlug)}/roles`,
+    {
+      method: 'POST',
+      body: JSON.stringify(toCreateGuildRoleInputWire(input)),
+    },
+  ).then(toGuildRole)
+}
+
+export function updateRole(
+  guildSlug: string,
+  roleId: string,
+  input: UpdateGuildRoleInput,
+): Promise<GuildRole> {
+  return apiFetch<GuildRoleWire>(
+    `/api/v1/guilds/${encodeURIComponent(guildSlug)}/roles/${encodeURIComponent(roleId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(toUpdateGuildRoleInputWire(input)),
+    },
+  ).then(toGuildRole)
+}
+
+export function deleteRole(
+  guildSlug: string,
+  roleId: string,
+): Promise<DeleteGuildRoleResult> {
+  return apiFetch<DeleteGuildRoleResultWire>(
+    `/api/v1/guilds/${encodeURIComponent(guildSlug)}/roles/${encodeURIComponent(roleId)}`,
+    {
+      method: 'DELETE',
+    },
+  ).then(toDeleteGuildRoleResult)
 }
 
 export function listInvites(guildSlug: string): Promise<GuildInvite[]> {

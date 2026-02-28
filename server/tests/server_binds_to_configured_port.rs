@@ -2493,6 +2493,188 @@ async fn categories_mutations_reject_non_owner() {
 }
 
 #[tokio::test]
+async fn roles_mutations_require_authentication() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let create_body = json!({ "name": "Moderators", "color": "#3366ff" }).to_string();
+    let res = http_post(&addr, "/api/v1/guilds/lobby/roles", &create_body).await;
+    assert_eq!(response_status(&res), 401);
+
+    let update_body = json!({ "name": "Moderation", "color": "#6633ff" }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        "/api/v1/guilds/lobby/roles/example-role",
+        &update_body,
+        "bad-token",
+    )
+    .await;
+    assert_eq!(response_status(&res), 401);
+
+    let res = http_delete_with_bearer(
+        &addr,
+        "/api/v1/guilds/lobby/roles/example-role",
+        "bad-token",
+    )
+    .await;
+    assert_eq!(response_status(&res), 401);
+}
+
+#[tokio::test]
+async fn roles_mutations_reject_non_owner() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "owner-roles", [56u8; 32]).await;
+    let other_token = register_and_authenticate(&addr, "other-roles", [57u8; 32]).await;
+    let guild_body = json!({ "name": "Role Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap();
+
+    let roles_path = format!("/api/v1/guilds/{guild_slug}/roles");
+    let create_role = json!({ "name": "Moderators", "color": "#3366ff" }).to_string();
+    let res = http_post_with_bearer(&addr, &roles_path, &create_role, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let created_role: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let role_id = created_role["data"]["id"].as_str().unwrap();
+
+    let create_other = json!({ "name": "Ops", "color": "#112233" }).to_string();
+    let res = http_post_with_bearer(&addr, &roles_path, &create_other, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+    let forbidden: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(forbidden["error"]["code"], json!("FORBIDDEN"));
+
+    let update_path = format!("/api/v1/guilds/{guild_slug}/roles/{role_id}");
+    let update_role = json!({ "name": "Ops Team", "color": "#445566" }).to_string();
+    let res = http_patch_with_bearer(&addr, &update_path, &update_role, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let delete_path = format!("/api/v1/guilds/{guild_slug}/roles/{role_id}");
+    let res = http_delete_with_bearer(&addr, &delete_path, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+}
+
+#[tokio::test]
+async fn roles_owner_crud_hierarchy_and_delete_cleanup_work() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "owner-role-crud", [58u8; 32]).await;
+    let _member_token = register_and_authenticate(&addr, "member-role-crud", [59u8; 32]).await;
+    let guild_body = json!({ "name": "Owner Role Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap();
+    let guild_id = guild["data"]["id"].as_str().unwrap();
+
+    let roles_path = format!("/api/v1/guilds/{guild_slug}/roles");
+    let res = http_response_with_bearer(&addr, &roles_path, &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+    let listed: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let listed_roles = listed["data"].as_array().unwrap();
+    assert_eq!(listed_roles[0]["name"], json!("Owner"));
+    assert_eq!(listed_roles[0]["is_system"], json!(true));
+    assert_eq!(listed_roles.last().unwrap()["name"], json!("@everyone"));
+    assert_eq!(listed_roles.last().unwrap()["is_default"], json!(true));
+    let everyone_role_id = listed_roles.last().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let create_body = json!({ "name": "Moderators", "color": "#3366ff" }).to_string();
+    let res = http_post_with_bearer(&addr, &roles_path, &create_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let created: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let custom_role_id = created["data"]["id"].as_str().unwrap().to_string();
+    assert_eq!(created["data"]["name"], json!("Moderators"));
+
+    let update_path = format!("/api/v1/guilds/{guild_slug}/roles/{custom_role_id}");
+    let update_body = json!({ "name": "Moderation Team", "color": "#6633ff" }).to_string();
+    let res = http_patch_with_bearer(&addr, &update_path, &update_body, &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+    let updated: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(updated["data"]["name"], json!("Moderation Team"));
+    assert_eq!(updated["data"]["color"], json!("#6633ff"));
+
+    let url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let member_id = sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username = ?1")
+        .bind("member-role-crud")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO role_assignments (guild_id, user_id, role_id, assigned_at) VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(guild_id)
+    .bind(member_id)
+    .bind(&custom_role_id)
+    .bind("2026-02-28T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    let assigned_before =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM role_assignments WHERE role_id = ?1")
+            .bind(&custom_role_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(assigned_before, 1);
+
+    let delete_path = format!("/api/v1/guilds/{guild_slug}/roles/{custom_role_id}");
+    let res = http_delete_with_bearer(&addr, &delete_path, &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+    let deleted: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(deleted["data"]["deleted_id"], json!(custom_role_id));
+    assert_eq!(deleted["data"]["removed_assignment_count"], json!(1));
+
+    let assigned_after =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM role_assignments WHERE role_id = ?1")
+            .bind(&custom_role_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(assigned_after, 0);
+    drop(pool);
+
+    let delete_everyone_path = format!("/api/v1/guilds/{guild_slug}/roles/{everyone_role_id}");
+    let res = http_delete_with_bearer(&addr, &delete_everyone_path, &owner_token).await;
+    assert_eq!(response_status(&res), 422);
+}
+
+#[tokio::test]
 async fn invites_mutations_require_authentication() {
     use serde_json::json;
 

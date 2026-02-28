@@ -21,6 +21,7 @@ mod guilds;
 mod health;
 mod instance;
 mod invites;
+mod roles;
 mod users;
 
 // Keep `connect-src` strict until we have a safe, non-Host-header-derived allow-list for WebSockets.
@@ -62,6 +63,10 @@ pub fn router(state: AppState) -> Router {
             get(categories::list_categories).post(categories::create_category),
         )
         .route(
+            "/guilds/{guild_slug}/roles",
+            get(roles::list_roles).post(roles::create_role),
+        )
+        .route(
             "/guilds/{guild_slug}/invites/{invite_code}",
             delete(invites::revoke_invite),
         )
@@ -84,6 +89,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/guilds/{guild_slug}/channels/{channel_slug}",
             patch(channels::update_channel).delete(channels::delete_channel),
+        )
+        .route(
+            "/guilds/{guild_slug}/roles/{role_id}",
+            patch(roles::update_role).delete(roles::delete_role),
         )
         .route("/guilds/{guild_slug}", patch(guilds::update_guild))
         .route(

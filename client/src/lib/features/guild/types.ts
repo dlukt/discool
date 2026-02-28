@@ -21,6 +21,34 @@ export type UpdateGuildInput = {
   description?: string | null
 }
 
+export type GuildRole = {
+  id: string
+  name: string
+  color: string
+  position: number
+  permissionsBitflag: number
+  isDefault: boolean
+  isSystem: boolean
+  canEdit: boolean
+  canDelete: boolean
+  createdAt: string
+}
+
+export type CreateGuildRoleInput = {
+  name: string
+  color: string
+}
+
+export type UpdateGuildRoleInput = {
+  name?: string
+  color?: string
+}
+
+export type DeleteGuildRoleResult = {
+  deletedId: string
+  removedAssignmentCount: number
+}
+
 export type InviteType = 'reusable' | 'single_use'
 
 export type GuildInvite = {
@@ -89,6 +117,34 @@ export type CreateGuildInputWire = {
 export type UpdateGuildInputWire = {
   name?: string
   description?: string | null
+}
+
+export type GuildRoleWire = {
+  id: string
+  name: string
+  color: string
+  position: number
+  permissions_bitflag: number
+  is_default: boolean
+  is_system: boolean
+  can_edit: boolean
+  can_delete: boolean
+  created_at: string
+}
+
+export type CreateGuildRoleInputWire = {
+  name: string
+  color: string
+}
+
+export type UpdateGuildRoleInputWire = {
+  name?: string
+  color?: string
+}
+
+export type DeleteGuildRoleResultWire = {
+  deleted_id: string
+  removed_assignment_count: number
 }
 
 export type GuildInviteWire = {
@@ -171,6 +227,52 @@ export function toUpdateGuildInputWire(
     wire.description = input.description
   }
   return wire
+}
+
+export function toGuildRole(wire: GuildRoleWire): GuildRole {
+  return {
+    id: wire.id,
+    name: wire.name,
+    color: wire.color,
+    position: wire.position,
+    permissionsBitflag: wire.permissions_bitflag,
+    isDefault: wire.is_default,
+    isSystem: wire.is_system,
+    canEdit: wire.can_edit,
+    canDelete: wire.can_delete,
+    createdAt: wire.created_at,
+  }
+}
+
+export function toCreateGuildRoleInputWire(
+  input: CreateGuildRoleInput,
+): CreateGuildRoleInputWire {
+  return {
+    name: input.name,
+    color: input.color,
+  }
+}
+
+export function toUpdateGuildRoleInputWire(
+  input: UpdateGuildRoleInput,
+): UpdateGuildRoleInputWire {
+  const wire: UpdateGuildRoleInputWire = {}
+  if (input.name !== undefined) {
+    wire.name = input.name
+  }
+  if (input.color !== undefined) {
+    wire.color = input.color
+  }
+  return wire
+}
+
+export function toDeleteGuildRoleResult(
+  wire: DeleteGuildRoleResultWire,
+): DeleteGuildRoleResult {
+  return {
+    deletedId: wire.deleted_id,
+    removedAssignmentCount: wire.removed_assignment_count,
+  }
 }
 
 export function toGuildInvite(wire: GuildInviteWire): GuildInvite {

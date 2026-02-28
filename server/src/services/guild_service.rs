@@ -11,6 +11,7 @@ use crate::{
     models::{
         channel,
         guild::{self, Guild, GuildResponse},
+        role,
     },
 };
 
@@ -19,6 +20,9 @@ const MAX_GUILD_DESCRIPTION_CHARS: usize = 512;
 const MAX_GUILD_SLUG_CHARS: usize = 48;
 const MAX_GUILD_SLUG_ATTEMPTS: usize = 100;
 const DEFAULT_CHANNEL_SLUG: &str = "general";
+const DEFAULT_EVERYONE_ROLE_NAME: &str = "@everyone";
+const DEFAULT_EVERYONE_ROLE_COLOR: &str = "#99aab5";
+const DEFAULT_EVERYONE_ROLE_POSITION: i64 = 2_147_483_647;
 
 #[derive(Debug, Clone)]
 pub struct CreateGuildInput {
@@ -84,6 +88,24 @@ pub async fn create_guild(
             if !default_channel_inserted {
                 return Err(AppError::Internal(
                     "Failed to create default channel".to_string(),
+                ));
+            }
+            let default_role_inserted = role::insert_role(
+                pool,
+                &format!("role-everyone-{id}"),
+                &id,
+                DEFAULT_EVERYONE_ROLE_NAME,
+                DEFAULT_EVERYONE_ROLE_COLOR,
+                DEFAULT_EVERYONE_ROLE_POSITION,
+                0,
+                true,
+                &created_at,
+                &created_at,
+            )
+            .await?;
+            if !default_role_inserted {
+                return Err(AppError::Internal(
+                    "Failed to create default role".to_string(),
                 ));
             }
             let record = guild::find_guild_by_slug(pool, &slug)

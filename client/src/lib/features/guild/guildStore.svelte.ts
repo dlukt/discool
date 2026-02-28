@@ -4,11 +4,23 @@ import {
 } from '$lib/features/identity/navigationState'
 import {
   createGuild as createGuildApi,
+  createRole as createRoleApi,
+  deleteRole as deleteRoleApi,
   listGuilds as listGuildsApi,
+  listRoles as listRolesApi,
   updateGuild as updateGuildApi,
+  updateRole as updateRoleApi,
   uploadGuildIcon as uploadGuildIconApi,
 } from './guildApi'
-import type { CreateGuildInput, Guild, UpdateGuildInput } from './types'
+import type {
+  CreateGuildInput,
+  CreateGuildRoleInput,
+  DeleteGuildRoleResult,
+  Guild,
+  GuildRole,
+  UpdateGuildInput,
+  UpdateGuildRoleInput,
+} from './types'
 
 function normalizeGuildOrder(order: string[]): string[] {
   return [...new Set(order.map((slug) => slug.trim()).filter(Boolean))]
@@ -53,8 +65,29 @@ function upsertGuild(guild: Guild): void {
   guildState.guilds = applyGuildOrder(nextGuilds)
 }
 
+function setRolesForGuild(guildSlug: string, roles: GuildRole[]): GuildRole[] {
+  guildState.rolesByGuild[guildSlug] = [...roles]
+  return guildState.rolesByGuild[guildSlug]
+}
+
+function replaceRoleInGuild(guildSlug: string, role: GuildRole): GuildRole[] {
+  const existing = guildState.rolesByGuild[guildSlug] ?? []
+  const index = existing.findIndex((item) => item.id === role.id)
+  let nextRoles: GuildRole[]
+  if (index >= 0) {
+    nextRoles = [...existing]
+    nextRoles[index] = role
+  } else {
+    nextRoles = [...existing, role]
+  }
+  nextRoles.sort((left, right) => left.position - right.position)
+  guildState.rolesByGuild[guildSlug] = nextRoles
+  return nextRoles
+}
+
 export const guildState = $state({
   guilds: [] as Guild[],
+  rolesByGuild: {} as Record<string, GuildRole[]>,
   loading: false,
   saving: false,
   loaded: false,
@@ -125,6 +158,90 @@ export const guildState = $state({
     }
   },
 
+  loadRoles: async (guildSlug: string, force = false): Promise<GuildRole[]> => {
+    if (!guildSlug) return []
+    if (guildState.rolesByGuild[guildSlug] && !force) {
+      return guildState.rolesByGuild[guildSlug]
+    }
+
+    guildState.error = null
+    try {
+      return setRolesForGuild(guildSlug, await listRolesApi(guildSlug))
+    } catch (err) {
+      guildState.error =
+        err instanceof Error ? err.message : 'Failed to load roles'
+      throw err
+    }
+  },
+
+  createRole: async (
+    guildSlug: string,
+    input: CreateGuildRoleInput,
+  ): Promise<GuildRole> => {
+    guildState.saving = true
+    guildState.error = null
+    try {
+      const created = await createRoleApi(guildSlug, input)
+      replaceRoleInGuild(guildSlug, created)
+      await guildState.loadRoles(guildSlug, true)
+      return created
+    } catch (err) {
+      guildState.error =
+        err instanceof Error ? err.message : 'Failed to create role'
+      throw err
+    } finally {
+      guildState.saving = false
+    }
+  },
+
+  updateRole: async (
+    guildSlug: string,
+    roleId: string,
+    input: UpdateGuildRoleInput,
+  ): Promise<GuildRole> => {
+    guildState.saving = true
+    guildState.error = null
+    try {
+      const updated = await updateRoleApi(guildSlug, roleId, input)
+      replaceRoleInGuild(guildSlug, updated)
+      await guildState.loadRoles(guildSlug, true)
+      return updated
+    } catch (err) {
+      guildState.error =
+        err instanceof Error ? err.message : 'Failed to update role'
+      throw err
+    } finally {
+      guildState.saving = false
+    }
+  },
+
+  deleteRole: async (
+    guildSlug: string,
+    roleId: string,
+  ): Promise<DeleteGuildRoleResult> => {
+    guildState.saving = true
+    guildState.error = null
+    try {
+      const deleted = await deleteRoleApi(guildSlug, roleId)
+      const existing = guildState.rolesByGuild[guildSlug] ?? []
+      guildState.rolesByGuild[guildSlug] = existing.filter(
+        (role) => role.id !== deleted.deletedId,
+      )
+      await guildState.loadRoles(guildSlug, true)
+      return deleted
+    } catch (err) {
+      guildState.error =
+        err instanceof Error ? err.message : 'Failed to delete role'
+      throw err
+    } finally {
+      guildState.saving = false
+    }
+  },
+
+  rolesForGuild: (guildSlug: string): GuildRole[] => [
+    ...(guildState.rolesByGuild[guildSlug] ?? []),
+  ],
+
   bySlug: (guildSlug: string): Guild | null =>
     guildState.guilds.find((guild) => guild.slug === guildSlug) ?? null,
 
@@ -139,6 +256,7 @@ export const guildState = $state({
     guildState.loading = false
     guildState.saving = false
     guildState.loaded = false
+    guildState.rolesByGuild = {}
     guildState.error = null
   },
 })
