@@ -1,4 +1,8 @@
 import {
+  getGuildOrder,
+  saveGuildOrder,
+} from '$lib/features/identity/navigationState'
+import {
   createGuild as createGuildApi,
   listGuilds as listGuildsApi,
   updateGuild as updateGuildApi,
@@ -6,14 +10,47 @@ import {
 } from './guildApi'
 import type { CreateGuildInput, Guild, UpdateGuildInput } from './types'
 
+function normalizeGuildOrder(order: string[]): string[] {
+  return [...new Set(order.map((slug) => slug.trim()).filter(Boolean))]
+}
+
+function applyGuildOrder(guilds: Guild[], order = getGuildOrder()): Guild[] {
+  const normalizedOrder = normalizeGuildOrder(order)
+  if (normalizedOrder.length === 0) {
+    return [...guilds]
+  }
+
+  const orderIndex = new Map(
+    normalizedOrder.map((slug, index) => [slug, index] as const),
+  )
+  const sourceIndex = new Map(
+    guilds.map((guild, index) => [guild.slug, index] as const),
+  )
+
+  return [...guilds].sort((left, right) => {
+    const leftOrder = orderIndex.get(left.slug)
+    const rightOrder = orderIndex.get(right.slug)
+    if (leftOrder !== undefined && rightOrder !== undefined) {
+      return leftOrder - rightOrder
+    }
+    if (leftOrder !== undefined) return -1
+    if (rightOrder !== undefined) return 1
+    return (
+      (sourceIndex.get(left.slug) ?? 0) - (sourceIndex.get(right.slug) ?? 0)
+    )
+  })
+}
+
 function upsertGuild(guild: Guild): void {
   const index = guildState.guilds.findIndex((item) => item.slug === guild.slug)
+  let nextGuilds: Guild[]
   if (index >= 0) {
-    guildState.guilds[index] = guild
-    guildState.guilds = [...guildState.guilds]
+    nextGuilds = [...guildState.guilds]
+    nextGuilds[index] = guild
   } else {
-    guildState.guilds = [...guildState.guilds, guild]
+    nextGuilds = [...guildState.guilds, guild]
   }
+  guildState.guilds = applyGuildOrder(nextGuilds)
 }
 
 export const guildState = $state({
@@ -30,7 +67,7 @@ export const guildState = $state({
     guildState.loading = true
     guildState.error = null
     try {
-      guildState.guilds = await listGuildsApi()
+      guildState.guilds = applyGuildOrder(await listGuildsApi())
       guildState.loaded = true
       return guildState.guilds
     } catch (err) {
@@ -90,6 +127,12 @@ export const guildState = $state({
 
   bySlug: (guildSlug: string): Guild | null =>
     guildState.guilds.find((guild) => guild.slug === guildSlug) ?? null,
+
+  setGuildOrder: (order: string[]): void => {
+    const normalizedOrder = normalizeGuildOrder(order)
+    saveGuildOrder(normalizedOrder)
+    guildState.guilds = applyGuildOrder(guildState.guilds, normalizedOrder)
+  },
 
   clear: (): void => {
     guildState.guilds = []

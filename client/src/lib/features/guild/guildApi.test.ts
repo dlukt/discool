@@ -9,6 +9,7 @@ import {
   createInvite,
   getInviteMetadata,
   joinGuildByInvite,
+  listGuilds,
   listInvites,
   revokeInvite,
 } from './guildApi'
@@ -146,5 +147,61 @@ describe('guildApi invites', () => {
       method: 'POST',
       body: '{}',
     })
+  })
+})
+
+describe('guildApi guild listing', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('maps optional activity and navigation fields with backward compatibility', async () => {
+    vi.mocked(apiFetch).mockResolvedValue([
+      {
+        id: 'guild-1',
+        slug: 'lobby',
+        name: 'Lobby',
+        default_channel_slug: 'general',
+        is_owner: true,
+        created_at: '2026-02-28T00:00:00.000Z',
+        has_unread_activity: true,
+        last_viewed_channel_slug: 'announcements',
+      },
+      {
+        id: 'guild-2',
+        slug: 'makers',
+        name: 'Makers',
+        default_channel_slug: 'general',
+        is_owner: false,
+        created_at: '2026-02-28T00:00:00.000Z',
+      },
+    ])
+
+    await expect(listGuilds()).resolves.toEqual([
+      {
+        id: 'guild-1',
+        slug: 'lobby',
+        name: 'Lobby',
+        description: undefined,
+        defaultChannelSlug: 'general',
+        lastViewedChannelSlug: 'announcements',
+        hasUnreadActivity: true,
+        isOwner: true,
+        iconUrl: undefined,
+        createdAt: '2026-02-28T00:00:00.000Z',
+      },
+      {
+        id: 'guild-2',
+        slug: 'makers',
+        name: 'Makers',
+        description: undefined,
+        defaultChannelSlug: 'general',
+        lastViewedChannelSlug: undefined,
+        hasUnreadActivity: undefined,
+        isOwner: false,
+        iconUrl: undefined,
+        createdAt: '2026-02-28T00:00:00.000Z',
+      },
+    ])
   })
 })

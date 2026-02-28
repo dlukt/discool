@@ -23,6 +23,7 @@ import LoginView from '$lib/features/identity/LoginView.svelte'
 import {
   getLastLocation,
   saveLastLocation,
+  saveLastViewedChannel,
 } from '$lib/features/identity/navigationState'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import RecoveryPrompt from '$lib/features/identity/RecoveryPrompt.svelte'
@@ -297,6 +298,9 @@ function handleShellRouteResolved(path: string): void {
   if (!identityState.session) return
   if (!isPersistableLocation(path)) return
   saveLastLocation(path)
+  const locationMatch = path.match(/^\/([^/]+)\/([^/]+)$/)
+  if (!locationMatch?.[1] || !locationMatch?.[2]) return
+  saveLastViewedChannel(locationMatch[1], locationMatch[2])
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.

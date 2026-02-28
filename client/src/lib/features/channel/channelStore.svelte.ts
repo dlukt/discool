@@ -51,6 +51,27 @@ function replaceCategory(updated: ChannelCategory): void {
   )
 }
 
+function cacheGuildData(
+  guildSlug: string,
+  channels: Channel[],
+  categories: ChannelCategory[],
+): void {
+  channelState.cachedChannelsByGuild[guildSlug] = [...channels]
+  channelState.cachedCategoriesByGuild[guildSlug] = [...categories]
+}
+
+function activateGuildFromCache(guildSlug: string): Channel[] {
+  channelState.channels = [
+    ...(channelState.cachedChannelsByGuild[guildSlug] ?? []),
+  ]
+  channelState.categories = [
+    ...(channelState.cachedCategoriesByGuild[guildSlug] ?? []),
+  ]
+  channelState.activeGuild = guildSlug
+  channelState.loadedByGuild[guildSlug] = true
+  return channelState.channels
+}
+
 export const channelState = $state({
   activeGuild: null as string | null,
   channels: [] as Channel[],
@@ -58,6 +79,8 @@ export const channelState = $state({
   loading: false,
   saving: false,
   loadedByGuild: {} as Record<string, boolean>,
+  cachedChannelsByGuild: {} as Record<string, Channel[]>,
+  cachedCategoriesByGuild: {} as Record<string, ChannelCategory[]>,
   error: null as string | null,
 
   loadChannels: async (
@@ -69,6 +92,18 @@ export const channelState = $state({
       channelState.categories = []
       channelState.activeGuild = null
       return channelState.channels
+    }
+    if (
+      !force &&
+      channelState.cachedChannelsByGuild[guildSlug] &&
+      channelState.cachedCategoriesByGuild[guildSlug]
+    ) {
+      if (channelState.loading) {
+        latestLoadRequestToken += 1
+      }
+      channelState.loading = false
+      channelState.error = null
+      return activateGuildFromCache(guildSlug)
     }
     if (
       channelState.loading &&
@@ -101,6 +136,7 @@ export const channelState = $state({
       channelState.categories = categories
       channelState.activeGuild = guildSlug
       channelState.loadedByGuild[guildSlug] = true
+      cacheGuildData(guildSlug, channelState.channels, channelState.categories)
       return channelState.channels
     } catch (err) {
       if (requestToken !== latestLoadRequestToken) {
@@ -127,6 +163,7 @@ export const channelState = $state({
       channelState.activeGuild = guildSlug
       replaceChannel(created)
       channelState.loadedByGuild[guildSlug] = true
+      cacheGuildData(guildSlug, channelState.channels, channelState.categories)
       return created
     } catch (err) {
       channelState.error =
@@ -149,6 +186,7 @@ export const channelState = $state({
       channelState.activeGuild = guildSlug
       replaceChannel(updated)
       channelState.loadedByGuild[guildSlug] = true
+      cacheGuildData(guildSlug, channelState.channels, channelState.categories)
       return updated
     } catch (err) {
       channelState.error =
@@ -172,6 +210,7 @@ export const channelState = $state({
       )
       channelState.activeGuild = guildSlug
       channelState.loadedByGuild[guildSlug] = true
+      cacheGuildData(guildSlug, channelState.channels, channelState.categories)
       return deleted
     } catch (err) {
       channelState.error =
@@ -193,6 +232,7 @@ export const channelState = $state({
       channelState.channels = reordered
       channelState.activeGuild = guildSlug
       channelState.loadedByGuild[guildSlug] = true
+      cacheGuildData(guildSlug, channelState.channels, channelState.categories)
       return reordered
     } catch (err) {
       channelState.error =
@@ -216,6 +256,7 @@ export const channelState = $state({
       channelState.channels = reordered
       channelState.activeGuild = guildSlug
       channelState.loadedByGuild[guildSlug] = true
+      cacheGuildData(guildSlug, channelState.channels, channelState.categories)
       return reordered
     } catch (err) {
       channelState.error =
@@ -303,6 +344,7 @@ export const channelState = $state({
       channelState.activeGuild = guildSlug
       replaceCategory(created)
       channelState.loadedByGuild[guildSlug] = true
+      cacheGuildData(guildSlug, channelState.channels, channelState.categories)
       return created
     } catch (err) {
       channelState.error =
@@ -340,6 +382,7 @@ export const channelState = $state({
         )
       }
       channelState.loadedByGuild[guildSlug] = true
+      cacheGuildData(guildSlug, channelState.channels, channelState.categories)
       return updated
     } catch (err) {
       channelState.error =
@@ -370,6 +413,7 @@ export const channelState = $state({
       channelState.channels = refreshed
       channelState.activeGuild = guildSlug
       channelState.loadedByGuild[guildSlug] = true
+      cacheGuildData(guildSlug, channelState.channels, channelState.categories)
       return deleted
     } catch (err) {
       channelState.error =
@@ -391,6 +435,7 @@ export const channelState = $state({
       channelState.categories = reordered
       channelState.activeGuild = guildSlug
       channelState.loadedByGuild[guildSlug] = true
+      cacheGuildData(guildSlug, channelState.channels, channelState.categories)
       return reordered
     } catch (err) {
       channelState.error =
@@ -417,6 +462,7 @@ export const channelState = $state({
       replaceCategory(updated)
       channelState.activeGuild = guildSlug
       channelState.loadedByGuild[guildSlug] = true
+      cacheGuildData(guildSlug, channelState.channels, channelState.categories)
       return updated
     } catch (err) {
       channelState.error =
@@ -439,6 +485,8 @@ export const channelState = $state({
     channelState.loading = false
     channelState.saving = false
     channelState.loadedByGuild = {}
+    channelState.cachedChannelsByGuild = {}
+    channelState.cachedCategoriesByGuild = {}
     channelState.error = null
   },
 })

@@ -4,6 +4,8 @@ export type Guild = {
   name: string
   description?: string
   defaultChannelSlug: string
+  lastViewedChannelSlug?: string
+  hasUnreadActivity?: boolean
   isOwner: boolean
   iconUrl?: string
   createdAt: string
@@ -72,6 +74,8 @@ export type GuildWire = {
   name: string
   description?: string
   default_channel_slug: string
+  last_viewed_channel_slug?: string
+  has_unread_activity?: boolean
   is_owner: boolean
   icon_url?: string
   created_at: string
@@ -139,6 +143,8 @@ export function toGuild(wire: GuildWire): Guild {
     name: wire.name,
     description: wire.description,
     defaultChannelSlug: wire.default_channel_slug,
+    lastViewedChannelSlug: wire.last_viewed_channel_slug,
+    hasUnreadActivity: wire.has_unread_activity,
     isOwner: wire.is_owner,
     iconUrl: wire.icon_url,
     createdAt: wire.created_at,

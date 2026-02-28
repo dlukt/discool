@@ -1,11 +1,12 @@
 <script lang="ts">
-// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
-import { goto, route as routerLink } from '@mateothegreat/svelte5-router'
+import { goto } from '@mateothegreat/svelte5-router'
 import { onMount } from 'svelte'
 
 import { ApiError } from '$lib/api'
+import { getLastViewedChannel } from '$lib/features/identity/navigationState'
 
 import { guildState } from './guildStore.svelte'
+import type { Guild } from './types'
 
 const MAX_ICON_BYTES = 2 * 1024 * 1024
 const allowedIconTypes = new Set(['image/png', 'image/jpeg', 'image/webp'])
@@ -18,7 +19,6 @@ type Props = {
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let { activeGuild, activeChannel }: Props = $props()
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let guilds = $derived(guildState.guilds)
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let createDialogOpen = $state(false)
@@ -30,6 +30,7 @@ let createSubmitting = $state(false)
 let selectedIcon = $state<File | null>(null)
 let iconError = $state<string | null>(null)
 let failedIcons = $state<Record<string, boolean>>({})
+let draggedGuildSlug = $state<string | null>(null)
 
 onMount(() => {
   void guildState.loadGuilds().catch(() => {
@@ -129,51 +130,201 @@ async function handleCreateSubmit(event: SubmitEvent) {
 function onGuildIconError(slug: string) {
   failedIcons = { ...failedIcons, [slug]: true }
 }
+
+function resolveTargetChannel(guild: Guild): string {
+  return (
+    getLastViewedChannel(guild.slug) ??
+    guild.lastViewedChannelSlug ??
+    guild.defaultChannelSlug ??
+    activeChannel
+  )
+}
+
+async function goToGuild(guild: Guild): Promise<void> {
+  await goto(`/${guild.slug}/${resolveTargetChannel(guild)}`)
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+async function goHome(): Promise<void> {
+  await goto('/')
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function tooltipIdForGuild(guildSlug: string): string {
+  return `guild-tooltip-${guildSlug}`
+}
+
+function focusGuildButtonByOffset(source: HTMLElement, offset: number): void {
+  const rail = source.closest('[data-testid="guild-rail"]')
+  if (!rail) return
+  const guildButtons = [
+    ...rail.querySelectorAll<HTMLButtonElement>(
+      '[data-guild-nav-button="true"]',
+    ),
+  ]
+  if (guildButtons.length === 0) return
+  const currentIndex = guildButtons.indexOf(source as HTMLButtonElement)
+  if (currentIndex < 0) return
+  const targetIndex =
+    (currentIndex + offset + guildButtons.length) % guildButtons.length
+  guildButtons[targetIndex]?.focus()
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function onGuildKeydown(event: KeyboardEvent, guild: Guild): void {
+  const source = event.currentTarget as HTMLElement | null
+  if (!source) return
+
+  if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+    event.preventDefault()
+    focusGuildButtonByOffset(source, 1)
+    return
+  }
+  if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+    event.preventDefault()
+    focusGuildButtonByOffset(source, -1)
+    return
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    void goToGuild(guild)
+  }
+}
+
+function resolveDraggedGuildSlug(event: DragEvent): string | null {
+  return draggedGuildSlug ?? event.dataTransfer?.getData('text/plain') ?? null
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function onGuildDragStart(event: DragEvent, guildSlug: string): void {
+  draggedGuildSlug = guildSlug
+  event.dataTransfer?.setData('text/plain', guildSlug)
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function onGuildDragOver(event: DragEvent): void {
+  const sourceSlug = resolveDraggedGuildSlug(event)
+  if (!sourceSlug) return
+  event.preventDefault()
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move'
+  }
+}
+
+function persistGuildOrder(sourceSlug: string, targetSlug: string): void {
+  const slugs = guilds.map((guild) => guild.slug)
+  const sourceIndex = slugs.indexOf(sourceSlug)
+  const targetIndex = slugs.indexOf(targetSlug)
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return
+  const [moved] = slugs.splice(sourceIndex, 1)
+  slugs.splice(targetIndex, 0, moved)
+  guildState.setGuildOrder(slugs)
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function onGuildDrop(event: DragEvent, targetSlug: string): void {
+  event.preventDefault()
+  const sourceSlug = resolveDraggedGuildSlug(event)
+  draggedGuildSlug = null
+  if (!sourceSlug || sourceSlug === targetSlug) return
+  persistGuildOrder(sourceSlug, targetSlug)
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function onGuildDragEnd(): void {
+  draggedGuildSlug = null
+}
 </script>
 
 <div
   class="flex h-full w-full flex-col items-center gap-3 border-r border-border bg-sidebar py-3"
   data-testid="guild-rail"
 >
-  <a
-    class="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-fire text-sm font-semibold text-fire-foreground"
-    href="/"
-    use:routerLink
-    aria-label="Go to home"
+  <button
+    type="button"
+    class="inline-flex h-12 w-12 items-center justify-center rounded-full bg-fire text-sm font-semibold text-fire-foreground transition-opacity hover:opacity-90"
+    aria-label="Home"
+    data-testid="guild-rail-home"
+    onclick={() => void goHome()}
   >
-    D
-  </a>
+    H
+  </button>
 
-  <nav class="flex w-full flex-1 flex-col items-center gap-2 overflow-y-auto" aria-label="Guild navigation">
+  <nav
+    class="flex w-full flex-1 flex-col items-center gap-2 overflow-y-auto"
+    aria-label="Guild navigation"
+    role="list"
+  >
     {#each guilds as guild}
-      <a
-        class={`inline-flex h-10 w-10 items-center justify-center rounded-xl border text-xs font-semibold transition-colors ${
-          guild.slug === activeGuild
-            ? 'border-primary bg-primary/20 text-primary'
-            : 'border-border bg-muted text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
-        }`}
-        href={`/${guild.slug}/${guild.defaultChannelSlug || activeChannel}`}
-        use:routerLink
-        aria-label={`Open ${guild.name} guild`}
-        aria-current={guild.slug === activeGuild ? 'page' : undefined}
+      <div
+        class="group relative flex w-full items-center justify-center"
+        role="listitem"
+        draggable={true}
+        ondragstart={(event) => onGuildDragStart(event, guild.slug)}
+        ondragover={onGuildDragOver}
+        ondrop={(event) => onGuildDrop(event, guild.slug)}
+        ondragend={onGuildDragEnd}
       >
-        {#if guild.iconUrl && !failedIcons[guild.slug]}
-          <img
-            src={guild.iconUrl}
-            alt={`${guild.name} icon`}
-            class="h-10 w-10 rounded-xl object-cover"
-            onerror={() => onGuildIconError(guild.slug)}
-          />
-        {:else}
-          {initials(guild.name)}
+        {#if guild.slug === activeGuild}
+          <span
+            class="absolute -left-0.5 h-7 w-1 rounded-r-full bg-primary"
+            data-testid={`guild-active-indicator-${guild.slug}`}
+            aria-hidden="true"
+          ></span>
         {/if}
-      </a>
+
+        <button
+          type="button"
+          class={`inline-flex h-12 w-12 items-center justify-center overflow-hidden rounded-full border text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${
+            guild.slug === activeGuild
+              ? 'border-primary bg-primary/20 text-primary'
+              : 'border-border bg-muted text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+          }`}
+          data-guild-nav-button="true"
+          title={guild.name}
+          aria-label={guild.name}
+          aria-describedby={tooltipIdForGuild(guild.slug)}
+          aria-current={guild.slug === activeGuild ? 'page' : undefined}
+          onclick={() => void goToGuild(guild)}
+          onkeydown={(event) => onGuildKeydown(event, guild)}
+        >
+          {#if guild.iconUrl && !failedIcons[guild.slug]}
+            <img
+              src={guild.iconUrl}
+              alt=""
+              class="h-12 w-12 rounded-full object-cover"
+              onerror={() => onGuildIconError(guild.slug)}
+            />
+          {:else}
+            {initials(guild.name)}
+          {/if}
+        </button>
+
+        {#if guild.hasUnreadActivity}
+          <span
+            class="absolute right-2 top-1.5 h-2.5 w-2.5 rounded-full bg-fire ring-2 ring-sidebar"
+            data-testid={`guild-unread-badge-${guild.slug}`}
+            aria-label={`${guild.name} has unread activity`}
+          ></span>
+        {/if}
+
+        <span
+          id={tooltipIdForGuild(guild.slug)}
+          class="pointer-events-none absolute left-full ml-2 whitespace-nowrap rounded-md bg-card px-2 py-1 text-xs text-foreground opacity-0 shadow transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+          role="tooltip"
+        >
+          {guild.name}
+        </span>
+      </div>
     {/each}
   </nav>
 
   <button
     type="button"
-    class="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-muted text-xl font-semibold text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+    class="inline-flex h-12 w-12 items-center justify-center rounded-full border border-border bg-muted text-xl font-semibold text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
     aria-label="Create guild"
     onclick={openCreateDialog}
   >

@@ -81,7 +81,7 @@ development_status:
   4-4-channel-categories: done
   4-5-invite-link-generation-and-management: done
   4-6-join-guild-via-invite-link: done
-  4-7-guild-navigation-and-activity-indicators: backlog
+  4-7-guild-navigation-and-activity-indicators: done
   epic-4-retrospective: optional
 
   # Epic 5: Roles, Permissions & Member Management

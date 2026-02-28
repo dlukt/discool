@@ -152,6 +152,12 @@ describe('ShellRoute', () => {
     ).not.toBeInTheDocument()
   })
 
+  it('renders GuildRail home button in channel mode', () => {
+    const props = buildProps()
+    const view = render(ShellRoute, props)
+    expect(view.getByRole('button', { name: 'Home' })).toBeInTheDocument()
+  })
+
   it('emits route path changes for persistence integration', async () => {
     const onRouteResolved = vi.fn()
     const props = buildProps({ onRouteResolved })
