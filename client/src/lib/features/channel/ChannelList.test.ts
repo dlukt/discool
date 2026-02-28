@@ -1,11 +1,13 @@
 import { fireEvent, render, waitFor, within } from '@testing-library/svelte'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { goto, guildState, channelState } = vi.hoisted(() => {
+const { goto, guildState, channelState, identityState } = vi.hoisted(() => {
   const goto = vi.fn()
   const guildState = {
     loadGuilds: vi.fn(),
     bySlug: vi.fn(),
+    loadMembers: vi.fn(),
+    memberRoleDataForGuild: vi.fn(),
   }
   const channelState = {
     activeGuild: null as string | null,
@@ -39,12 +41,23 @@ const { goto, guildState, channelState } = vi.hoisted(() => {
     reorderCategories: vi.fn(),
     setCategoryCollapsed: vi.fn(),
     moveChannel: vi.fn(),
+    loadChannelPermissionOverrides: vi.fn(),
+    upsertChannelPermissionOverride: vi.fn(),
+    deleteChannelPermissionOverride: vi.fn(),
+  }
+  const identityState = {
+    session: {
+      user: {
+        id: 'user-owner',
+      },
+    },
   }
 
   return {
     goto,
     guildState,
     channelState,
+    identityState,
   }
 })
 
@@ -55,6 +68,10 @@ vi.mock('@mateothegreat/svelte5-router', () => ({
 
 vi.mock('$lib/features/guild/guildStore.svelte', () => ({
   guildState,
+}))
+
+vi.mock('$lib/features/identity/identityStore.svelte', () => ({
+  identityState,
 }))
 
 vi.mock('./channelStore.svelte', () => ({
@@ -76,6 +93,43 @@ describe('ChannelList', () => {
       isOwner: true,
       createdAt: '2026-02-28T00:00:00.000Z',
     })
+    const memberRoleData = {
+      members: [
+        {
+          userId: 'user-owner',
+          username: 'owner',
+          displayName: 'Owner',
+          avatarColor: '#99aab5',
+          highestRoleColor: '#99aab5',
+          roleIds: [],
+          isOwner: true,
+          canAssignRoles: false,
+        },
+      ],
+      roles: [
+        {
+          id: 'role-everyone',
+          name: '@everyone',
+          color: '#99aab5',
+          position: 2_147_483_647,
+          permissionsBitflag: 5633,
+          isDefault: true,
+          isSystem: true,
+          canEdit: false,
+          canDelete: false,
+          createdAt: '2026-02-28T00:00:00.000Z',
+        },
+      ],
+      assignableRoleIds: [] as string[],
+      canManageRoles: false,
+    }
+    guildState.memberRoleDataForGuild.mockReturnValue(memberRoleData)
+    guildState.loadMembers.mockResolvedValue(memberRoleData)
+    identityState.session = {
+      user: {
+        id: 'user-owner',
+      },
+    }
 
     channelState.activeGuild = 'lobby'
     channelState.loading = false
@@ -232,6 +286,37 @@ describe('ChannelList', () => {
         return channelState.channels
       },
     )
+
+    channelState.loadChannelPermissionOverrides.mockResolvedValue({
+      roles: [
+        {
+          id: 'role-manager',
+          name: 'Channel Manager',
+          color: '#3366ff',
+          position: 0,
+          isDefault: false,
+          isSystem: false,
+        },
+        {
+          id: 'role-everyone',
+          name: '@everyone',
+          color: '#99aab5',
+          position: 1,
+          isDefault: true,
+          isSystem: true,
+        },
+      ],
+      overrides: [],
+    })
+    channelState.upsertChannelPermissionOverride.mockResolvedValue({
+      roleId: 'role-manager',
+      allowBitflag: 4096,
+      denyBitflag: 0,
+    })
+    channelState.deleteChannelPermissionOverride.mockResolvedValue({
+      roleId: 'role-manager',
+      removed: true,
+    })
   })
 
   it('opens create dialog and validates required channel name on blur', async () => {
@@ -355,6 +440,78 @@ describe('ChannelList', () => {
     })
   })
 
+  it('allows MANAGE_CHANNELS members to access channel actions', async () => {
+    guildState.bySlug.mockReturnValue({
+      id: 'guild-1',
+      slug: 'lobby',
+      name: 'Lobby',
+      defaultChannelSlug: 'general',
+      isOwner: false,
+      createdAt: '2026-02-28T00:00:00.000Z',
+    })
+    const memberRoleData = {
+      members: [
+        {
+          userId: 'user-manager',
+          username: 'manager',
+          displayName: 'Manager',
+          avatarColor: '#3366ff',
+          highestRoleColor: '#3366ff',
+          roleIds: ['role-manager'],
+          isOwner: false,
+          canAssignRoles: false,
+        },
+      ],
+      roles: [
+        {
+          id: 'role-manager',
+          name: 'Channel Manager',
+          color: '#3366ff',
+          position: 1,
+          permissionsBitflag: 2,
+          isDefault: false,
+          isSystem: false,
+          canEdit: true,
+          canDelete: true,
+          createdAt: '2026-02-28T00:00:00.000Z',
+        },
+        {
+          id: 'role-everyone',
+          name: '@everyone',
+          color: '#99aab5',
+          position: 2_147_483_647,
+          permissionsBitflag: 5633,
+          isDefault: true,
+          isSystem: true,
+          canEdit: false,
+          canDelete: false,
+          createdAt: '2026-02-28T00:00:00.000Z',
+        },
+      ],
+      assignableRoleIds: [] as string[],
+      canManageRoles: false,
+    }
+    guildState.memberRoleDataForGuild.mockReturnValue(memberRoleData)
+    guildState.loadMembers.mockResolvedValue(memberRoleData)
+    identityState.session = {
+      user: {
+        id: 'user-manager',
+      },
+    }
+
+    const { getByLabelText } = render(ChannelList, {
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+    })
+
+    expect(
+      getByLabelText('Open channel actions for general'),
+    ).toBeInTheDocument()
+    await waitFor(() => {
+      expect(guildState.loadMembers).toHaveBeenCalledWith('lobby')
+    })
+  })
+
   it('adjusts drag-drop position when moving downward in same category', async () => {
     channelState.channels = [
       {
@@ -416,6 +573,118 @@ describe('ChannelList', () => {
         1,
       )
     })
+  })
+
+  it('renders channel permission overrides and persists tri-state selections', async () => {
+    const { getByLabelText, getByRole } = render(ChannelList, {
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+    })
+
+    await fireEvent.click(getByLabelText('Open channel actions for general'))
+    await fireEvent.click(
+      getByRole('menuitem', { name: 'Permission overrides' }),
+    )
+
+    const dialog = getByRole('dialog', { name: 'Channel permissions' })
+    await waitFor(() => {
+      expect(channelState.loadChannelPermissionOverrides).toHaveBeenCalledWith(
+        'lobby',
+        'general',
+        true,
+      )
+    })
+
+    await fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Channel Manager' }),
+    )
+
+    await fireEvent.click(
+      within(dialog).getByLabelText('Allow View channel for Channel Manager'),
+    )
+    await waitFor(() => {
+      expect(
+        channelState.upsertChannelPermissionOverride,
+      ).toHaveBeenNthCalledWith(1, 'lobby', 'general', 'role-manager', {
+        allowBitflag: 4096,
+        denyBitflag: 0,
+      })
+    })
+
+    vi.mocked(
+      channelState.upsertChannelPermissionOverride,
+    ).mockResolvedValueOnce({
+      roleId: 'role-manager',
+      allowBitflag: 0,
+      denyBitflag: 4096,
+    })
+    await fireEvent.click(
+      within(dialog).getByLabelText('Deny View channel for Channel Manager'),
+    )
+    await waitFor(() => {
+      expect(
+        channelState.upsertChannelPermissionOverride,
+      ).toHaveBeenNthCalledWith(2, 'lobby', 'general', 'role-manager', {
+        allowBitflag: 0,
+        denyBitflag: 4096,
+      })
+    })
+
+    await fireEvent.click(
+      within(dialog).getByLabelText('Inherit View channel for Channel Manager'),
+    )
+    await waitFor(() => {
+      expect(channelState.deleteChannelPermissionOverride).toHaveBeenCalledWith(
+        'lobby',
+        'general',
+        'role-manager',
+      )
+    })
+  })
+
+  it('opens channel actions from keyboard context-menu shortcut', async () => {
+    const { getByRole, getByTestId } = render(ChannelList, {
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+    })
+
+    await fireEvent.keyDown(getByTestId('channel-link-general'), {
+      key: 'F10',
+      shiftKey: true,
+    })
+
+    expect(
+      getByRole('menuitem', { name: 'Permission overrides' }),
+    ).toBeInTheDocument()
+  })
+
+  it('rolls back tri-state selection on permission override save failure', async () => {
+    vi.mocked(
+      channelState.upsertChannelPermissionOverride,
+    ).mockRejectedValueOnce(new Error('Failed to save override'))
+
+    const { getByLabelText, getByRole, findByText } = render(ChannelList, {
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+    })
+
+    await fireEvent.click(getByLabelText('Open channel actions for general'))
+    await fireEvent.click(
+      getByRole('menuitem', { name: 'Permission overrides' }),
+    )
+    const dialog = getByRole('dialog', { name: 'Channel permissions' })
+
+    const inherit = within(dialog).getByLabelText(
+      'Inherit View channel for Channel Manager',
+    ) as HTMLInputElement
+    expect(inherit).toBeChecked()
+
+    await fireEvent.click(
+      within(dialog).getByLabelText('Allow View channel for Channel Manager'),
+    )
+
+    expect(await findByText('Failed to save override')).toBeInTheDocument()
+    expect(inherit).toBeChecked()
   })
 
   it('renders category groups and toggles collapsed state from keyboard', async () => {

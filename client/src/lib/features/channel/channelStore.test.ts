@@ -6,6 +6,9 @@ const channelApi = vi.hoisted(() => ({
   createChannel: vi.fn(),
   updateChannel: vi.fn(),
   deleteChannel: vi.fn(),
+  listChannelPermissionOverrides: vi.fn(),
+  upsertChannelPermissionOverride: vi.fn(),
+  deleteChannelPermissionOverride: vi.fn(),
   reorderChannels: vi.fn(),
   setCategoryCollapsed: vi.fn(),
 }))
@@ -266,5 +269,78 @@ describe('channelStore', () => {
       true,
     )
     expect(channelState.categories[0]?.collapsed).toBe(true)
+  })
+
+  it('loads and mutates channel permission overrides with cache updates', async () => {
+    vi.mocked(channelApi.listChannelPermissionOverrides).mockResolvedValue({
+      roles: [
+        {
+          id: 'role-manager',
+          name: 'Channel Manager',
+          color: '#3366ff',
+          position: 0,
+          isDefault: false,
+          isSystem: false,
+        },
+      ],
+      overrides: [
+        {
+          roleId: 'role-manager',
+          allowBitflag: 4096,
+          denyBitflag: 0,
+        },
+      ],
+    })
+    vi.mocked(channelApi.upsertChannelPermissionOverride).mockResolvedValue({
+      roleId: 'role-manager',
+      allowBitflag: 0,
+      denyBitflag: 4096,
+    })
+    vi.mocked(channelApi.deleteChannelPermissionOverride).mockResolvedValue({
+      roleId: 'role-manager',
+      removed: true,
+    })
+
+    const loaded = await channelState.loadChannelPermissionOverrides(
+      'guild-a',
+      'general',
+      true,
+    )
+    expect(loaded.roles).toHaveLength(1)
+    expect(loaded.overrides[0]).toEqual({
+      roleId: 'role-manager',
+      allowBitflag: 4096,
+      denyBitflag: 0,
+    })
+
+    await channelState.upsertChannelPermissionOverride(
+      'guild-a',
+      'general',
+      'role-manager',
+      {
+        allowBitflag: 0,
+        denyBitflag: 4096,
+      },
+    )
+    let cached = await channelState.loadChannelPermissionOverrides(
+      'guild-a',
+      'general',
+    )
+    expect(cached.overrides[0]).toEqual({
+      roleId: 'role-manager',
+      allowBitflag: 0,
+      denyBitflag: 4096,
+    })
+
+    await channelState.deleteChannelPermissionOverride(
+      'guild-a',
+      'general',
+      'role-manager',
+    )
+    cached = await channelState.loadChannelPermissionOverrides(
+      'guild-a',
+      'general',
+    )
+    expect(cached.overrides).toEqual([])
   })
 })

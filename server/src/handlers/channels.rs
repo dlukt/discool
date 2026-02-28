@@ -13,6 +13,7 @@ use crate::{
     middleware::auth::AuthenticatedUser,
     services::channel_service::{
         self, CreateChannelInput, ReorderChannelsInput, UpdateChannelInput,
+        UpsertChannelPermissionOverrideInput,
     },
 };
 
@@ -40,6 +41,12 @@ pub struct ReorderChannelPositionRequest {
     pub channel_slug: Option<String>,
     pub category_slug: Option<Option<String>>,
     pub position: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertChannelPermissionOverrideRequest {
+    pub allow_bitflag: Option<i64>,
+    pub deny_bitflag: Option<i64>,
 }
 
 pub async fn list_channels(
@@ -148,4 +155,65 @@ pub async fn reorder_channels(
     )
     .await?;
     Ok((StatusCode::OK, Json(json!({ "data": channels }))).into_response())
+}
+
+pub async fn list_channel_permission_overrides(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path((guild_slug, channel_slug)): Path<(String, String)>,
+) -> Result<Response, AppError> {
+    let overrides = channel_service::list_channel_permission_overrides(
+        &state.pool,
+        &user.user_id,
+        &guild_slug,
+        &channel_slug,
+    )
+    .await?;
+    Ok((StatusCode::OK, Json(json!({ "data": overrides }))).into_response())
+}
+
+pub async fn upsert_channel_permission_override(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path((guild_slug, channel_slug, role_id)): Path<(String, String, String)>,
+    payload: Result<Json<UpsertChannelPermissionOverrideRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+    let allow_bitflag = req
+        .allow_bitflag
+        .ok_or_else(|| AppError::ValidationError("allow_bitflag is required".to_string()))?;
+    let deny_bitflag = req
+        .deny_bitflag
+        .ok_or_else(|| AppError::ValidationError("deny_bitflag is required".to_string()))?;
+
+    let saved = channel_service::upsert_channel_permission_override(
+        &state.pool,
+        &user.user_id,
+        &guild_slug,
+        &channel_slug,
+        &role_id,
+        UpsertChannelPermissionOverrideInput {
+            allow_bitflag,
+            deny_bitflag,
+        },
+    )
+    .await?;
+    Ok((StatusCode::OK, Json(json!({ "data": saved }))).into_response())
+}
+
+pub async fn delete_channel_permission_override(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path((guild_slug, channel_slug, role_id)): Path<(String, String, String)>,
+) -> Result<Response, AppError> {
+    let deleted = channel_service::delete_channel_permission_override(
+        &state.pool,
+        &user.user_id,
+        &guild_slug,
+        &channel_slug,
+        &role_id,
+    )
+    .await?;
+    Ok((StatusCode::OK, Json(json!({ "data": deleted }))).into_response())
 }

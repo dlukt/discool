@@ -180,6 +180,20 @@ async fn http_patch_with_bearer(addr: &str, path: &str, json_body: &str, token: 
     String::from_utf8_lossy(&buf).to_string()
 }
 
+async fn http_put_with_bearer(addr: &str, path: &str, json_body: &str, token: &str) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    let req = format!(
+        "PUT {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
+        json_body.as_bytes().len(),
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    String::from_utf8_lossy(&buf).to_string()
+}
+
 async fn http_delete_with_bearer(addr: &str, path: &str, token: &str) -> String {
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
@@ -2294,6 +2308,215 @@ async fn channels_mutations_reject_non_owner() {
 }
 
 #[tokio::test]
+async fn channel_permission_overrides_private_visibility_and_cache_invalidation() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "owner-overrides", [81u8; 32]).await;
+    let manager_token = register_and_authenticate(&addr, "manager-overrides", [82u8; 32]).await;
+    let viewer_token = register_and_authenticate(&addr, "viewer-overrides", [83u8; 32]).await;
+
+    let guild_body = json!({ "name": "Overrides Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap().to_string();
+    let guild_id = guild["data"]["id"].as_str().unwrap().to_string();
+    let channels_path = format!("/api/v1/guilds/{guild_slug}/channels");
+    let roles_path = format!("/api/v1/guilds/{guild_slug}/roles");
+
+    let create_role_body = json!({ "name": "Channel Manager", "color": "#3366ff" }).to_string();
+    let res = http_post_with_bearer(&addr, &roles_path, &create_role_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let manager_role: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let manager_role_id = manager_role["data"]["id"].as_str().unwrap().to_string();
+
+    let update_role_path = format!("/api/v1/guilds/{guild_slug}/roles/{manager_role_id}");
+    let update_role_body = json!({ "permissions_bitflag": 2 }).to_string();
+    let res =
+        http_patch_with_bearer(&addr, &update_role_path, &update_role_body, &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+
+    let url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let manager_id = sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username = ?1")
+        .bind("manager-overrides")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let viewer_id = sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username = ?1")
+        .bind("viewer-overrides")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO guild_members (guild_id, user_id, joined_at, joined_via_invite_code) VALUES (?1, ?2, ?3, NULL)",
+    )
+    .bind(&guild_id)
+    .bind(&manager_id)
+    .bind("2026-02-28T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO guild_members (guild_id, user_id, joined_at, joined_via_invite_code) VALUES (?1, ?2, ?3, NULL)",
+    )
+    .bind(&guild_id)
+    .bind(&viewer_id)
+    .bind("2026-02-28T00:00:01Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO role_assignments (guild_id, user_id, role_id, assigned_at) VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(&guild_id)
+    .bind(&manager_id)
+    .bind(&manager_role_id)
+    .bind("2026-02-28T00:00:02Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    drop(pool);
+
+    let create_secret_body = json!({ "name": "Secret", "channel_type": "text" }).to_string();
+    let res =
+        http_post_with_bearer(&addr, &channels_path, &create_secret_body, &manager_token).await;
+    assert_eq!(response_status(&res), 201);
+    let secret_channel: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let secret_slug = secret_channel["data"]["slug"].as_str().unwrap().to_string();
+
+    let overrides_path =
+        format!("/api/v1/guilds/{guild_slug}/channels/{secret_slug}/permission-overrides");
+    let manager_override_path = format!("{overrides_path}/{manager_role_id}");
+
+    let res = http_response(&addr, &overrides_path).await;
+    assert_eq!(response_status(&res), 401);
+
+    let bad_token_body = json!({ "allow_bitflag": 0, "deny_bitflag": 0 }).to_string();
+    let res =
+        http_put_with_bearer(&addr, &manager_override_path, &bad_token_body, "bad-token").await;
+    assert_eq!(response_status(&res), 401);
+
+    let res = http_response_with_bearer(&addr, &overrides_path, &viewer_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let res = http_response_with_bearer(&addr, &roles_path, &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+    let roles_value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let everyone_role_id = roles_value["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["is_default"] == json!(true))
+        .and_then(|item| item["id"].as_str())
+        .unwrap()
+        .to_string();
+
+    let overlap_body = json!({ "allow_bitflag": 4096, "deny_bitflag": 4096 }).to_string();
+    let res =
+        http_put_with_bearer(&addr, &manager_override_path, &overlap_body, &owner_token).await;
+    assert_eq!(response_status(&res), 422);
+
+    let unknown_role_path = format!("{overrides_path}/unknown-role");
+    let valid_body = json!({ "allow_bitflag": 0, "deny_bitflag": 4096 }).to_string();
+    let res = http_put_with_bearer(&addr, &unknown_role_path, &valid_body, &owner_token).await;
+    assert_eq!(response_status(&res), 422);
+
+    let everyone_override_path = format!("{overrides_path}/{everyone_role_id}");
+    let deny_view_body = json!({ "allow_bitflag": 0, "deny_bitflag": 4096 }).to_string();
+    let res = http_put_with_bearer(
+        &addr,
+        &everyone_override_path,
+        &deny_view_body,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 200);
+
+    let res = http_response_with_bearer(&addr, &overrides_path, &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+    let listed_overrides: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let everyone_override = listed_overrides["data"]["overrides"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["role_id"] == json!(everyone_role_id))
+        .unwrap();
+    assert_eq!(everyone_override["deny_bitflag"], json!(4096));
+
+    let res = http_response_with_bearer(&addr, &channels_path, &viewer_token).await;
+    assert_eq!(response_status(&res), 200);
+    let viewer_channels: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let viewer_slugs: Vec<&str> = viewer_channels["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["slug"].as_str())
+        .collect();
+    assert!(!viewer_slugs.contains(&secret_slug.as_str()));
+
+    let allow_manager_view_body = json!({ "allow_bitflag": 4096, "deny_bitflag": 0 }).to_string();
+    let res = http_put_with_bearer(
+        &addr,
+        &manager_override_path,
+        &allow_manager_view_body,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 200);
+
+    let res = http_response_with_bearer(&addr, &channels_path, &manager_token).await;
+    assert_eq!(response_status(&res), 200);
+    let manager_channels: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let manager_slugs: Vec<&str> = manager_channels["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["slug"].as_str())
+        .collect();
+    assert!(manager_slugs.contains(&secret_slug.as_str()));
+
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    sqlx::query("UPDATE roles SET permissions_bitflag = 0 WHERE id = ?1")
+        .bind(&manager_role_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drop(pool);
+
+    let stale_create_body =
+        json!({ "name": "Cache Before Flush", "channel_type": "text" }).to_string();
+    let res =
+        http_post_with_bearer(&addr, &channels_path, &stale_create_body, &manager_token).await;
+    assert_eq!(response_status(&res), 201);
+
+    let res = http_delete_with_bearer(&addr, &manager_override_path, &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+
+    let after_flush_body =
+        json!({ "name": "Cache After Flush", "channel_type": "text" }).to_string();
+    let res = http_post_with_bearer(&addr, &channels_path, &after_flush_body, &manager_token).await;
+    assert_eq!(response_status(&res), 403);
+}
+
+#[tokio::test]
 async fn categories_mutations_require_authentication() {
     use serde_json::json;
 
@@ -2649,13 +2872,13 @@ async fn roles_owner_crud_hierarchy_and_delete_cleanup_work() {
     let listed_roles = listed["data"].as_array().unwrap();
     assert_eq!(listed_roles[0]["name"], json!("Owner"));
     assert_eq!(listed_roles[0]["is_system"], json!(true));
-    assert_eq!(listed_roles[0]["permissions_bitflag"], json!(4095));
+    assert_eq!(listed_roles[0]["permissions_bitflag"], json!(8191));
     let owner_role_id = listed_roles[0]["id"].as_str().unwrap().to_string();
     assert_eq!(listed_roles.last().unwrap()["name"], json!("@everyone"));
     assert_eq!(listed_roles.last().unwrap()["is_default"], json!(true));
     assert_eq!(
         listed_roles.last().unwrap()["permissions_bitflag"],
-        json!(1537)
+        json!(5633)
     );
     let everyone_role_id = listed_roles.last().unwrap()["id"]
         .as_str()

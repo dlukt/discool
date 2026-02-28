@@ -20,6 +20,7 @@ pub const VIEW_MOD_LOG: u64 = 1 << 8;
 pub const ATTACH_FILES: u64 = 1 << 9;
 pub const ADD_REACTIONS: u64 = 1 << 10;
 pub const MANAGE_MESSAGES: u64 = 1 << 11;
+pub const VIEW_CHANNEL: u64 = 1 << 12;
 
 const ALL_PERMISSIONS_MASK: u64 = SEND_MESSAGES
     | MANAGE_CHANNELS
@@ -32,9 +33,11 @@ const ALL_PERMISSIONS_MASK: u64 = SEND_MESSAGES
     | VIEW_MOD_LOG
     | ATTACH_FILES
     | ADD_REACTIONS
-    | MANAGE_MESSAGES;
+    | MANAGE_MESSAGES
+    | VIEW_CHANNEL;
 
-const DEFAULT_EVERYONE_PERMISSIONS_MASK: u64 = SEND_MESSAGES | ATTACH_FILES | ADD_REACTIONS;
+const DEFAULT_EVERYONE_PERMISSIONS_MASK: u64 =
+    VIEW_CHANNEL | SEND_MESSAGES | ATTACH_FILES | ADD_REACTIONS;
 
 type PermissionCacheKey = (String, String);
 type PermissionCache = DashMap<PermissionCacheKey, u64>;
@@ -69,6 +72,10 @@ pub fn default_everyone_permissions_i64() -> i64 {
 
 pub fn has_permission(mask: u64, permission_mask: u64) -> bool {
     mask & permission_mask == permission_mask
+}
+
+pub fn apply_channel_overrides(base_mask: u64, allow_mask: u64, deny_mask: u64) -> u64 {
+    (base_mask | allow_mask) & !deny_mask
 }
 
 pub fn parse_permissions_bitflag(value: i64) -> Result<u64, AppError> {
@@ -280,17 +287,17 @@ mod tests {
 
     #[test]
     fn default_and_all_masks_match_story_contract() {
-        assert_eq!(default_everyone_permissions_mask(), 1537);
-        assert_eq!(all_permissions_mask(), 4095);
-        assert_eq!(default_everyone_permissions_i64(), 1537);
-        assert_eq!(all_permissions_i64(), 4095);
+        assert_eq!(default_everyone_permissions_mask(), 5633);
+        assert_eq!(all_permissions_mask(), 8191);
+        assert_eq!(default_everyone_permissions_i64(), 5633);
+        assert_eq!(all_permissions_i64(), 8191);
     }
 
     #[test]
     fn parse_permissions_bitflag_rejects_unknown_bits() {
         assert!(parse_permissions_bitflag(-1).is_err());
         assert!(parse_permissions_bitflag(1 << 15).is_err());
-        assert_eq!(parse_permissions_bitflag(1537).unwrap(), 1537);
+        assert_eq!(parse_permissions_bitflag(5633).unwrap(), 5633);
     }
 
     #[test]
@@ -356,7 +363,20 @@ mod tests {
         assert!(has_permission(union, SEND_MESSAGES));
         assert!(has_permission(union, ATTACH_FILES));
         assert!(has_permission(union, ADD_REACTIONS));
+        assert!(has_permission(union, VIEW_CHANNEL));
         assert!(has_permission(union, MANAGE_CHANNELS));
         assert!(has_permission(union, MANAGE_GUILD));
+    }
+
+    #[test]
+    fn channel_override_formula_applies_allow_and_deny_masks() {
+        let base = VIEW_CHANNEL | SEND_MESSAGES;
+        let allow = MANAGE_MESSAGES;
+        let deny = SEND_MESSAGES;
+        let effective = apply_channel_overrides(base, allow, deny);
+
+        assert!(has_permission(effective, VIEW_CHANNEL));
+        assert!(!has_permission(effective, SEND_MESSAGES));
+        assert!(has_permission(effective, MANAGE_MESSAGES));
     }
 }

@@ -46,6 +46,36 @@ export type DeleteChannelResult = {
   fallbackChannelSlug: string
 }
 
+export type ChannelPermissionOverrideRole = {
+  id: string
+  name: string
+  color: string
+  position: number
+  isDefault: boolean
+  isSystem: boolean
+}
+
+export type ChannelPermissionOverride = {
+  roleId: string
+  allowBitflag: number
+  denyBitflag: number
+}
+
+export type ChannelPermissionOverrides = {
+  roles: ChannelPermissionOverrideRole[]
+  overrides: ChannelPermissionOverride[]
+}
+
+export type UpsertChannelPermissionOverrideInput = {
+  allowBitflag: number
+  denyBitflag: number
+}
+
+export type DeleteChannelPermissionOverrideResult = {
+  roleId: string
+  removed: boolean
+}
+
 export type CreateCategoryInput = {
   name: string
 }
@@ -107,6 +137,36 @@ export type ReorderChannelsInputWire = {
 export type DeleteChannelResultWire = {
   deleted_slug: string
   fallback_channel_slug: string
+}
+
+export type ChannelPermissionOverrideRoleWire = {
+  id: string
+  name: string
+  color: string
+  position: number
+  is_default: boolean
+  is_system: boolean
+}
+
+export type ChannelPermissionOverrideWire = {
+  role_id: string
+  allow_bitflag: number
+  deny_bitflag: number
+}
+
+export type ChannelPermissionOverridesWire = {
+  roles: ChannelPermissionOverrideRoleWire[]
+  overrides: ChannelPermissionOverrideWire[]
+}
+
+export type UpsertChannelPermissionOverrideInputWire = {
+  allow_bitflag: number
+  deny_bitflag: number
+}
+
+export type DeleteChannelPermissionOverrideResultWire = {
+  role_id: string
+  removed: boolean
 }
 
 export type CreateCategoryInputWire = {
@@ -198,6 +258,56 @@ export function toDeleteChannelResult(
   return {
     deletedSlug: wire.deleted_slug,
     fallbackChannelSlug: wire.fallback_channel_slug,
+  }
+}
+
+export function toChannelPermissionOverrideRole(
+  wire: ChannelPermissionOverrideRoleWire,
+): ChannelPermissionOverrideRole {
+  return {
+    id: wire.id,
+    name: wire.name,
+    color: wire.color,
+    position: wire.position,
+    isDefault: wire.is_default,
+    isSystem: wire.is_system,
+  }
+}
+
+export function toChannelPermissionOverride(
+  wire: ChannelPermissionOverrideWire,
+): ChannelPermissionOverride {
+  return {
+    roleId: wire.role_id,
+    allowBitflag: wire.allow_bitflag,
+    denyBitflag: wire.deny_bitflag,
+  }
+}
+
+export function toChannelPermissionOverrides(
+  wire: ChannelPermissionOverridesWire,
+): ChannelPermissionOverrides {
+  return {
+    roles: wire.roles.map(toChannelPermissionOverrideRole),
+    overrides: wire.overrides.map(toChannelPermissionOverride),
+  }
+}
+
+export function toUpsertChannelPermissionOverrideInputWire(
+  input: UpsertChannelPermissionOverrideInput,
+): UpsertChannelPermissionOverrideInputWire {
+  return {
+    allow_bitflag: input.allowBitflag,
+    deny_bitflag: input.denyBitflag,
+  }
+}
+
+export function toDeleteChannelPermissionOverrideResult(
+  wire: DeleteChannelPermissionOverrideResultWire,
+): DeleteChannelPermissionOverrideResult {
+  return {
+    roleId: wire.role_id,
+    removed: wire.removed,
   }
 }
 

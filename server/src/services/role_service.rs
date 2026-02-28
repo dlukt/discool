@@ -836,7 +836,7 @@ mod tests {
                 name: "@everyone".to_string(),
                 color: "#99aab5".to_string(),
                 position: 2_147_483_647,
-                permissions_bitflag: 1537,
+                permissions_bitflag: 5633,
                 is_default: 1,
                 created_at: "2026-02-28T00:00:00.000Z".to_string(),
                 updated_at: "2026-02-28T00:00:00.000Z".to_string(),

@@ -10,7 +10,9 @@ use crate::{
     models::{
         category,
         channel::{self, Channel, ChannelPositionUpdate},
+        channel_permission_override,
         guild::{self, Guild},
+        role::{self, Role},
     },
     permissions,
 };
@@ -44,6 +46,12 @@ pub struct ReorderChannelPositionInput {
     pub position: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct UpsertChannelPermissionOverrideInput {
+    pub allow_bitflag: i64,
+    pub deny_bitflag: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelResponse {
     pub id: String,
@@ -62,6 +70,41 @@ pub struct DeleteChannelResponse {
     pub fallback_channel_slug: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelPermissionOverrideRoleResponse {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub position: i64,
+    pub is_default: bool,
+    pub is_system: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelPermissionOverrideResponse {
+    pub role_id: String,
+    pub allow_bitflag: i64,
+    pub deny_bitflag: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelPermissionOverridesResponse {
+    pub roles: Vec<ChannelPermissionOverrideRoleResponse>,
+    pub overrides: Vec<ChannelPermissionOverrideResponse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeleteChannelPermissionOverrideResponse {
+    pub role_id: String,
+    pub removed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct MemberRoleScope {
+    default_role_id: Option<String>,
+    assigned_role_ids: HashSet<String>,
+}
+
 pub async fn list_channels(
     pool: &DbPool,
     user_id: &str,
@@ -69,8 +112,66 @@ pub async fn list_channels(
 ) -> Result<Vec<ChannelResponse>, AppError> {
     let guild = load_viewable_guild(pool, user_id, guild_slug).await?;
     let channels = channel::list_channels_by_guild_id(pool, &guild.id).await?;
+    if guild.owner_id == user_id {
+        return Ok(channels
+            .into_iter()
+            .map(|item| to_channel_response(item, &guild.default_channel_slug))
+            .collect());
+    }
+
+    let role_scope = member_role_scope_for_channel_permissions(pool, &guild.id, user_id).await?;
+    let overrides =
+        channel_permission_override::list_overrides_by_guild_id(pool, &guild.id).await?;
+    let mut override_masks_by_channel_role = HashMap::<String, HashMap<String, (u64, u64)>>::new();
+    for item in overrides {
+        let include = role_scope
+            .default_role_id
+            .as_deref()
+            .is_some_and(|role_id| role_id == item.role_id.as_str())
+            || role_scope.assigned_role_ids.contains(&item.role_id);
+        if !include {
+            continue;
+        }
+        let allow_mask = permissions::stored_permissions_to_mask(item.allow_bitflag)?;
+        let deny_mask = permissions::stored_permissions_to_mask(item.deny_bitflag)?;
+        let entry = override_masks_by_channel_role
+            .entry(item.channel_id)
+            .or_default()
+            .entry(item.role_id)
+            .or_insert((0, 0));
+        entry.0 = allow_mask;
+        entry.1 = deny_mask;
+    }
+
+    let base_permissions = permissions::effective_guild_permissions(pool, &guild, user_id).await?;
     Ok(channels
         .into_iter()
+        .filter(|item| {
+            let role_overrides = override_masks_by_channel_role.get(&item.id);
+            let mut effective = base_permissions;
+
+            if let Some(default_role_id) = role_scope.default_role_id.as_deref()
+                && let Some((allow_mask, deny_mask)) =
+                    role_overrides.and_then(|by_role| by_role.get(default_role_id))
+            {
+                effective =
+                    permissions::apply_channel_overrides(effective, *allow_mask, *deny_mask);
+            }
+
+            let mut role_allow_mask = 0_u64;
+            let mut role_deny_mask = 0_u64;
+            if let Some(by_role) = role_overrides {
+                for role_id in &role_scope.assigned_role_ids {
+                    if let Some((allow_mask, deny_mask)) = by_role.get(role_id) {
+                        role_allow_mask |= *allow_mask;
+                        role_deny_mask |= *deny_mask;
+                    }
+                }
+            }
+            effective =
+                permissions::apply_channel_overrides(effective, role_allow_mask, role_deny_mask);
+            permissions::has_permission(effective, permissions::VIEW_CHANNEL)
+        })
         .map(|item| to_channel_response(item, &guild.default_channel_slug))
         .collect())
 }
@@ -360,6 +461,98 @@ pub async fn reorder_channels(
         .collect())
 }
 
+pub async fn list_channel_permission_overrides(
+    pool: &DbPool,
+    user_id: &str,
+    guild_slug: &str,
+    channel_slug: &str,
+) -> Result<ChannelPermissionOverridesResponse, AppError> {
+    let guild = load_guild_with_channel_manage_access(pool, user_id, guild_slug).await?;
+    let channel = channel::find_channel_by_slug(pool, &guild.id, channel_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let roles = role::list_roles_by_guild_id(pool, &guild.id).await?;
+    let overrides =
+        channel_permission_override::list_overrides_by_channel_id(pool, &channel.id).await?;
+
+    Ok(ChannelPermissionOverridesResponse {
+        roles: roles
+            .into_iter()
+            .map(to_channel_override_role_response)
+            .collect(),
+        overrides: overrides
+            .into_iter()
+            .map(to_channel_permission_override_response)
+            .collect(),
+    })
+}
+
+pub async fn upsert_channel_permission_override(
+    pool: &DbPool,
+    user_id: &str,
+    guild_slug: &str,
+    channel_slug: &str,
+    role_id: &str,
+    input: UpsertChannelPermissionOverrideInput,
+) -> Result<ChannelPermissionOverrideResponse, AppError> {
+    let guild = load_guild_with_channel_manage_access(pool, user_id, guild_slug).await?;
+    let channel = channel::find_channel_by_slug(pool, &guild.id, channel_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let role_record = role::find_role_by_id(pool, &guild.id, role_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::ValidationError("role_id does not exist in this guild".to_string())
+        })?;
+    let (allow_bitflag, deny_bitflag) =
+        normalize_override_bitflags(input.allow_bitflag, input.deny_bitflag)?;
+
+    channel_permission_override::upsert_override(
+        pool,
+        &channel.id,
+        &role_record.id,
+        allow_bitflag,
+        deny_bitflag,
+    )
+    .await?;
+    permissions::invalidate_guild_permission_cache(&guild.id);
+
+    Ok(ChannelPermissionOverrideResponse {
+        role_id: role_record.id,
+        allow_bitflag,
+        deny_bitflag,
+    })
+}
+
+pub async fn delete_channel_permission_override(
+    pool: &DbPool,
+    user_id: &str,
+    guild_slug: &str,
+    channel_slug: &str,
+    role_id: &str,
+) -> Result<DeleteChannelPermissionOverrideResponse, AppError> {
+    let guild = load_guild_with_channel_manage_access(pool, user_id, guild_slug).await?;
+    let channel = channel::find_channel_by_slug(pool, &guild.id, channel_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let role_record = role::find_role_by_id(pool, &guild.id, role_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::ValidationError("role_id does not exist in this guild".to_string())
+        })?;
+
+    let removed =
+        channel_permission_override::delete_override(pool, &channel.id, &role_record.id).await? > 0;
+    if removed {
+        permissions::invalidate_guild_permission_cache(&guild.id);
+    }
+
+    Ok(DeleteChannelPermissionOverrideResponse {
+        role_id: role_record.id,
+        removed,
+    })
+}
+
 fn to_channel_response(channel: Channel, default_channel_slug: &str) -> ChannelResponse {
     ChannelResponse {
         id: channel.id,
@@ -371,6 +564,63 @@ fn to_channel_response(channel: Channel, default_channel_slug: &str) -> ChannelR
         category_slug: channel.category_slug,
         created_at: channel.created_at,
     }
+}
+
+fn to_channel_override_role_response(role: Role) -> ChannelPermissionOverrideRoleResponse {
+    let is_default = role.is_default != 0;
+    ChannelPermissionOverrideRoleResponse {
+        id: role.id,
+        name: role.name,
+        color: role.color,
+        position: role.position,
+        is_default,
+        is_system: is_default,
+    }
+}
+
+fn to_channel_permission_override_response(
+    item: channel_permission_override::ChannelPermissionOverride,
+) -> ChannelPermissionOverrideResponse {
+    ChannelPermissionOverrideResponse {
+        role_id: item.role_id,
+        allow_bitflag: item.allow_bitflag,
+        deny_bitflag: item.deny_bitflag,
+    }
+}
+
+async fn member_role_scope_for_channel_permissions(
+    pool: &DbPool,
+    guild_id: &str,
+    user_id: &str,
+) -> Result<MemberRoleScope, AppError> {
+    let default_role_id = role::find_default_role_by_guild_id(pool, guild_id)
+        .await?
+        .map(|record| record.id);
+    let assigned_role_ids = role::list_assigned_role_ids(pool, guild_id, user_id)
+        .await?
+        .into_iter()
+        .collect();
+    Ok(MemberRoleScope {
+        default_role_id,
+        assigned_role_ids,
+    })
+}
+
+fn normalize_override_bitflags(
+    allow_bitflag: i64,
+    deny_bitflag: i64,
+) -> Result<(i64, i64), AppError> {
+    let allow_mask = permissions::parse_permissions_bitflag(allow_bitflag)?;
+    let deny_mask = permissions::parse_permissions_bitflag(deny_bitflag)?;
+    if allow_mask & deny_mask != 0 {
+        return Err(AppError::ValidationError(
+            "allow_bitflag and deny_bitflag cannot overlap".to_string(),
+        ));
+    }
+    Ok((
+        permissions::mask_to_stored_permissions(allow_mask)?,
+        permissions::mask_to_stored_permissions(deny_mask)?,
+    ))
 }
 
 async fn load_guild_with_channel_manage_access(
@@ -542,5 +792,12 @@ mod tests {
         assert_eq!(normalize_channel_type("text").unwrap(), "text");
         assert_eq!(normalize_channel_type("VOICE").unwrap(), "voice");
         assert!(normalize_channel_type("video").is_err());
+    }
+
+    #[test]
+    fn normalize_override_bitflags_rejects_overlap() {
+        let overlap = permissions::SEND_MESSAGES as i64;
+        assert!(normalize_override_bitflags(overlap, overlap).is_err());
+        assert!(normalize_override_bitflags(permissions::VIEW_CHANNEL as i64, 0).is_ok());
     }
 }

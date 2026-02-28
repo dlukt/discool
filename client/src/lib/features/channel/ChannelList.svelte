@@ -6,20 +6,65 @@ import { onMount, tick } from 'svelte'
 
 import { ApiError } from '$lib/api'
 import { guildState } from '$lib/features/guild/guildStore.svelte'
+import {
+  GUILD_PERMISSION_CATALOG,
+  hasGuildPermission,
+} from '$lib/features/guild/permissions'
+import { identityState } from '$lib/features/identity/identityStore.svelte'
 
 import { channelState } from './channelStore.svelte'
-import type { Channel, ChannelCategory, ChannelType } from './types'
+import type {
+  Channel,
+  ChannelCategory,
+  ChannelPermissionOverrideRole,
+  ChannelType,
+} from './types'
 
 type Props = {
   activeGuild: string
   activeChannel: string
 }
 
+type PermissionOverrideState = 'allow' | 'deny' | 'inherit'
+
 let { activeGuild, activeChannel }: Props = $props()
 
 let guild = $derived(guildState.bySlug(activeGuild))
 let guildLabel = $derived(guild?.name ?? activeGuild)
-let canManageChannels = $derived(Boolean(guild?.isOwner))
+const manageChannelsPermission = GUILD_PERMISSION_CATALOG.find(
+  (permission) => permission.key === 'MANAGE_CHANNELS',
+)
+let memberRoleData = $derived(guildState.memberRoleDataForGuild(activeGuild))
+let currentUserId = $derived(identityState.session?.user.id ?? null)
+let currentMember = $derived(
+  currentUserId
+    ? (memberRoleData.members.find(
+        (member) => member.userId === currentUserId,
+      ) ?? null)
+    : null,
+)
+let rolePermissionMaskById = $derived(
+  new Map(
+    memberRoleData.roles.map((role) => [role.id, role.permissionsBitflag]),
+  ),
+)
+let defaultRolePermissionsBitflag = $derived(
+  memberRoleData.roles.find((role) => role.isDefault)?.permissionsBitflag ?? 0,
+)
+let currentMemberPermissionsBitflag = $derived(
+  (currentMember?.roleIds ?? []).reduce(
+    (mask, roleId) => mask | (rolePermissionMaskById.get(roleId) ?? 0),
+    defaultRolePermissionsBitflag,
+  ),
+)
+let canManageChannels = $derived(
+  Boolean(guild?.isOwner) ||
+    (manageChannelsPermission !== undefined &&
+      hasGuildPermission(
+        currentMemberPermissionsBitflag,
+        manageChannelsPermission,
+      )),
+)
 let channels = $derived(channelState.channels)
 let categories = $derived(channelState.categories)
 let loadingChannels = $derived(
@@ -76,7 +121,25 @@ let deleteCategoryTarget = $state<ChannelCategory | null>(null)
 let deleteCategoryError = $state<string | null>(null)
 let deleteCategorySubmitting = $state(false)
 
+let permissionsDialogOpen = $state(false)
+let permissionsTarget = $state<Channel | null>(null)
+let permissionRoles = $state<ChannelPermissionOverrideRole[]>([])
+let permissionOverridesByRoleId = $state<
+  Record<string, { allowBitflag: number; denyBitflag: number }>
+>({})
+let selectedPermissionRoleId = $state<string | null>(null)
+let permissionsLoading = $state(false)
+let permissionsError = $state<string | null>(null)
+let permissionSavingByKey = $state<Record<string, boolean>>({})
+
 let draggedSlug = $state<string | null>(null)
+
+let selectedPermissionRoleEntry = $derived(
+  selectedPermissionRoleId
+    ? (permissionRoles.find((item) => item.id === selectedPermissionRoleId) ??
+        null)
+    : null,
+)
 
 onMount(() => {
   void guildState.loadGuilds().catch(() => {
@@ -89,6 +152,13 @@ $effect(() => {
   loadError = null
   void channelState.loadChannels(activeGuild).catch((err: unknown) => {
     loadError = messageFromError(err, 'Failed to load channels.')
+  })
+})
+
+$effect(() => {
+  if (!activeGuild || guild?.isOwner) return
+  void guildState.loadMembers(activeGuild).catch(() => {
+    // Member role data is loaded opportunistically for channel permission gating.
   })
 })
 
@@ -229,13 +299,20 @@ async function handleCategoryCreateSubmit(event: SubmitEvent) {
 }
 
 function toggleActionMenu(channelSlug: string) {
-  actionMenuSlug = actionMenuSlug === channelSlug ? null : channelSlug
+  if (actionMenuSlug === channelSlug) {
+    actionMenuSlug = null
+    return
+  }
+  actionMenuSlug = channelSlug
   categoryActionMenuSlug = null
 }
 
 function toggleCategoryActionMenu(categorySlug: string) {
-  categoryActionMenuSlug =
-    categoryActionMenuSlug === categorySlug ? null : categorySlug
+  if (categoryActionMenuSlug === categorySlug) {
+    categoryActionMenuSlug = null
+    return
+  }
+  categoryActionMenuSlug = categorySlug
   actionMenuSlug = null
 }
 
@@ -251,12 +328,14 @@ function handleChannelContextMenu(event: MouseEvent, channelSlug: string) {
   if (!canManageChannels) return
   event.preventDefault()
   actionMenuSlug = channelSlug
+  categoryActionMenuSlug = null
 }
 
 function handleCategoryContextMenu(event: MouseEvent, categorySlug: string) {
   if (!canManageChannels) return
   event.preventDefault()
   categoryActionMenuSlug = categorySlug
+  actionMenuSlug = null
 }
 
 async function openRenameDialog(channel: Channel) {
@@ -412,6 +491,160 @@ async function confirmDeleteCategory() {
     deleteCategoryError = messageFromError(err, 'Failed to delete category.')
   } finally {
     deleteCategorySubmitting = false
+  }
+}
+
+function sortPermissionRoles(
+  roles: ChannelPermissionOverrideRole[],
+): ChannelPermissionOverrideRole[] {
+  return [...roles].sort((left, right) => left.position - right.position)
+}
+
+function applyPermissionOverrides(
+  overrides: Array<{
+    roleId: string
+    allowBitflag: number
+    denyBitflag: number
+  }>,
+) {
+  const byRoleId: Record<
+    string,
+    { allowBitflag: number; denyBitflag: number }
+  > = {}
+  for (const item of overrides) {
+    byRoleId[item.roleId] = {
+      allowBitflag: item.allowBitflag,
+      denyBitflag: item.denyBitflag,
+    }
+  }
+  permissionOverridesByRoleId = byRoleId
+}
+
+async function openPermissionsDialog(channel: Channel) {
+  closeActionMenu()
+  permissionsDialogOpen = true
+  permissionsTarget = channel
+  permissionsLoading = true
+  permissionsError = null
+  permissionSavingByKey = {}
+  permissionRoles = []
+  permissionOverridesByRoleId = {}
+  selectedPermissionRoleId = null
+  try {
+    const data = await channelState.loadChannelPermissionOverrides(
+      activeGuild,
+      channel.slug,
+      true,
+    )
+    permissionRoles = sortPermissionRoles(data.roles)
+    applyPermissionOverrides(data.overrides)
+    selectedPermissionRoleId = permissionRoles[0]?.id ?? null
+  } catch (err) {
+    permissionsError = messageFromError(
+      err,
+      'Failed to load channel permission overrides.',
+    )
+  } finally {
+    permissionsLoading = false
+  }
+}
+
+function closePermissionsDialog() {
+  permissionsDialogOpen = false
+  permissionsTarget = null
+  permissionsLoading = false
+  permissionsError = null
+  permissionSavingByKey = {}
+  permissionRoles = []
+  permissionOverridesByRoleId = {}
+  selectedPermissionRoleId = null
+}
+
+function permissionCellKey(roleId: string, permissionMask: number): string {
+  return `${roleId}:${permissionMask}`
+}
+
+function channelPermissionState(
+  roleId: string,
+  permissionMask: number,
+): PermissionOverrideState {
+  const existing = permissionOverridesByRoleId[roleId]
+  if (existing && (existing.allowBitflag & permissionMask) === permissionMask) {
+    return 'allow'
+  }
+  if (existing && (existing.denyBitflag & permissionMask) === permissionMask) {
+    return 'deny'
+  }
+  return 'inherit'
+}
+
+function replaceRolePermissionOverride(
+  roleId: string,
+  allowBitflag: number,
+  denyBitflag: number,
+) {
+  if (allowBitflag === 0 && denyBitflag === 0) {
+    const { [roleId]: _removed, ...remaining } = permissionOverridesByRoleId
+    permissionOverridesByRoleId = remaining
+    return
+  }
+  permissionOverridesByRoleId = {
+    ...permissionOverridesByRoleId,
+    [roleId]: { allowBitflag, denyBitflag },
+  }
+}
+
+async function setPermissionOverrideState(
+  roleId: string,
+  permissionMask: number,
+  nextState: PermissionOverrideState,
+) {
+  if (!activeGuild || !permissionsTarget) return
+  const previous = permissionOverridesByRoleId[roleId] ?? {
+    allowBitflag: 0,
+    denyBitflag: 0,
+  }
+  const nextAllow = previous.allowBitflag & ~permissionMask
+  const nextDeny = previous.denyBitflag & ~permissionMask
+  const allowBitflag =
+    nextState === 'allow' ? nextAllow | permissionMask : nextAllow
+  const denyBitflag =
+    nextState === 'deny' ? nextDeny | permissionMask : nextDeny
+
+  replaceRolePermissionOverride(roleId, allowBitflag, denyBitflag)
+  permissionsError = null
+  const key = permissionCellKey(roleId, permissionMask)
+  permissionSavingByKey = { ...permissionSavingByKey, [key]: true }
+  try {
+    if (allowBitflag === 0 && denyBitflag === 0) {
+      await channelState.deleteChannelPermissionOverride(
+        activeGuild,
+        permissionsTarget.slug,
+        roleId,
+      )
+      replaceRolePermissionOverride(roleId, 0, 0)
+      return
+    }
+    const saved = await channelState.upsertChannelPermissionOverride(
+      activeGuild,
+      permissionsTarget.slug,
+      roleId,
+      { allowBitflag, denyBitflag },
+    )
+    replaceRolePermissionOverride(roleId, saved.allowBitflag, saved.denyBitflag)
+  } catch (err) {
+    replaceRolePermissionOverride(
+      roleId,
+      previous.allowBitflag,
+      previous.denyBitflag,
+    )
+    permissionsError = messageFromError(
+      err,
+      'Failed to save channel permission override.',
+    )
+  } finally {
+    const { [key]: _ignored, ...rest } = permissionSavingByKey
+    permissionSavingByKey = rest
   }
 }
 
@@ -583,10 +816,28 @@ function handleArrowNavigation(event: KeyboardEvent) {
   focusByDelta(source, event.key === 'ArrowDown' ? 1 : -1)
 }
 
+function handleChannelKeydown(event: KeyboardEvent, channelSlug: string) {
+  if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+    if (!canManageChannels) return
+    event.preventDefault()
+    actionMenuSlug = channelSlug
+    categoryActionMenuSlug = null
+    return
+  }
+  handleArrowNavigation(event)
+}
+
 function handleCategoryHeaderKeydown(
   event: KeyboardEvent,
   category: ChannelCategory,
 ) {
+  if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+    if (!canManageChannels) return
+    event.preventDefault()
+    categoryActionMenuSlug = category.slug
+    actionMenuSlug = null
+    return
+  }
   if (event.key === 'Enter' || event.key === ' ') {
     event.preventDefault()
     void toggleCategory(category)
@@ -776,7 +1027,7 @@ function handleCategoryHeaderKeydown(
                         aria-label={`Open channel ${channel.name}`}
                         aria-current={channel.slug === activeChannel ? 'page' : undefined}
                         data-channel-nav="true"
-                        onkeydown={handleArrowNavigation}
+                        onkeydown={(event) => handleChannelKeydown(event, channel.slug)}
                         data-testid={`channel-link-${channel.slug}`}
                       >
                         <span
@@ -807,6 +1058,14 @@ function handleCategoryHeaderKeydown(
                         role="menu"
                         aria-label={`Actions for ${channel.name}`}
                       >
+                        <button
+                          type="button"
+                          class="rounded-md px-2 py-1 text-left text-sm text-foreground hover:bg-muted"
+                          role="menuitem"
+                          onclick={() => void openPermissionsDialog(channel)}
+                        >
+                          Permission overrides
+                        </button>
                         <button
                           type="button"
                           class="rounded-md px-2 py-1 text-left text-sm text-foreground hover:bg-muted"
@@ -905,7 +1164,7 @@ function handleCategoryHeaderKeydown(
                       aria-label={`Open channel ${channel.name}`}
                       aria-current={channel.slug === activeChannel ? 'page' : undefined}
                       data-channel-nav="true"
-                      onkeydown={handleArrowNavigation}
+                      onkeydown={(event) => handleChannelKeydown(event, channel.slug)}
                       data-testid={`channel-link-${channel.slug}`}
                     >
                       <span
@@ -936,6 +1195,14 @@ function handleCategoryHeaderKeydown(
                       role="menu"
                       aria-label={`Actions for ${channel.name}`}
                     >
+                      <button
+                        type="button"
+                        class="rounded-md px-2 py-1 text-left text-sm text-foreground hover:bg-muted"
+                        role="menuitem"
+                        onclick={() => void openPermissionsDialog(channel)}
+                      >
+                        Permission overrides
+                      </button>
                       <button
                         type="button"
                         class="rounded-md px-2 py-1 text-left text-sm text-foreground hover:bg-muted"
@@ -1426,6 +1693,168 @@ function handleCategoryHeaderKeydown(
           {deleteCategorySubmitting ? 'Deleting...' : 'Delete category'}
         </button>
       </div>
+    </div>
+  </div>
+{/if}
+
+{#if permissionsDialogOpen && permissionsTarget}
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+    role="presentation"
+    onclick={(event) => {
+      if (event.target !== event.currentTarget) return
+      closePermissionsDialog()
+    }}
+  >
+    <div
+      class="max-h-[85vh] w-full max-w-4xl overflow-y-auto rounded-lg border border-border bg-card p-6 shadow-2xl"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Channel permissions"
+    >
+      <header class="mb-4 flex items-center justify-between gap-2">
+        <div>
+          <h2 class="text-lg font-semibold">Permission Overrides</h2>
+          <p class="text-sm text-muted-foreground">
+            Channel: <strong>{permissionsTarget.name}</strong>
+          </p>
+        </div>
+        <button
+          type="button"
+          class="rounded-md bg-muted px-3 py-1 text-sm text-foreground hover:opacity-90"
+          onclick={closePermissionsDialog}
+          aria-label="Close channel permissions dialog"
+        >
+          Close
+        </button>
+      </header>
+
+      {#if permissionsError}
+        <p
+          class="mb-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive"
+          role="alert"
+        >
+          {permissionsError}
+        </p>
+      {/if}
+
+      {#if permissionsLoading}
+        <p class="rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
+          Loading permission overrides...
+        </p>
+      {:else if permissionRoles.length === 0}
+        <p class="rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
+          No roles available for channel permission overrides.
+        </p>
+      {:else}
+        <div class="grid gap-4 md:grid-cols-[220px,1fr]">
+          <section aria-label="Roles" class="rounded-md border border-border p-3">
+            <h3 class="mb-2 text-sm font-semibold">Roles</h3>
+            <div class="grid gap-1">
+              {#each permissionRoles as role}
+                <button
+                  type="button"
+                  class={`rounded-md px-2 py-1 text-left text-sm transition-colors ${
+                    selectedPermissionRoleId === role.id
+                      ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                      : 'text-foreground hover:bg-muted'
+                  }`}
+                  aria-pressed={selectedPermissionRoleId === role.id}
+                  onclick={() => {
+                    selectedPermissionRoleId = role.id
+                  }}
+                >
+                  {role.name}
+                </button>
+              {/each}
+            </div>
+          </section>
+
+          <section
+            aria-label="Permission overrides"
+            class="rounded-md border border-border p-3"
+          >
+            {#if selectedPermissionRoleEntry}
+              {@const selectedRole = selectedPermissionRoleEntry}
+              <h3 class="mb-3 text-sm font-semibold">
+                Permissions for {selectedRole.name}
+              </h3>
+              <div class="space-y-3">
+                {#each GUILD_PERMISSION_CATALOG as permission}
+                  {@const currentState = channelPermissionState(
+                    selectedRole.id,
+                    permission.mask,
+                  )}
+                  {@const saving = Boolean(
+                    permissionSavingByKey[
+                      permissionCellKey(selectedRole.id, permission.mask)
+                    ],
+                  )}
+                  <section class="rounded-md border border-border p-2">
+                    <p class="text-sm font-medium text-foreground">{permission.label}</p>
+                    <p class="mb-2 text-xs text-muted-foreground">
+                      {permission.description}
+                    </p>
+                    <fieldset class="flex flex-wrap gap-3">
+                      <legend class="sr-only">
+                        Override state for {permission.label}
+                      </legend>
+                      <label class="inline-flex items-center gap-1 text-sm">
+                        <input
+                          type="radio"
+                          name={`permission-${selectedRole.id}-${permission.key}`}
+                          checked={currentState === 'allow'}
+                          onchange={() =>
+                            void setPermissionOverrideState(
+                              selectedRole.id,
+                              permission.mask,
+                              'allow',
+                            )}
+                          disabled={saving}
+                          aria-label={`Allow ${permission.label} for ${selectedRole.name}`}
+                        />
+                        Allow
+                      </label>
+                      <label class="inline-flex items-center gap-1 text-sm">
+                        <input
+                          type="radio"
+                          name={`permission-${selectedRole.id}-${permission.key}`}
+                          checked={currentState === 'deny'}
+                          onchange={() =>
+                            void setPermissionOverrideState(
+                              selectedRole.id,
+                              permission.mask,
+                              'deny',
+                            )}
+                          disabled={saving}
+                          aria-label={`Deny ${permission.label} for ${selectedRole.name}`}
+                        />
+                        Deny
+                      </label>
+                      <label class="inline-flex items-center gap-1 text-sm">
+                        <input
+                          type="radio"
+                          name={`permission-${selectedRole.id}-${permission.key}`}
+                          checked={currentState === 'inherit'}
+                          onchange={() =>
+                            void setPermissionOverrideState(
+                              selectedRole.id,
+                              permission.mask,
+                              'inherit',
+                            )}
+                          disabled={saving}
+                          aria-label={`Inherit ${permission.label} for ${selectedRole.name}`}
+                        />
+                        Inherit
+                      </label>
+                    </fieldset>
+                  </section>
+                {/each}
+              </div>
+            {/if}
+          </section>
+        </div>
+      {/if}
     </div>
   </div>
 {/if}

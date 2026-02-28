@@ -1,4 +1,5 @@
 export type GuildPermissionKey =
+  | 'VIEW_CHANNEL'
   | 'SEND_MESSAGES'
   | 'MANAGE_CHANNELS'
   | 'KICK_MEMBERS'
@@ -26,6 +27,12 @@ const permissionSpecs: Array<{
   description: string
   bit: number
 }> = [
+  {
+    key: 'VIEW_CHANNEL',
+    label: 'View channel',
+    description: 'Can see and open channels.',
+    bit: 12,
+  },
   {
     key: 'SEND_MESSAGES',
     label: 'Send messages',
@@ -113,7 +120,7 @@ export const ALL_ROLE_PERMISSIONS_BITFLAG = GUILD_PERMISSION_CATALOG.reduce(
 )
 
 export const DEFAULT_EVERYONE_PERMISSIONS_BITFLAG =
-  (1 << 0) | (1 << 9) | (1 << 10)
+  (1 << 12) | (1 << 0) | (1 << 9) | (1 << 10)
 
 export function hasGuildPermission(
   bitflag: number,

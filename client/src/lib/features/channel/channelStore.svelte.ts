@@ -3,24 +3,31 @@ import {
   createChannel as createChannelApi,
   deleteCategory as deleteCategoryApi,
   deleteChannel as deleteChannelApi,
+  deleteChannelPermissionOverride as deleteChannelPermissionOverrideApi,
   listCategories as listCategoriesApi,
+  listChannelPermissionOverrides as listChannelPermissionOverridesApi,
   listChannels as listChannelsApi,
   reorderCategories as reorderCategoriesApi,
   reorderChannels as reorderChannelsApi,
   setCategoryCollapsed as setCategoryCollapsedApi,
   updateCategory as updateCategoryApi,
   updateChannel as updateChannelApi,
+  upsertChannelPermissionOverride as upsertChannelPermissionOverrideApi,
 } from './channelApi'
 import type {
   Channel,
   ChannelCategory,
+  ChannelPermissionOverride,
+  ChannelPermissionOverrides,
   CreateCategoryInput,
   CreateChannelInput,
   DeleteCategoryResult,
+  DeleteChannelPermissionOverrideResult,
   DeleteChannelResult,
   ReorderChannelPositionInput,
   UpdateCategoryInput,
   UpdateChannelInput,
+  UpsertChannelPermissionOverrideInput,
 } from './types'
 
 let latestLoadRequestToken = 0
@@ -72,6 +79,13 @@ function activateGuildFromCache(guildSlug: string): Channel[] {
   return channelState.channels
 }
 
+function channelPermissionOverrideCacheKey(
+  guildSlug: string,
+  channelSlug: string,
+): string {
+  return `${guildSlug}:${channelSlug}`
+}
+
 export const channelState = $state({
   activeGuild: null as string | null,
   channels: [] as Channel[],
@@ -81,6 +95,10 @@ export const channelState = $state({
   loadedByGuild: {} as Record<string, boolean>,
   cachedChannelsByGuild: {} as Record<string, Channel[]>,
   cachedCategoriesByGuild: {} as Record<string, ChannelCategory[]>,
+  permissionOverridesByChannel: {} as Record<
+    string,
+    ChannelPermissionOverrides
+  >,
   error: null as string | null,
 
   loadChannels: async (
@@ -208,6 +226,9 @@ export const channelState = $state({
       channelState.channels = channelState.channels.filter(
         (channel) => channel.slug !== deleted.deletedSlug,
       )
+      delete channelState.permissionOverridesByChannel[
+        channelPermissionOverrideCacheKey(guildSlug, channelSlug)
+      ]
       channelState.activeGuild = guildSlug
       channelState.loadedByGuild[guildSlug] = true
       cacheGuildData(guildSlug, channelState.channels, channelState.categories)
@@ -473,6 +494,123 @@ export const channelState = $state({
     }
   },
 
+  loadChannelPermissionOverrides: async (
+    guildSlug: string,
+    channelSlug: string,
+    force = false,
+  ): Promise<ChannelPermissionOverrides> => {
+    if (!guildSlug || !channelSlug) {
+      return { roles: [], overrides: [] }
+    }
+    const cacheKey = channelPermissionOverrideCacheKey(guildSlug, channelSlug)
+    if (!force && channelState.permissionOverridesByChannel[cacheKey]) {
+      return channelState.permissionOverridesByChannel[cacheKey]
+    }
+
+    channelState.error = null
+    try {
+      const loaded = await listChannelPermissionOverridesApi(
+        guildSlug,
+        channelSlug,
+      )
+      channelState.permissionOverridesByChannel[cacheKey] = {
+        roles: [...loaded.roles].sort((a, b) => a.position - b.position),
+        overrides: [...loaded.overrides],
+      }
+      return channelState.permissionOverridesByChannel[cacheKey]
+    } catch (err) {
+      channelState.error =
+        err instanceof Error
+          ? err.message
+          : 'Failed to load channel permission overrides'
+      throw err
+    }
+  },
+
+  upsertChannelPermissionOverride: async (
+    guildSlug: string,
+    channelSlug: string,
+    roleId: string,
+    input: UpsertChannelPermissionOverrideInput,
+  ): Promise<ChannelPermissionOverride> => {
+    channelState.saving = true
+    channelState.error = null
+    try {
+      const updated = await upsertChannelPermissionOverrideApi(
+        guildSlug,
+        channelSlug,
+        roleId,
+        input,
+      )
+      const cacheKey = channelPermissionOverrideCacheKey(guildSlug, channelSlug)
+      const existing = channelState.permissionOverridesByChannel[cacheKey]
+      if (existing) {
+        const index = existing.overrides.findIndex(
+          (item) => item.roleId === updated.roleId,
+        )
+        const nextOverrides = [...existing.overrides]
+        if (index >= 0) {
+          nextOverrides[index] = updated
+        } else {
+          nextOverrides.push(updated)
+        }
+        channelState.permissionOverridesByChannel[cacheKey] = {
+          ...existing,
+          overrides: nextOverrides,
+        }
+      }
+      return updated
+    } catch (err) {
+      channelState.error =
+        err instanceof Error
+          ? err.message
+          : 'Failed to save channel permission override'
+      throw err
+    } finally {
+      channelState.saving = false
+    }
+  },
+
+  deleteChannelPermissionOverride: async (
+    guildSlug: string,
+    channelSlug: string,
+    roleId: string,
+  ): Promise<DeleteChannelPermissionOverrideResult> => {
+    channelState.saving = true
+    channelState.error = null
+    try {
+      const deleted = await deleteChannelPermissionOverrideApi(
+        guildSlug,
+        channelSlug,
+        roleId,
+      )
+      if (deleted.removed) {
+        const cacheKey = channelPermissionOverrideCacheKey(
+          guildSlug,
+          channelSlug,
+        )
+        const existing = channelState.permissionOverridesByChannel[cacheKey]
+        if (existing) {
+          channelState.permissionOverridesByChannel[cacheKey] = {
+            ...existing,
+            overrides: existing.overrides.filter(
+              (item) => item.roleId !== deleted.roleId,
+            ),
+          }
+        }
+      }
+      return deleted
+    } catch (err) {
+      channelState.error =
+        err instanceof Error
+          ? err.message
+          : 'Failed to delete channel permission override'
+      throw err
+    } finally {
+      channelState.saving = false
+    }
+  },
+
   bySlug: (channelSlug: string): Channel | null =>
     channelState.channels.find((channel) => channel.slug === channelSlug) ??
     null,
@@ -487,6 +625,7 @@ export const channelState = $state({
     channelState.loadedByGuild = {}
     channelState.cachedChannelsByGuild = {}
     channelState.cachedCategoriesByGuild = {}
+    channelState.permissionOverridesByChannel = {}
     channelState.error = null
   },
 })

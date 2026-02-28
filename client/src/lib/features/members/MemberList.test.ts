@@ -143,7 +143,7 @@ function seedGuildData() {
         name: '@everyone',
         color: '#99aab5',
         position: 2147483647,
-        permissionsBitflag: 1537,
+        permissionsBitflag: 5633,
         isDefault: true,
         isSystem: true,
         canEdit: false,

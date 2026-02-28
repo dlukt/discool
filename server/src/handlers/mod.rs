@@ -7,7 +7,7 @@ use axum::{
     },
     middleware::{self, Next},
     response::Response,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use axum_prometheus::PrometheusMetricLayer;
 
@@ -97,6 +97,15 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/guilds/{guild_slug}/channels/{channel_slug}",
             patch(channels::update_channel).delete(channels::delete_channel),
+        )
+        .route(
+            "/guilds/{guild_slug}/channels/{channel_slug}/permission-overrides",
+            get(channels::list_channel_permission_overrides),
+        )
+        .route(
+            "/guilds/{guild_slug}/channels/{channel_slug}/permission-overrides/{role_id}",
+            put(channels::upsert_channel_permission_override)
+                .delete(channels::delete_channel_permission_override),
         )
         .route(
             "/guilds/{guild_slug}/roles/{role_id}",
