@@ -7,7 +7,7 @@ use axum::{
     },
     middleware::{self, Next},
     response::Response,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use axum_prometheus::PrometheusMetricLayer;
 
@@ -15,6 +15,7 @@ use crate::AppState;
 
 mod admin;
 mod auth;
+mod guilds;
 mod health;
 mod instance;
 mod users;
@@ -39,6 +40,15 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/auth/recovery-email/recover", get(auth::recover_identity))
         .route("/auth/logout", delete(auth::logout))
+        .route(
+            "/guilds",
+            get(guilds::list_guilds).post(guilds::create_guild),
+        )
+        .route("/guilds/{guild_slug}", patch(guilds::update_guild))
+        .route(
+            "/guilds/{guild_slug}/icon",
+            get(guilds::get_guild_icon).post(guilds::upload_guild_icon),
+        )
         .route(
             "/users/me/profile",
             get(users::get_profile).patch(users::update_profile),

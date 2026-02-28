@@ -12,6 +12,8 @@ import MessageArea from '$lib/features/chat/MessageArea.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import GuildRail from '$lib/features/guild/GuildRail.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
+import GuildSettings from '$lib/features/guild/GuildSettings.svelte'
+// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import MemberList from '$lib/features/members/MemberList.svelte'
 
 type ShellMode = 'home' | 'channel' | 'settings' | 'admin'
@@ -44,7 +46,6 @@ let {
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 const routerAction = routerLink
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let shellMode = $derived(mode)
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let canAccessAdmin = $derived(isAdmin)
@@ -56,6 +57,8 @@ let shellRecoveryNudge = $derived(showRecoveryNudge)
 let viewport = $state<ViewportMode>('desktop')
 let tabletMembersVisible = $state(false)
 let mobilePanel = $state<MobilePanel>('messages')
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let guildSettingsOpen = $state(false)
 let mainContent = $state<HTMLElement | null>(null)
 let lastFocusedPath = $state<string | null>(null)
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
@@ -92,6 +95,8 @@ let params = $derived(
 let activeGuild = $derived(params.guild ?? 'lobby')
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let activeChannel = $derived(params.channel ?? 'general')
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let canOpenGuildSettings = $derived(shellMode === 'channel')
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 function openMobilePanel(panel: MobilePanel) {
@@ -116,6 +121,16 @@ async function handleOpenSettings() {
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 async function handleDismissRecoveryNudge() {
   await onDismissRecoveryNudge?.()
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function openGuildSettings() {
+  guildSettingsOpen = true
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+async function handleCloseGuildSettings() {
+  guildSettingsOpen = false
 }
 
 $effect(() => {
@@ -172,6 +187,15 @@ $effect(() => {
           >
             Settings
           </a>
+          {#if canOpenGuildSettings}
+            <button
+              type="button"
+              class="rounded-md bg-muted px-2 py-1 text-xs text-foreground"
+              onclick={openGuildSettings}
+            >
+              Guild settings
+            </button>
+          {/if}
           <button
             type="button"
             class="rounded-md bg-destructive px-2 py-1 text-xs font-medium text-destructive-foreground"
@@ -298,6 +322,15 @@ $effect(() => {
           >
             Settings
           </a>
+          {#if canOpenGuildSettings}
+            <button
+              type="button"
+              class="rounded-md bg-muted px-3 py-2 text-xs font-medium text-foreground"
+              onclick={openGuildSettings}
+            >
+              Guild settings
+            </button>
+          {/if}
           <button
             type="button"
             class="rounded-md bg-destructive px-3 py-2 text-xs font-medium text-destructive-foreground"
@@ -336,3 +369,9 @@ $effect(() => {
     {/if}
   </div>
 {/if}
+
+<GuildSettings
+  open={guildSettingsOpen}
+  guildSlug={activeGuild}
+  onClose={handleCloseGuildSettings}
+/>

@@ -6,6 +6,7 @@ import { ApiError, getInstanceStatus, type InstanceStatus } from '$lib/api'
 
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import SetupPage from '$lib/components/SetupPage.svelte'
+import { guildState } from '$lib/features/guild/guildStore.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import CrossInstanceJoinPrompt from '$lib/features/identity/CrossInstanceJoinPrompt.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
@@ -97,6 +98,7 @@ $effect(() => {
 
 $effect(() => {
   if (identityState.session) return
+  guildState.clear()
   initialRouteResolved = false
   shellBootstrapping = true
 })

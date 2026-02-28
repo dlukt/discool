@@ -152,6 +152,20 @@ async fn http_post(addr: &str, path: &str, json_body: &str) -> String {
     String::from_utf8_lossy(&buf).to_string()
 }
 
+async fn http_post_with_bearer(addr: &str, path: &str, json_body: &str, token: &str) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
+        json_body.as_bytes().len(),
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    String::from_utf8_lossy(&buf).to_string()
+}
+
 async fn http_patch_with_bearer(addr: &str, path: &str, json_body: &str, token: &str) -> String {
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
@@ -2001,6 +2015,110 @@ async fn expired_session_returns_401() {
 
     let res = http_response_with_bearer(&addr, "/api/v1/admin/health", token).await;
     assert_eq!(response_status(&res), 401);
+}
+
+#[tokio::test]
+async fn guilds_require_authentication() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let create_body = json!({ "name": "Makers Hub" }).to_string();
+    let res = http_post(&addr, "/api/v1/guilds", &create_body).await;
+    assert_eq!(response_status(&res), 401);
+
+    let res = http_response(&addr, "/api/v1/guilds").await;
+    assert_eq!(response_status(&res), 401);
+}
+
+#[tokio::test]
+async fn guilds_create_sets_owner_and_default_general_channel() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let token = register_and_authenticate(&addr, "liam", [21u8; 32]).await;
+    let create_body = json!({
+        "name": "Makers Hub",
+        "description": "Build cool things",
+    })
+    .to_string();
+
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &create_body, &token).await;
+    assert_eq!(response_status(&res), 201);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["data"]["name"], json!("Makers Hub"));
+    assert_eq!(value["data"]["slug"], json!("makers-hub"));
+    assert_eq!(value["data"]["default_channel_slug"], json!("general"));
+    assert_eq!(value["data"]["is_owner"], json!(true));
+
+    let res = http_response_with_bearer(&addr, "/api/v1/guilds", &token).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["data"].as_array().unwrap().len(), 1);
+    assert_eq!(value["data"][0]["slug"], json!("makers-hub"));
+}
+
+#[tokio::test]
+async fn guilds_update_rejects_non_owner_and_allows_owner() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "owner", [31u8; 32]).await;
+    let create_body = json!({ "name": "Owner Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &create_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let created: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let slug = created["data"]["slug"].as_str().unwrap();
+
+    let other_token = register_and_authenticate(&addr, "other", [32u8; 32]).await;
+    let patch_body = json!({ "name": "Attempted Takeover" }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{slug}"),
+        &patch_body,
+        &other_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 403);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["error"]["code"], json!("FORBIDDEN"));
+
+    let owner_patch = json!({
+        "name": "Owner Guild Updated",
+        "description": "Updated by owner",
+    })
+    .to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{slug}"),
+        &owner_patch,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 200);
+    let updated: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(updated["data"]["name"], json!("Owner Guild Updated"));
+    assert_eq!(updated["data"]["description"], json!("Updated by owner"));
 }
 
 #[tokio::test]
