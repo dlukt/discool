@@ -56,7 +56,7 @@ development_status:
   epic-2: in-progress
   2-1-client-side-keypair-generation-and-identity-creation: done
   2-2-challenge-response-authentication-and-session-management: done
-  2-3-identity-persistence-and-auto-login: review
+  2-3-identity-persistence-and-auto-login: done
   2-8-vitest-setup-and-client-test-baseline: done
   2-4-display-name-and-avatar-management: done
   2-5-cross-instance-identity-verification: done
