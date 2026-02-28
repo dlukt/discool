@@ -90,7 +90,7 @@ pub async fn list_roles(
     user_id: &str,
     guild_slug: &str,
 ) -> Result<Vec<RoleResponse>, AppError> {
-    let guild = load_guild_with_role_management_access(pool, user_id, guild_slug).await?;
+    let guild = load_guild_with_role_assignment_access(pool, user_id, guild_slug).await?;
     ensure_default_role(pool, &guild).await?;
     let roles = role::list_roles_by_guild_id(pool, &guild.id).await?;
 
@@ -106,7 +106,7 @@ pub async fn create_role(
     guild_slug: &str,
     input: CreateRoleInput,
 ) -> Result<RoleResponse, AppError> {
-    let guild = load_guild_with_role_management_access(pool, user_id, guild_slug).await?;
+    let guild = load_owned_guild_for_role_definitions(pool, user_id, guild_slug).await?;
     ensure_default_role(pool, &guild).await?;
 
     let name = normalize_custom_role_name(&input.name)?;
@@ -152,7 +152,7 @@ pub async fn update_role(
     role_id: &str,
     input: UpdateRoleInput,
 ) -> Result<RoleResponse, AppError> {
-    let guild = load_guild_with_role_management_access(pool, user_id, guild_slug).await?;
+    let guild = load_owned_guild_for_role_definitions(pool, user_id, guild_slug).await?;
     if role_id.starts_with("owner:") {
         return Err(AppError::ValidationError(
             "The Owner role cannot be edited".to_string(),
@@ -220,7 +220,7 @@ pub async fn delete_role(
     guild_slug: &str,
     role_id: &str,
 ) -> Result<DeleteRoleResponse, AppError> {
-    let guild = load_guild_with_role_management_access(pool, user_id, guild_slug).await?;
+    let guild = load_owned_guild_for_role_definitions(pool, user_id, guild_slug).await?;
     if role_id.starts_with("owner:") {
         return Err(AppError::ValidationError(
             "The Owner role cannot be deleted".to_string(),
@@ -257,7 +257,7 @@ pub async fn reorder_roles(
     guild_slug: &str,
     input: ReorderRolesInput,
 ) -> Result<Vec<RoleResponse>, AppError> {
-    let guild = load_guild_with_role_management_access(pool, user_id, guild_slug).await?;
+    let guild = load_owned_guild_for_role_definitions(pool, user_id, guild_slug).await?;
     ensure_default_role(pool, &guild).await?;
 
     let existing = role::list_roles_by_guild_id(pool, &guild.id).await?;
@@ -392,7 +392,7 @@ pub async fn update_member_roles(
     target_user_id: &str,
     input: UpdateMemberRolesInput,
 ) -> Result<GuildMemberResponse, AppError> {
-    let guild = load_guild_with_role_management_access(pool, user_id, guild_slug).await?;
+    let guild = load_guild_with_role_assignment_access(pool, user_id, guild_slug).await?;
     ensure_default_role(pool, &guild).await?;
 
     if !guild_member::is_guild_member(pool, &guild.id, target_user_id).await? {
@@ -420,6 +420,8 @@ pub async fn update_member_roles(
     }
 
     let normalized_role_ids = normalize_role_ids(&input.role_ids)?;
+    let role_ids_before_assignment =
+        role::list_assigned_role_ids(pool, &guild.id, target_user_id).await?;
     let roles = role::list_roles_by_guild_id(pool, &guild.id).await?;
     let role_by_id: HashMap<String, Role> = roles
         .iter()
@@ -465,6 +467,30 @@ pub async fn update_member_roles(
     )
     .await?;
     permissions::invalidate_guild_permission_cache(&guild.id);
+    if user_id != guild.owner_id {
+        let current_role_ids: HashSet<String> =
+            role_ids_before_assignment.iter().cloned().collect();
+        let next_role_ids: HashSet<String> = normalized_role_ids.iter().cloned().collect();
+        let added_role_ids: Vec<String> = normalized_role_ids
+            .iter()
+            .filter(|role_id| !current_role_ids.contains(*role_id))
+            .cloned()
+            .collect();
+        let removed_role_ids: Vec<String> = role_ids_before_assignment
+            .iter()
+            .filter(|role_id| !next_role_ids.contains(*role_id))
+            .cloned()
+            .collect();
+        tracing::info!(
+            guild_id = %guild.id,
+            guild_slug = %guild.slug,
+            actor_user_id = %user_id,
+            target_user_id = %target_user_id,
+            added_role_ids = ?added_role_ids,
+            removed_role_ids = ?removed_role_ids,
+            "Delegated role assignment updated"
+        );
+    }
 
     let target_member = guild_member::find_guild_member_profile(pool, &guild.id, target_user_id)
         .await?
@@ -512,7 +538,23 @@ async fn ensure_default_role(pool: &DbPool, guild: &Guild) -> Result<(), AppErro
     }
 }
 
-async fn load_guild_with_role_management_access(
+async fn load_owned_guild_for_role_definitions(
+    pool: &DbPool,
+    user_id: &str,
+    guild_slug: &str,
+) -> Result<Guild, AppError> {
+    let guild = guild::find_guild_by_slug(pool, guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if guild.owner_id != user_id {
+        return Err(AppError::Forbidden(
+            "Only guild owners can manage role definitions".to_string(),
+        ));
+    }
+    Ok(guild)
+}
+
+async fn load_guild_with_role_assignment_access(
     pool: &DbPool,
     user_id: &str,
     guild_slug: &str,

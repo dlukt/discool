@@ -61,7 +61,8 @@ const permissionSpecs: Array<{
   {
     key: 'MANAGE_ROLES',
     label: 'Manage roles',
-    description: 'Can create, edit, and delete roles.',
+    description:
+      'Can assign or remove roles for members below your highest role.',
     bit: 4,
   },
   {

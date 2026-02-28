@@ -91,7 +91,7 @@ development_status:
   5-3-role-hierarchy-and-ordering: done
   5-4-role-assignment-to-members: done
   5-5-channel-level-permission-overrides: done
-  5-6-role-management-delegation: backlog
+  5-6-role-management-delegation: done
   5-7-member-list-with-presence: backlog
   epic-5-retrospective: optional
 

@@ -3112,6 +3112,44 @@ async fn member_role_assignment_enforces_hierarchy_and_invalidates_permission_ca
     .unwrap();
     drop(pool);
 
+    let delegated_create_role =
+        json!({ "name": "Delegated Create", "color": "#445566" }).to_string();
+    let res =
+        http_post_with_bearer(&addr, &roles_path, &delegated_create_role, &manager_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let delegated_update_role = json!({ "name": "Delegated Update" }).to_string();
+    let delegated_update_path = format!("/api/v1/guilds/{guild_slug}/roles/{helper_role_id}");
+    let res = http_patch_with_bearer(
+        &addr,
+        &delegated_update_path,
+        &delegated_update_role,
+        &manager_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 403);
+
+    let res = http_delete_with_bearer(&addr, &delegated_update_path, &manager_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let delegated_reorder_roles = json!({
+        "role_ids": [
+            manager_role_id.clone(),
+            helper_role_id.clone(),
+            high_role_id.clone(),
+        ],
+    })
+    .to_string();
+    let delegated_reorder_path = format!("/api/v1/guilds/{guild_slug}/roles/reorder");
+    let res = http_patch_with_bearer(
+        &addr,
+        &delegated_reorder_path,
+        &delegated_reorder_roles,
+        &manager_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 403);
+
     let members_path = format!("/api/v1/guilds/{guild_slug}/members");
     let res = http_response_with_bearer(&addr, &members_path, &manager_token).await;
     assert_eq!(response_status(&res), 200);
@@ -3127,6 +3165,16 @@ async fn member_role_assignment_enforces_hierarchy_and_invalidates_permission_ca
         &addr,
         &update_target_path,
         &high_role_assignment,
+        &manager_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 403);
+
+    let manager_role_assignment = json!({ "role_ids": [manager_role_id.clone()] }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        &update_target_path,
+        &manager_role_assignment,
         &manager_token,
     )
     .await;

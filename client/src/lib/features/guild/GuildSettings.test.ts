@@ -247,6 +247,11 @@ describe('GuildSettings', () => {
     expect(within(dialog).getByLabelText('Kick members')).toBeInTheDocument()
     expect(within(dialog).getByLabelText('Ban members')).toBeInTheDocument()
     expect(within(dialog).getByLabelText('Manage roles')).toBeInTheDocument()
+    expect(
+      within(dialog).getByText(
+        'Can assign or remove roles for members below your highest role.',
+      ),
+    ).toBeInTheDocument()
     expect(within(dialog).getByLabelText('Manage guild')).toBeInTheDocument()
     expect(within(dialog).getByLabelText('Manage invites')).toBeInTheDocument()
     expect(within(dialog).getByLabelText('Mute members')).toBeInTheDocument()
@@ -366,7 +371,7 @@ describe('GuildSettings', () => {
       ...ownerGuild(),
       isOwner: false,
     })
-    const { getByText, queryByRole } = render(GuildSettings, {
+    const { getByText, queryByLabelText, queryByRole } = render(GuildSettings, {
       open: true,
       guildSlug: 'makers-hub',
     })
@@ -380,5 +385,7 @@ describe('GuildSettings', () => {
     expect(
       queryByRole('button', { name: 'Create role' }),
     ).not.toBeInTheDocument()
+    expect(queryByLabelText('Edit role Moderators')).not.toBeInTheDocument()
+    expect(queryByLabelText('Delete role Moderators')).not.toBeInTheDocument()
   })
 })

@@ -207,6 +207,31 @@ describe('MemberList', () => {
     })
   })
 
+  it('hides assign role controls when delegated role management is unavailable', async () => {
+    memberDataByGuild.lobby = {
+      ...memberDataByGuild.lobby,
+      canManageRoles: false,
+    }
+
+    const { getByTestId, queryByRole } = render(MemberList, {
+      activeGuild: 'lobby',
+    })
+
+    await waitFor(() => {
+      expect(guildState.loadMembers).toHaveBeenCalledWith('lobby', true)
+    })
+
+    await fireEvent.keyDown(getByTestId('member-row-user-target'), {
+      key: 'ContextMenu',
+    })
+
+    expect(
+      queryByRole('button', {
+        name: 'Assign role',
+      }),
+    ).not.toBeInTheDocument()
+  })
+
   it('restores role toggle state and shows actionable error text on failure', async () => {
     vi.mocked(guildState.updateMemberRoles).mockRejectedValueOnce(
       new Error('Role update failed'),
