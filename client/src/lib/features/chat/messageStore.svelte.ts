@@ -22,7 +22,14 @@ type MessageCreatePayload = {
   content?: string
   is_system?: boolean
   created_at?: string
+  updated_at?: string
   client_nonce?: string
+}
+
+type MessageDeletePayload = {
+  id?: string
+  guild_slug?: string
+  channel_slug?: string
 }
 
 export type ChatAuthorInput = {
@@ -114,8 +121,11 @@ function mergeMessages(
   return sortMessages([...byId.values()])
 }
 
-function parseMessageCreateEnvelope(envelope: WsEnvelope): ChatMessage | null {
-  if (envelope.op !== 'message_create') return null
+function parseMessageMutationEnvelope(
+  envelope: WsEnvelope,
+  expectedOp: 'message_create' | 'message_update',
+): ChatMessage | null {
+  if (envelope.op !== expectedOp) return null
   if (!isRecord(envelope.d)) return null
   const payload = envelope.d as MessageCreatePayload
 
@@ -152,8 +162,32 @@ function parseMessageCreateEnvelope(envelope: WsEnvelope): ChatMessage | null {
     content: typeof payload.content === 'string' ? payload.content : '',
     is_system: payload.is_system === true,
     created_at: createdAt,
+    updated_at: payload.updated_at?.trim() || createdAt,
     client_nonce: payload.client_nonce?.trim() || undefined,
   })
+}
+
+function parseMessageCreateEnvelope(envelope: WsEnvelope): ChatMessage | null {
+  return parseMessageMutationEnvelope(envelope, 'message_create')
+}
+
+function parseMessageUpdateEnvelope(envelope: WsEnvelope): ChatMessage | null {
+  return parseMessageMutationEnvelope(envelope, 'message_update')
+}
+
+function parseMessageDeleteEnvelope(envelope: WsEnvelope): {
+  id: string
+  guildSlug: string
+  channelSlug: string
+} | null {
+  if (envelope.op !== 'message_delete') return null
+  if (!isRecord(envelope.d)) return null
+  const payload = envelope.d as MessageDeletePayload
+  const id = payload.id?.trim()
+  const guildSlug = payload.guild_slug?.trim()
+  const channelSlug = payload.channel_slug?.trim()
+  if (!id || !guildSlug || !channelSlug) return null
+  return { id, guildSlug, channelSlug }
 }
 
 function updateHistoryState(
@@ -453,6 +487,7 @@ export const messageState = $state({
     const channelKey = toChannelKey(normalizedGuild, normalizedChannel)
     const nonce = generateClientNonce()
     const optimisticMessageId = `optimistic-${nonce}`
+    const now = new Date().toISOString()
     const optimisticMessage: ChatMessage = {
       id: optimisticMessageId,
       guildSlug: normalizedGuild,
@@ -464,7 +499,8 @@ export const messageState = $state({
       authorRoleColor: author.roleColor || DEFAULT_ROLE_COLOR,
       content: normalizedContent,
       isSystem: false,
-      createdAt: new Date().toISOString(),
+      createdAt: now,
+      updatedAt: now,
       optimistic: true,
       clientNonce: nonce,
     }
@@ -502,6 +538,48 @@ export const messageState = $state({
     }
 
     return false
+  },
+
+  sendMessageUpdate: (
+    guildSlug: string,
+    channelSlug: string,
+    messageId: string,
+    content: string,
+  ): boolean => {
+    const normalizedGuild = guildSlug.trim()
+    const normalizedChannel = channelSlug.trim()
+    const normalizedMessageId = messageId.trim()
+    const normalizedContent = normalizeOutboundContent(content)
+
+    if (!normalizedGuild || !normalizedChannel || !normalizedMessageId)
+      return false
+    if (!normalizedContent.trim()) return false
+
+    return wsClient.send('c_message_update', {
+      guild_slug: normalizedGuild,
+      channel_slug: normalizedChannel,
+      message_id: normalizedMessageId,
+      content: normalizedContent,
+    })
+  },
+
+  sendMessageDelete: (
+    guildSlug: string,
+    channelSlug: string,
+    messageId: string,
+  ): boolean => {
+    const normalizedGuild = guildSlug.trim()
+    const normalizedChannel = channelSlug.trim()
+    const normalizedMessageId = messageId.trim()
+
+    if (!normalizedGuild || !normalizedChannel || !normalizedMessageId)
+      return false
+
+    return wsClient.send('c_message_delete', {
+      guild_slug: normalizedGuild,
+      channel_slug: normalizedChannel,
+      message_id: normalizedMessageId,
+    })
   },
 
   ingestServerMessage: (incoming: ChatMessage): void => {
@@ -547,6 +625,44 @@ export const messageState = $state({
     messageState.version += 1
   },
 
+  ingestUpdatedMessage: (incoming: ChatMessage): void => {
+    const channelKey = toChannelKey(incoming.guildSlug, incoming.channelSlug)
+    const existing = messageState.messagesByChannel[channelKey] ?? []
+    if (!existing.some((message) => message.id === incoming.id)) return
+
+    messageState.messagesByChannel[channelKey] = existing.map((message) =>
+      message.id === incoming.id
+        ? {
+            ...incoming,
+            optimistic: false,
+            clientNonce: message.clientNonce ?? incoming.clientNonce,
+          }
+        : message,
+    )
+    messageState.version += 1
+  },
+
+  ingestDeletedMessage: (
+    guildSlug: string,
+    channelSlug: string,
+    messageId: string,
+  ): void => {
+    const channelKey = toChannelKey(guildSlug, channelSlug)
+    const existing = messageState.messagesByChannel[channelKey] ?? []
+    const removed = existing.find((message) => message.id === messageId)
+    if (!removed) return
+
+    messageState.messagesByChannel[channelKey] = existing.filter(
+      (message) => message.id !== messageId,
+    )
+    if (removed.clientNonce) {
+      const { [removed.clientNonce]: _removed, ...rest } =
+        messageState.optimisticByNonce
+      messageState.optimisticByNonce = rest
+    }
+    messageState.version += 1
+  },
+
   clearAll: (): void => {
     messageState.activeChannelKey = null
     messageState.messagesByChannel = {}
@@ -557,7 +673,24 @@ export const messageState = $state({
 })
 
 wsClient.subscribe((envelope) => {
-  const parsed = parseMessageCreateEnvelope(envelope)
-  if (!parsed) return
-  messageState.ingestServerMessage(parsed)
+  const created = parseMessageCreateEnvelope(envelope)
+  if (created) {
+    messageState.ingestServerMessage(created)
+    return
+  }
+
+  const updated = parseMessageUpdateEnvelope(envelope)
+  if (updated) {
+    messageState.ingestUpdatedMessage(updated)
+    return
+  }
+
+  const deleted = parseMessageDeleteEnvelope(envelope)
+  if (deleted) {
+    messageState.ingestDeletedMessage(
+      deleted.guildSlug,
+      deleted.channelSlug,
+      deleted.id,
+    )
+  }
 })

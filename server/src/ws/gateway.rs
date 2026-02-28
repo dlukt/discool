@@ -40,6 +40,22 @@ struct MessageCreatePayload {
 }
 
 #[derive(Debug, Deserialize)]
+struct MessageUpdatePayload {
+    guild_slug: String,
+    channel_slug: String,
+    message_id: String,
+    #[serde(default)]
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MessageDeletePayload {
+    guild_slug: String,
+    channel_slug: String,
+    message_id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct TypingStartPayload {
     guild_slug: String,
     channel_slug: String,
@@ -200,6 +216,55 @@ async fn handle_message_create(
     Ok(())
 }
 
+async fn handle_message_update(
+    pool: &DbPool,
+    user_id: &str,
+    payload: MessageUpdatePayload,
+) -> Result<(), AppError> {
+    let updated = message_service::update_message(
+        pool,
+        user_id,
+        message_service::UpdateMessageInput {
+            guild_slug: payload.guild_slug,
+            channel_slug: payload.channel_slug,
+            message_id: payload.message_id,
+            content: payload.content,
+        },
+    )
+    .await?;
+    registry::broadcast_to_channel(
+        &updated.guild_slug,
+        &updated.channel_slug,
+        ServerOp::MessageUpdate,
+        &updated,
+    );
+    Ok(())
+}
+
+async fn handle_message_delete(
+    pool: &DbPool,
+    user_id: &str,
+    payload: MessageDeletePayload,
+) -> Result<(), AppError> {
+    let deleted = message_service::delete_message(
+        pool,
+        user_id,
+        message_service::DeleteMessageInput {
+            guild_slug: payload.guild_slug,
+            channel_slug: payload.channel_slug,
+            message_id: payload.message_id,
+        },
+    )
+    .await?;
+    registry::broadcast_to_channel(
+        &deleted.guild_slug,
+        &deleted.channel_slug,
+        ServerOp::MessageDelete,
+        &deleted,
+    );
+    Ok(())
+}
+
 fn handle_typing_start(connection_id: &str, user_id: &str, payload: TypingStartPayload) {
     let event_payload = json!({
         "guild_slug": payload.guild_slug,
@@ -283,6 +348,26 @@ async fn process_client_message(
             match parse_payload::<MessageCreatePayload>(envelope.d, &envelope.op) {
                 Ok(payload) => {
                     if let Err(error) = handle_message_create(pool, user_id, payload).await {
+                        send_app_error(connection_id, error);
+                    }
+                }
+                Err(error) => send_protocol_error(connection_id, error),
+            }
+        }
+        ClientOp::MessageUpdate => {
+            match parse_payload::<MessageUpdatePayload>(envelope.d, &envelope.op) {
+                Ok(payload) => {
+                    if let Err(error) = handle_message_update(pool, user_id, payload).await {
+                        send_app_error(connection_id, error);
+                    }
+                }
+                Err(error) => send_protocol_error(connection_id, error),
+            }
+        }
+        ClientOp::MessageDelete => {
+            match parse_payload::<MessageDeletePayload>(envelope.d, &envelope.op) {
+                Ok(payload) => {
+                    if let Err(error) = handle_message_delete(pool, user_id, payload).await {
                         send_app_error(connection_id, error);
                     }
                 }

@@ -12,6 +12,7 @@ export type ChatMessage = {
   content: string
   isSystem: boolean
   createdAt: string
+  updatedAt: string
   optimistic: boolean
   clientNonce?: string
 }
@@ -28,6 +29,7 @@ export type ChatMessageWire = {
   content: string
   is_system: boolean
   created_at: string
+  updated_at?: string
   client_nonce?: string | null
 }
 
@@ -47,6 +49,7 @@ export function toChatMessage(wire: ChatMessageWire): ChatMessage {
     content: wire.content,
     isSystem: wire.is_system,
     createdAt: wire.created_at,
+    updatedAt: wire.updated_at || wire.created_at,
     optimistic: false,
     clientNonce: wire.client_nonce || undefined,
   }

@@ -36,6 +36,7 @@ const historyApiMock = vi.hoisted(() => {
         content: string
         isSystem: boolean
         createdAt: string
+        updatedAt: string
         optimistic: boolean
         clientNonce?: string
       }>
@@ -73,6 +74,7 @@ function makeMessage(id: string, createdAt: string) {
     content: id,
     isSystem: false,
     createdAt,
+    updatedAt: createdAt,
     optimistic: false,
   }
 }
@@ -126,6 +128,7 @@ describe('messageState', () => {
         content: 'Hello &lt;b&gt;team&lt;/b&gt;',
         is_system: false,
         created_at: '2026-02-28T00:00:00Z',
+        updated_at: '2026-02-28T00:00:00Z',
         client_nonce: payload.client_nonce,
       },
     })
@@ -251,5 +254,52 @@ describe('messageState', () => {
 
     expect(sent).toBe(false)
     expect(messageState.timeline('lobby', 'general')).toHaveLength(0)
+  })
+
+  it('ingests message_update and message_delete without breaking ordering', () => {
+    messageState.ingestServerMessage(
+      makeMessage('msg-001', '2026-02-28T00:00:01Z'),
+    )
+    messageState.ingestServerMessage(
+      makeMessage('msg-002', '2026-02-28T00:00:02Z'),
+    )
+
+    wsMock.state.listener?.({
+      op: 'message_update',
+      d: {
+        id: 'msg-001',
+        guild_slug: 'lobby',
+        channel_slug: 'general',
+        author_user_id: 'user-1',
+        author_username: 'alice',
+        author_display_name: 'Alice',
+        author_avatar_color: '#3366ff',
+        author_role_color: '#3366ff',
+        content: 'edited',
+        is_system: false,
+        created_at: '2026-02-28T00:00:01Z',
+        updated_at: '2026-02-28T00:00:05Z',
+      },
+    })
+
+    let timeline = messageState.timeline('lobby', 'general')
+    expect(timeline.map((message) => message.id)).toEqual([
+      'msg-001',
+      'msg-002',
+    ])
+    expect(timeline[0]?.content).toBe('edited')
+    expect(timeline[0]?.updatedAt).toBe('2026-02-28T00:00:05Z')
+
+    wsMock.state.listener?.({
+      op: 'message_delete',
+      d: {
+        id: 'msg-002',
+        guild_slug: 'lobby',
+        channel_slug: 'general',
+      },
+    })
+
+    timeline = messageState.timeline('lobby', 'general')
+    expect(timeline.map((message) => message.id)).toEqual(['msg-001'])
   })
 })

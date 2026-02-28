@@ -113,6 +113,88 @@ pub async fn find_message_by_id(
     Ok(message)
 }
 
+pub async fn update_message_content_by_id_channel_and_author(
+    pool: &DbPool,
+    message_id: &str,
+    channel_id: &str,
+    author_user_id: &str,
+    content: &str,
+    updated_at: &str,
+) -> Result<bool, AppError> {
+    let rows = match pool {
+        DbPool::Postgres(pool) => sqlx::query(
+            "UPDATE messages
+                 SET content = $1, updated_at = $2
+                 WHERE id = $3
+                   AND channel_id = $4
+                   AND author_user_id = $5",
+        )
+        .bind(content)
+        .bind(updated_at)
+        .bind(message_id)
+        .bind(channel_id)
+        .bind(author_user_id)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+        DbPool::Sqlite(pool) => sqlx::query(
+            "UPDATE messages
+                 SET content = ?1, updated_at = ?2
+                 WHERE id = ?3
+                   AND channel_id = ?4
+                   AND author_user_id = ?5",
+        )
+        .bind(content)
+        .bind(updated_at)
+        .bind(message_id)
+        .bind(channel_id)
+        .bind(author_user_id)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(rows == 1)
+}
+
+pub async fn delete_message_by_id_channel_and_author(
+    pool: &DbPool,
+    message_id: &str,
+    channel_id: &str,
+    author_user_id: &str,
+) -> Result<bool, AppError> {
+    let rows = match pool {
+        DbPool::Postgres(pool) => sqlx::query(
+            "DELETE FROM messages
+                 WHERE id = $1
+                   AND channel_id = $2
+                   AND author_user_id = $3",
+        )
+        .bind(message_id)
+        .bind(channel_id)
+        .bind(author_user_id)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+        DbPool::Sqlite(pool) => sqlx::query(
+            "DELETE FROM messages
+                 WHERE id = ?1
+                   AND channel_id = ?2
+                   AND author_user_id = ?3",
+        )
+        .bind(message_id)
+        .bind(channel_id)
+        .bind(author_user_id)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(rows == 1)
+}
+
 pub async fn list_messages_by_channel_id(
     pool: &DbPool,
     channel_id: &str,
@@ -391,5 +473,117 @@ mod tests {
             .unwrap();
         assert_eq!(clamped_page.messages.len(), 1);
         assert_eq!(clamped_page.messages[0].id, "msg-004");
+    }
+
+    #[tokio::test]
+    async fn sqlite_update_message_respects_channel_and_author_scope() {
+        let pool = init_pool(&DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 1,
+        })
+        .await
+        .unwrap();
+        run_migrations(&pool).await.unwrap();
+        seed_message_fixture(&pool).await;
+
+        let created_at = "2026-02-28T00:00:01Z";
+        insert_message(
+            &pool,
+            "message-1",
+            "guild-id",
+            "channel-id",
+            "author-user-id",
+            "hello",
+            false,
+            created_at,
+            created_at,
+        )
+        .await
+        .unwrap();
+
+        let blocked = update_message_content_by_id_channel_and_author(
+            &pool,
+            "message-1",
+            "channel-id",
+            "owner-user-id",
+            "blocked",
+            "2026-02-28T00:00:02Z",
+        )
+        .await
+        .unwrap();
+        assert!(!blocked);
+
+        let updated = update_message_content_by_id_channel_and_author(
+            &pool,
+            "message-1",
+            "channel-id",
+            "author-user-id",
+            "updated",
+            "2026-02-28T00:00:03Z",
+        )
+        .await
+        .unwrap();
+        assert!(updated);
+
+        let stored = find_message_by_id(&pool, "message-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.content, "updated");
+        assert_eq!(stored.created_at, created_at);
+        assert_eq!(stored.updated_at, "2026-02-28T00:00:03Z");
+    }
+
+    #[tokio::test]
+    async fn sqlite_delete_message_respects_channel_and_author_scope() {
+        let pool = init_pool(&DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 1,
+        })
+        .await
+        .unwrap();
+        run_migrations(&pool).await.unwrap();
+        seed_message_fixture(&pool).await;
+
+        let created_at = "2026-02-28T00:00:01Z";
+        insert_message(
+            &pool,
+            "message-2",
+            "guild-id",
+            "channel-id",
+            "author-user-id",
+            "to-delete",
+            false,
+            created_at,
+            created_at,
+        )
+        .await
+        .unwrap();
+
+        let blocked = delete_message_by_id_channel_and_author(
+            &pool,
+            "message-2",
+            "channel-id",
+            "owner-user-id",
+        )
+        .await
+        .unwrap();
+        assert!(!blocked);
+
+        let deleted = delete_message_by_id_channel_and_author(
+            &pool,
+            "message-2",
+            "channel-id",
+            "author-user-id",
+        )
+        .await
+        .unwrap();
+        assert!(deleted);
+        assert!(
+            find_message_by_id(&pool, "message-2")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

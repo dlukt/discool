@@ -31,6 +31,21 @@ pub struct CreateMessageInput {
     pub client_nonce: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct UpdateMessageInput {
+    pub guild_slug: String,
+    pub channel_slug: String,
+    pub message_id: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeleteMessageInput {
+    pub guild_slug: String,
+    pub channel_slug: String,
+    pub message_id: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MessageResponse {
     pub id: String,
@@ -45,8 +60,16 @@ pub struct MessageResponse {
     pub content: String,
     pub is_system: bool,
     pub created_at: String,
+    pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_nonce: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageDeleteResponse {
+    pub id: String,
+    pub guild_slug: String,
+    pub channel_slug: String,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +138,89 @@ pub async fn create_message(
         normalized_nonce,
     )
     .await
+}
+
+pub async fn update_message(
+    pool: &DbPool,
+    user_id: &str,
+    input: UpdateMessageInput,
+) -> Result<MessageResponse, AppError> {
+    let normalized_message_id = normalize_message_id(&input.message_id)?;
+    let normalized_content = normalize_message_content(&input.content)?;
+    let access =
+        load_channel_with_send_access(pool, user_id, &input.guild_slug, &input.channel_slug)
+            .await?;
+
+    let existing = message::find_message_by_id(pool, &normalized_message_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if existing.guild_id != access.guild.id || existing.channel_id != access.channel.id {
+        return Err(AppError::NotFound);
+    }
+    if existing.author_user_id != user_id {
+        return Err(AppError::Forbidden(
+            "You can only edit your own messages".to_string(),
+        ));
+    }
+
+    let updated_at = Utc::now().to_rfc3339();
+    let updated = message::update_message_content_by_id_channel_and_author(
+        pool,
+        &normalized_message_id,
+        &access.channel.id,
+        user_id,
+        &normalized_content,
+        &updated_at,
+    )
+    .await?;
+    if !updated {
+        return Err(AppError::NotFound);
+    }
+
+    let stored = message::find_message_by_id(pool, &normalized_message_id)
+        .await?
+        .ok_or_else(|| AppError::Internal("Updated message not found".to_string()))?;
+    build_message_response(pool, &access.guild, &access.channel, stored, None).await
+}
+
+pub async fn delete_message(
+    pool: &DbPool,
+    user_id: &str,
+    input: DeleteMessageInput,
+) -> Result<MessageDeleteResponse, AppError> {
+    let normalized_message_id = normalize_message_id(&input.message_id)?;
+    let access =
+        load_channel_with_view_access(pool, user_id, &input.guild_slug, &input.channel_slug)
+            .await?;
+
+    let existing = message::find_message_by_id(pool, &normalized_message_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if existing.guild_id != access.guild.id || existing.channel_id != access.channel.id {
+        return Err(AppError::NotFound);
+    }
+    if existing.author_user_id != user_id {
+        return Err(AppError::Forbidden(
+            "You can only delete your own messages".to_string(),
+        ));
+    }
+
+    let deleted = message::delete_message_by_id_channel_and_author(
+        pool,
+        &normalized_message_id,
+        &access.channel.id,
+        user_id,
+    )
+    .await?;
+    if !deleted {
+        return Err(AppError::NotFound);
+    }
+
+    Ok(MessageDeleteResponse {
+        id: normalized_message_id,
+        guild_slug: access.guild.slug,
+        channel_slug: access.channel.slug,
+    })
 }
 
 pub async fn list_channel_messages(
@@ -232,6 +338,7 @@ async fn build_message_response(
         content: message.content,
         is_system: message.is_system != 0,
         created_at: message.created_at,
+        updated_at: message.updated_at,
         client_nonce,
     })
 }
@@ -394,6 +501,21 @@ fn normalize_client_nonce(value: Option<String>) -> Result<Option<String>, AppEr
     Ok(Some(trimmed.to_string()))
 }
 
+fn normalize_message_id(value: &str) -> Result<String, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::ValidationError(
+            "message_id is required".to_string(),
+        ));
+    }
+    if trimmed.chars().any(|ch| ch.is_control()) {
+        return Err(AppError::ValidationError(
+            "message_id contains invalid characters".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
 fn normalize_message_content(value: &str) -> Result<String, AppError> {
     let normalized_newlines = value.replace("\r\n", "\n").replace('\r', "\n");
     let trimmed = normalized_newlines.trim();
@@ -439,6 +561,134 @@ fn escape_html(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        config::DatabaseConfig,
+        db::{init_pool, run_migrations},
+    };
+
+    async fn setup_service_pool() -> DbPool {
+        let pool = init_pool(&DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 1,
+        })
+        .await
+        .unwrap();
+        run_migrations(&pool).await.unwrap();
+        seed_service_fixture(&pool).await;
+        pool
+    }
+
+    async fn seed_service_fixture(pool: &DbPool) {
+        let DbPool::Sqlite(pool) = pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+
+        let created_at = "2026-02-28T00:00:00Z";
+        sqlx::query(
+            "INSERT INTO users (id, did_key, public_key_multibase, username, avatar_color, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .bind("owner-user-id")
+        .bind("did:key:z6MkOwner")
+        .bind("zOwner")
+        .bind("owner-user")
+        .bind("#3366ff")
+        .bind(created_at)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO users (id, did_key, public_key_multibase, username, avatar_color, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .bind("author-user-id")
+        .bind("did:key:z6MkAuthor")
+        .bind("zAuthor")
+        .bind("author-user")
+        .bind("#22aa88")
+        .bind(created_at)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO users (id, did_key, public_key_multibase, username, avatar_color, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .bind("member-user-id")
+        .bind("did:key:z6MkMember")
+        .bind("zMember")
+        .bind("member-user")
+        .bind("#aa2288")
+        .bind(created_at)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO guilds (id, slug, name, description, owner_id, default_channel_slug, created_at, updated_at)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7)",
+        )
+        .bind("guild-id")
+        .bind("test-guild")
+        .bind("Test Guild")
+        .bind("owner-user-id")
+        .bind("general")
+        .bind(created_at)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO channels (id, guild_id, slug, name, channel_type, position, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind("channel-id")
+        .bind("guild-id")
+        .bind("general")
+        .bind("general")
+        .bind("text")
+        .bind(0_i64)
+        .bind(created_at)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        for member_id in ["author-user-id", "member-user-id"] {
+            sqlx::query(
+                "INSERT INTO guild_members (guild_id, user_id, joined_at, joined_via_invite_code)
+                 VALUES (?1, ?2, ?3, NULL)",
+            )
+            .bind("guild-id")
+            .bind(member_id)
+            .bind(created_at)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn insert_fixture_message(pool: &DbPool, message_id: &str, content: &str) {
+        message::insert_message(
+            pool,
+            message_id,
+            "guild-id",
+            "channel-id",
+            "author-user-id",
+            content,
+            false,
+            "2026-02-28T00:00:01Z",
+            "2026-02-28T00:00:01Z",
+        )
+        .await
+        .unwrap();
+    }
 
     #[test]
     fn normalize_message_content_rejects_empty_and_control_characters() {
@@ -464,6 +714,13 @@ mod tests {
             normalize_client_nonce(Some(" nonce-1 ".to_string())).unwrap(),
             Some("nonce-1".to_string())
         );
+    }
+
+    #[test]
+    fn normalize_message_id_rejects_invalid_values() {
+        assert!(normalize_message_id("   ").is_err());
+        assert!(normalize_message_id("message\u{0007}").is_err());
+        assert_eq!(normalize_message_id(" message-1 ").unwrap(), "message-1");
     }
 
     #[test]
@@ -500,5 +757,81 @@ mod tests {
     fn decode_before_cursor_handles_defaults() {
         assert!(decode_before_cursor(None).unwrap().is_none());
         assert!(decode_before_cursor(Some("   ")).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn update_message_enforces_ownership_and_updates_content() {
+        let pool = setup_service_pool().await;
+        insert_fixture_message(&pool, "message-1", "hello").await;
+
+        let forbidden = update_message(
+            &pool,
+            "member-user-id",
+            UpdateMessageInput {
+                guild_slug: "test-guild".to_string(),
+                channel_slug: "general".to_string(),
+                message_id: "message-1".to_string(),
+                content: "nope".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(forbidden, AppError::Forbidden(_)));
+
+        let updated = update_message(
+            &pool,
+            "author-user-id",
+            UpdateMessageInput {
+                guild_slug: "test-guild".to_string(),
+                channel_slug: "general".to_string(),
+                message_id: "message-1".to_string(),
+                content: " edited <b>content</b> ".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.id, "message-1");
+        assert_eq!(updated.content, "edited &lt;b&gt;content&lt;/b&gt;");
+        assert_eq!(updated.created_at, "2026-02-28T00:00:01Z");
+        assert_ne!(updated.updated_at, updated.created_at);
+    }
+
+    #[tokio::test]
+    async fn delete_message_enforces_ownership() {
+        let pool = setup_service_pool().await;
+        insert_fixture_message(&pool, "message-2", "delete-me").await;
+
+        let forbidden = delete_message(
+            &pool,
+            "member-user-id",
+            DeleteMessageInput {
+                guild_slug: "test-guild".to_string(),
+                channel_slug: "general".to_string(),
+                message_id: "message-2".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(forbidden, AppError::Forbidden(_)));
+
+        let deleted = delete_message(
+            &pool,
+            "author-user-id",
+            DeleteMessageInput {
+                guild_slug: "test-guild".to_string(),
+                channel_slug: "general".to_string(),
+                message_id: "message-2".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(deleted.id, "message-2");
+        assert_eq!(deleted.guild_slug, "test-guild");
+        assert_eq!(deleted.channel_slug, "general");
+
+        let persisted = message::find_message_by_id(&pool, "message-2")
+            .await
+            .unwrap();
+        assert!(persisted.is_none());
     }
 }

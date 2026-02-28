@@ -71,6 +71,8 @@ pub enum ClientOp {
     Subscribe,
     Unsubscribe,
     MessageCreate,
+    MessageUpdate,
+    MessageDelete,
     TypingStart,
     Resume,
 }
@@ -121,6 +123,8 @@ pub fn parse_client_op(op: &str) -> Result<ClientOp, ProtocolError> {
         "c_subscribe" => Ok(ClientOp::Subscribe),
         "c_unsubscribe" => Ok(ClientOp::Unsubscribe),
         "c_message_create" => Ok(ClientOp::MessageCreate),
+        "c_message_update" => Ok(ClientOp::MessageUpdate),
+        "c_message_delete" => Ok(ClientOp::MessageDelete),
         "c_typing_start" => Ok(ClientOp::TypingStart),
         "c_resume" => Ok(ClientOp::Resume),
         _ => {
@@ -148,6 +152,14 @@ mod tests {
         assert_eq!(
             parse_client_op("c_message_create").unwrap(),
             ClientOp::MessageCreate
+        );
+        assert_eq!(
+            parse_client_op("c_message_update").unwrap(),
+            ClientOp::MessageUpdate
+        );
+        assert_eq!(
+            parse_client_op("c_message_delete").unwrap(),
+            ClientOp::MessageDelete
         );
         assert_eq!(
             parse_client_op("c_typing_start").unwrap(),

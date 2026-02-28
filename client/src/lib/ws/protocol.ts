@@ -16,6 +16,8 @@ export type WsClientOp =
   | 'c_subscribe'
   | 'c_unsubscribe'
   | 'c_message_create'
+  | 'c_message_update'
+  | 'c_message_delete'
   | 'c_typing_start'
   | 'c_resume'
 

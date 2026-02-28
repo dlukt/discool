@@ -31,6 +31,10 @@ type VirtualTimelineRow = {
   message: ChatMessage
 }
 
+type ComposerEditState = {
+  messageId: string
+}
+
 const MESSAGE_ROW_HEIGHT = 74
 const COMPACT_MESSAGE_ROW_HEIGHT = 46
 const SYSTEM_ROW_HEIGHT = 36
@@ -63,6 +67,7 @@ let wsLifecycleState = $state<WsLifecycleState>(wsClient.getLifecycleState())
 let showReconnectingBanner = $derived(wsLifecycleState === 'reconnecting')
 let composerInput = $state<HTMLTextAreaElement | null>(null)
 let composerValue = $state('')
+let composerEdit = $state<ComposerEditState | null>(null)
 let timelineViewport = $state<HTMLDivElement | null>(null)
 let scrollTop = $state(0)
 let viewportHeight = $state(320)
@@ -71,6 +76,7 @@ let restoringChannelKey = $state<string | null>(null)
 let loadHistoryInFlight = $state(false)
 let lastTailMessageId = $state<string | null>(null)
 let skipNextTailChange = $state(false)
+let pendingDeleteMessage = $state<ChatMessage | null>(null)
 
 let channelKey = $derived(
   mode === 'channel' ? `${activeGuild}:${activeChannel}` : null,
@@ -108,7 +114,8 @@ let virtualRows = $derived.by(() => {
         previous &&
           !previous.isSystem &&
           !message.isSystem &&
-          previous.authorUserId === message.authorUserId,
+          previous.authorUserId === message.authorUserId &&
+          message.updatedAt === message.createdAt,
       ) && !message.isSystem
     const height = message.isSystem
       ? SYSTEM_ROW_HEIGHT
@@ -183,6 +190,21 @@ function buildCurrentAuthor(): ChatAuthorInput | null {
 function sendComposerMessage() {
   const author = buildCurrentAuthor()
   if (!author || mode !== 'channel') return
+
+  if (composerEdit) {
+    const sent = messageState.sendMessageUpdate(
+      activeGuild,
+      activeChannel,
+      composerEdit.messageId,
+      composerValue,
+    )
+    if (sent) {
+      composerValue = ''
+      composerEdit = null
+    }
+    return
+  }
+
   const sent = messageState.sendMessage(
     activeGuild,
     activeChannel,
@@ -194,7 +216,97 @@ function sendComposerMessage() {
   }
 }
 
+function findLatestOwnMessage(): ChatMessage | null {
+  const currentUserId = currentSessionUser?.id
+  if (!currentUserId || mode !== 'channel') return null
+  for (let index = timelineMessages.length - 1; index >= 0; index -= 1) {
+    const message = timelineMessages[index]
+    if (!message || message.isSystem) continue
+    if (message.authorUserId !== currentUserId) continue
+    return message
+  }
+  return null
+}
+
+function startEditingMessage(message: ChatMessage): void {
+  const currentUserId = currentSessionUser?.id
+  if (!currentUserId || mode !== 'channel') return
+  if (message.isSystem || message.authorUserId !== currentUserId) return
+  if (
+    message.guildSlug !== activeGuild ||
+    message.channelSlug !== activeChannel
+  )
+    return
+  composerEdit = { messageId: message.id }
+  composerValue = message.content
+  void tick().then(() => {
+    if (!composerInput) return
+    composerInput.focus()
+    const end = composerValue.length
+    composerInput.selectionStart = end
+    composerInput.selectionEnd = end
+  })
+}
+
+function cancelComposerEdit(): void {
+  composerEdit = null
+  composerValue = ''
+  composerInput?.focus()
+}
+
+function requestDeleteMessage(message: ChatMessage): void {
+  const currentUserId = currentSessionUser?.id
+  if (!currentUserId) return
+  if (message.isSystem || message.authorUserId !== currentUserId) return
+  pendingDeleteMessage = message
+}
+
+function closeDeleteDialog(): void {
+  pendingDeleteMessage = null
+}
+
+function confirmDeleteMessage(): void {
+  if (!pendingDeleteMessage || mode !== 'channel') return
+  const sent = messageState.sendMessageDelete(
+    pendingDeleteMessage.guildSlug,
+    pendingDeleteMessage.channelSlug,
+    pendingDeleteMessage.id,
+  )
+  if (!sent) return
+  closeDeleteDialog()
+}
+
 function handleComposerKeydown(event: KeyboardEvent) {
+  if (
+    event.key === 'ArrowUp' &&
+    !event.altKey &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.shiftKey
+  ) {
+    const target = event.currentTarget as HTMLTextAreaElement | null
+    const selectionStart = target?.selectionStart ?? 0
+    const selectionEnd = target?.selectionEnd ?? 0
+    if (
+      composerValue.trim().length === 0 &&
+      selectionStart === 0 &&
+      selectionEnd === 0
+    ) {
+      const latestOwn = findLatestOwnMessage()
+      if (latestOwn) {
+        event.preventDefault()
+        startEditingMessage(latestOwn)
+      }
+    }
+    return
+  }
+
+  if (event.key === 'Escape' && composerEdit) {
+    event.preventDefault()
+    cancelComposerEdit()
+    return
+  }
+
   if (event.key !== 'Enter') return
 
   if (event.shiftKey) {
@@ -302,6 +414,30 @@ $effect(() => {
   void tick().then(() => {
     composerInput?.focus()
   })
+})
+
+$effect(() => {
+  if (mode !== 'channel') {
+    composerEdit = null
+    pendingDeleteMessage = null
+    return
+  }
+  activeGuild
+  activeChannel
+  if (
+    pendingDeleteMessage &&
+    (pendingDeleteMessage.guildSlug !== activeGuild ||
+      pendingDeleteMessage.channelSlug !== activeChannel)
+  ) {
+    pendingDeleteMessage = null
+  }
+  if (!composerEdit) return
+  const exists = timelineMessages.some(
+    (message) => message.id === composerEdit?.messageId,
+  )
+  if (!exists) {
+    composerEdit = null
+  }
 })
 
 $effect(() => {
@@ -500,7 +636,13 @@ onMount(() => {
                   style={`top: ${row.top}px; height: ${row.height}px;`}
                   data-testid={`message-window-row-${row.message.id}`}
                 >
-                  <MessageBubble message={row.message} compact={row.compact} />
+                  <MessageBubble
+                    message={row.message}
+                    compact={row.compact}
+                    currentUserId={currentSessionUser?.id ?? null}
+                    onEditRequest={startEditingMessage}
+                    onDeleteRequest={requestDeleteMessage}
+                  />
                 </div>
               {/each}
             </div>
@@ -549,14 +691,51 @@ onMount(() => {
             class="inline-flex h-[44px] items-center justify-center rounded-md bg-fire px-4 text-sm font-medium text-fire-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
             onclick={sendComposerMessage}
             disabled={!currentSessionUser || composerValue.trim().length === 0}
+            data-testid="message-composer-submit"
           >
-            Send
+            {composerEdit ? 'Save' : 'Send'}
           </button>
         </div>
         <p class="mt-2 text-xs text-muted-foreground">
-          Enter to send · Shift+Enter for newline
+          {#if composerEdit}
+            Editing message · Enter to save · Escape to cancel
+          {:else}
+            Enter to send · Shift+Enter for newline · Up to edit latest own message
+          {/if}
         </p>
       </section>
     {/if}
   </section>
+{/if}
+
+{#if pendingDeleteMessage}
+  <div class="fixed inset-0 z-30 flex items-center justify-center bg-black/60 p-4">
+    <div
+      class="w-full max-w-md rounded-md border border-border bg-card p-4 shadow-lg"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Delete message"
+    >
+      <h3 class="text-base font-semibold text-foreground">Delete message</h3>
+      <p class="mt-2 text-sm text-muted-foreground">
+        This message will be removed for everyone in this channel.
+      </p>
+      <div class="mt-4 flex justify-end gap-2">
+        <button
+          type="button"
+          class="rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-foreground hover:bg-muted"
+          onclick={closeDeleteDialog}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="rounded-md bg-destructive px-3 py-2 text-sm font-medium text-destructive-foreground hover:opacity-90"
+          onclick={confirmDeleteMessage}
+        >
+          Delete message
+        </button>
+      </div>
+    </div>
+  </div>
 {/if}

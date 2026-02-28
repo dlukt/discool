@@ -1,4 +1,4 @@
-import { fireEvent, render, waitFor } from '@testing-library/svelte'
+import { fireEvent, render, waitFor, within } from '@testing-library/svelte'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const {
@@ -29,6 +29,7 @@ const {
       content: string
       isSystem: boolean
       createdAt: string
+      updatedAt: string
       optimistic: boolean
       clientNonce?: string
     }>
@@ -70,6 +71,8 @@ const {
       return timelineByChannel[channelKey(guildSlug, channelSlug)] ?? []
     }),
     sendMessage: vi.fn(() => true),
+    sendMessageUpdate: vi.fn(() => true),
+    sendMessageDelete: vi.fn(() => true),
     setActiveChannel: vi.fn(),
     ensureHistoryLoaded: vi.fn(
       async (guildSlug: string, channelSlug: string) => {
@@ -168,6 +171,7 @@ function seedChannelMessages(channelKey: string, count: number): void {
     content: `message-${index}`,
     isSystem: false,
     createdAt: `2026-02-28T00:00:${String(index).padStart(2, '0')}Z`,
+    updatedAt: `2026-02-28T00:00:${String(index).padStart(2, '0')}Z`,
     optimistic: false,
   }))
 }
@@ -204,6 +208,8 @@ describe('MessageArea', () => {
     messageState.version += 1
     messageState.timeline.mockClear()
     messageState.sendMessage.mockClear()
+    messageState.sendMessageUpdate.mockClear()
+    messageState.sendMessageDelete.mockClear()
     messageState.setActiveChannel.mockClear()
     messageState.ensureHistoryLoaded.mockClear()
     messageState.historyStateForChannel.mockClear()
@@ -380,5 +386,84 @@ describe('MessageArea', () => {
       ) as HTMLDivElement
       expect(scroll.scrollTop).toBe(180)
     })
+  })
+
+  it('supports composer edit mode with Up/Enter/Escape', async () => {
+    seedChannelMessages('lobby:general', 3)
+    messageState.version += 1
+
+    const { getByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    const composer = getByTestId(
+      'message-composer-input',
+    ) as HTMLTextAreaElement
+
+    await fireEvent.keyDown(composer, { key: 'ArrowUp' })
+    expect(composer.value).toBe('message-2')
+
+    await fireEvent.input(composer, { target: { value: 'edited text' } })
+    await fireEvent.keyDown(composer, { key: 'Enter' })
+
+    expect(messageState.sendMessageUpdate).toHaveBeenCalledWith(
+      'lobby',
+      'general',
+      'm-2',
+      'edited text',
+    )
+
+    await waitFor(() => {
+      expect(composer.value).toBe('')
+    })
+
+    messageState.sendMessageUpdate.mockClear()
+    await fireEvent.keyDown(composer, { key: 'ArrowUp' })
+    expect(composer.value).toBe('message-2')
+    await fireEvent.keyDown(composer, { key: 'Escape' })
+    expect(messageState.sendMessageUpdate).not.toHaveBeenCalled()
+    expect(composer.value).toBe('')
+  })
+
+  it('requires confirmation before delete operation is sent', async () => {
+    seedChannelMessages('lobby:general', 1)
+    messageState.version += 1
+
+    const { getByTestId, getByRole, queryByRole } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    const messageRow = getByTestId('message-row-m-0')
+    await fireEvent.keyDown(messageRow, { key: 'Delete' })
+
+    const dialog = getByRole('dialog', { name: 'Delete message' })
+    expect(dialog).toBeInTheDocument()
+    await fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Cancel' }),
+    )
+    expect(queryByRole('dialog', { name: 'Delete message' })).toBeNull()
+    expect(messageState.sendMessageDelete).not.toHaveBeenCalled()
+
+    await fireEvent.keyDown(messageRow, { key: 'Delete' })
+    const confirmDialog = getByRole('dialog', { name: 'Delete message' })
+    await fireEvent.click(
+      within(confirmDialog).getByRole('button', { name: 'Delete message' }),
+    )
+
+    expect(messageState.sendMessageDelete).toHaveBeenCalledWith(
+      'lobby',
+      'general',
+      'm-0',
+    )
   })
 })
