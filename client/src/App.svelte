@@ -27,6 +27,7 @@ import {
 } from '$lib/features/identity/navigationState'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import RecoveryPrompt from '$lib/features/identity/RecoveryPrompt.svelte'
+import { presenceState } from '$lib/features/members/presenceStore.svelte'
 import {
   createAuthenticatedRoutes,
   isPersistableLocation,
@@ -291,6 +292,11 @@ $effect(() => {
   if (window.location.pathname.startsWith('/admin')) {
     goto('/')
   }
+})
+
+$effect(() => {
+  const token = identityState.session?.token ?? null
+  presenceState.ensureConnected(token)
 })
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.

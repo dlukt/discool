@@ -17,6 +17,7 @@ import GuildSettings from '$lib/features/guild/GuildSettings.svelte'
 import InviteModal from '$lib/features/guild/InviteModal.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import MemberList from '$lib/features/members/MemberList.svelte'
+import { presenceState } from '$lib/features/members/presenceStore.svelte'
 
 type ShellMode = 'home' | 'channel' | 'settings' | 'admin'
 type ViewportMode = 'mobile' | 'tablet' | 'desktop'
@@ -95,9 +96,7 @@ let currentPath = $derived(
 let params = $derived(
   (route?.result?.path?.params ?? {}) as Record<string, string | undefined>,
 )
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let activeGuild = $derived(params.guild ?? 'lobby')
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let activeChannel = $derived(params.channel ?? 'general')
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let canOpenGuildSettings = $derived(shellMode === 'channel')
@@ -155,6 +154,14 @@ $effect(() => {
 
 $effect(() => {
   if (viewport !== 'mobile') mobilePanel = 'messages'
+})
+
+$effect(() => {
+  if (shellMode === 'channel') {
+    presenceState.setRouting(activeGuild, activeChannel)
+    return
+  }
+  presenceState.clearRouting()
 })
 
 $effect(() => {

@@ -96,8 +96,8 @@ development_status:
   epic-5-retrospective: optional
 
   # Epic 6: Real-Time Text Communication
-  epic-6: backlog
-  6-1-websocket-gateway-and-connection-management: backlog
+  epic-6: in-progress
+  6-1-websocket-gateway-and-connection-management: done
   6-2-send-and-display-text-messages: backlog
   6-3-message-history-and-virtual-scrolling: backlog
   6-4-edit-and-delete-own-messages: backlog

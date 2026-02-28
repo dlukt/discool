@@ -1,6 +1,33 @@
 import { fireEvent, render, waitFor } from '@testing-library/svelte'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+type MockLifecycle =
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'disconnected'
+
+const { wsLifecycleState, lifecycleListeners } = vi.hoisted(() => ({
+  wsLifecycleState: { value: 'disconnected' as MockLifecycle },
+  lifecycleListeners: new Set<(state: MockLifecycle) => void>(),
+}))
+
+vi.mock('$lib/ws/client', () => ({
+  wsClient: {
+    subscribe: vi.fn(() => () => {}),
+    getLifecycleState: vi.fn(() => wsLifecycleState.value),
+    subscribeLifecycle: vi.fn((listener: (state: MockLifecycle) => void) => {
+      lifecycleListeners.add(listener)
+      listener(wsLifecycleState.value)
+      return () => lifecycleListeners.delete(listener)
+    }),
+    ensureConnected: vi.fn(),
+    disconnect: vi.fn(),
+    setSubscription: vi.fn(),
+    send: vi.fn(() => true),
+  },
+}))
+
 import ShellRoute from './ShellRoute.svelte'
 
 type RenderProps = {
@@ -73,9 +100,18 @@ function buildProps(overrides: Partial<RenderProps> = {}): RenderProps {
   }
 }
 
+function setWsLifecycleState(state: MockLifecycle) {
+  wsLifecycleState.value = state
+  for (const listener of lifecycleListeners) {
+    listener(state)
+  }
+}
+
 describe('ShellRoute', () => {
   beforeEach(() => {
     setViewport(1280)
+    wsLifecycleState.value = 'disconnected'
+    lifecycleListeners.clear()
   })
 
   it('renders skip link as the first focusable element', async () => {
@@ -202,5 +238,17 @@ describe('ShellRoute', () => {
     await waitFor(() => {
       expect(onRouteResolved).toHaveBeenCalledWith('/engineering/announcements')
     })
+  })
+
+  it('shows a non-blocking reconnecting status message while websocket reconnects', async () => {
+    const props = buildProps()
+    const view = render(ShellRoute, props)
+
+    setWsLifecycleState('reconnecting')
+
+    await waitFor(() => {
+      expect(view.getByTestId('reconnecting-status')).toBeInTheDocument()
+    })
+    expect(view.getByText('Reconnecting...')).toBeInTheDocument()
   })
 })

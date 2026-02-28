@@ -167,6 +167,153 @@ async fn websocket_upgrade_response(addr: &str, path: &str, bearer_token: Option
     String::from_utf8_lossy(&buf).to_string()
 }
 
+async fn websocket_connect(
+    addr: &str,
+    path: &str,
+    bearer_token: Option<&str>,
+) -> (TcpStream, String) {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+    );
+    if let Some(token) = bearer_token {
+        req.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
+    req.push_str("\r\n");
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    loop {
+        let mut chunk = [0_u8; 1024];
+        let read_result = timeout(Duration::from_secs(2), stream.read(&mut chunk)).await;
+        match read_result {
+            Ok(Ok(0)) => break,
+            Ok(Ok(bytes_read)) => {
+                buf.extend_from_slice(&chunk[..bytes_read]);
+                if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+
+    (stream, String::from_utf8_lossy(&buf).to_string())
+}
+
+async fn websocket_send_text_frame(stream: &mut TcpStream, payload: &str) {
+    let payload_bytes = payload.as_bytes();
+    let payload_len = payload_bytes.len();
+    let mut frame = Vec::with_capacity(payload_len + 16);
+    frame.push(0x81);
+
+    if payload_len < 126 {
+        frame.push(0x80 | payload_len as u8);
+    } else if payload_len <= u16::MAX as usize {
+        frame.push(0x80 | 126);
+        frame.extend_from_slice(&(payload_len as u16).to_be_bytes());
+    } else {
+        frame.push(0x80 | 127);
+        frame.extend_from_slice(&(payload_len as u64).to_be_bytes());
+    }
+
+    let mask = [0x11, 0x22, 0x33, 0x44];
+    frame.extend_from_slice(&mask);
+    for (index, byte) in payload_bytes.iter().enumerate() {
+        frame.push(byte ^ mask[index % 4]);
+    }
+
+    stream.write_all(&frame).await.unwrap();
+}
+
+async fn websocket_read_text_frame(stream: &mut TcpStream, timeout_ms: u64) -> Option<String> {
+    let mut first_two_bytes = [0_u8; 2];
+    timeout(
+        Duration::from_millis(timeout_ms),
+        stream.read_exact(&mut first_two_bytes),
+    )
+    .await
+    .ok()?
+    .ok()?;
+
+    let opcode = first_two_bytes[0] & 0x0f;
+    let masked = (first_two_bytes[1] & 0x80) != 0;
+    let mut payload_len = (first_two_bytes[1] & 0x7f) as usize;
+
+    if payload_len == 126 {
+        let mut len_bytes = [0_u8; 2];
+        timeout(
+            Duration::from_millis(timeout_ms),
+            stream.read_exact(&mut len_bytes),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        payload_len = u16::from_be_bytes(len_bytes) as usize;
+    } else if payload_len == 127 {
+        let mut len_bytes = [0_u8; 8];
+        timeout(
+            Duration::from_millis(timeout_ms),
+            stream.read_exact(&mut len_bytes),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        payload_len = usize::try_from(u64::from_be_bytes(len_bytes)).ok()?;
+    }
+
+    let mut mask = [0_u8; 4];
+    if masked {
+        timeout(
+            Duration::from_millis(timeout_ms),
+            stream.read_exact(&mut mask),
+        )
+        .await
+        .ok()?
+        .ok()?;
+    }
+
+    let mut payload = vec![0_u8; payload_len];
+    timeout(
+        Duration::from_millis(timeout_ms),
+        stream.read_exact(&mut payload),
+    )
+    .await
+    .ok()?
+    .ok()?;
+
+    if masked {
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte ^= mask[index % 4];
+        }
+    }
+
+    match opcode {
+        0x01 => String::from_utf8(payload).ok(),
+        0x08 => None,
+        _ => None,
+    }
+}
+
+async fn websocket_read_json_with_op(
+    stream: &mut TcpStream,
+    op: &str,
+    total_timeout_ms: u64,
+) -> Option<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_millis(total_timeout_ms);
+    while Instant::now() < deadline {
+        if let Some(message) = websocket_read_text_frame(stream, 250).await {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&message) else {
+                continue;
+            };
+            if value["op"] == op {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
 async fn http_post(addr: &str, path: &str, json_body: &str) -> String {
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
@@ -3983,4 +4130,128 @@ async fn users_avatar_upload_accepts_png_and_exposes_avatar_url() {
 
     let res = http_response_with_bearer(&addr, "/api/v1/users/me/avatar", &token).await;
     assert_eq!(response_status(&res), 404);
+}
+
+#[tokio::test]
+async fn websocket_authenticated_upgrade_emits_hello_envelope() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+    let token = register_and_authenticate(&addr, "ws-hello", [64u8; 32]).await;
+
+    let (mut stream, response) = websocket_connect(&addr, "/ws", Some(&token)).await;
+    assert_eq!(response_status(&response), 101);
+
+    let hello = websocket_read_json_with_op(&mut stream, "hello", 1_500)
+        .await
+        .expect("expected hello websocket event");
+    assert_eq!(hello["d"]["protocol_version"], json!("1"));
+    assert_eq!(hello["d"]["resume_supported"], json!(true));
+    assert!(hello["d"]["connection_id"].as_str().is_some());
+    assert!(hello["d"]["session_id"].as_str().is_some());
+    assert!(hello["d"]["supported_events"].is_array());
+    assert!(hello["s"].as_u64().unwrap_or_default() >= 1);
+}
+
+#[tokio::test]
+async fn websocket_invalid_client_operation_returns_protocol_error() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+    let token = register_and_authenticate(&addr, "ws-invalid-op", [65u8; 32]).await;
+
+    let (mut stream, response) = websocket_connect(&addr, "/ws", Some(&token)).await;
+    assert_eq!(response_status(&response), 101);
+    let _ = websocket_read_json_with_op(&mut stream, "hello", 1_500).await;
+
+    websocket_send_text_frame(&mut stream, r#"{"op":"typing_start","d":{}}"#).await;
+
+    let error_event = websocket_read_json_with_op(&mut stream, "error", 1_500)
+        .await
+        .expect("expected websocket error event");
+    assert_eq!(error_event["d"]["code"], json!("VALIDATION_ERROR"));
+    assert_eq!(error_event["d"]["details"]["op"], json!("typing_start"));
+}
+
+#[tokio::test]
+async fn websocket_channel_fanout_is_targeted_and_rate_limited() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+    let token_a = register_and_authenticate(&addr, "ws-target-a", [66u8; 32]).await;
+    let token_b = register_and_authenticate(&addr, "ws-target-b", [67u8; 32]).await;
+
+    let (mut stream_a, response_a) = websocket_connect(&addr, "/ws", Some(&token_a)).await;
+    let (mut stream_b, response_b) = websocket_connect(&addr, "/ws", Some(&token_b)).await;
+    assert_eq!(response_status(&response_a), 101);
+    assert_eq!(response_status(&response_b), 101);
+
+    let _ = websocket_read_json_with_op(&mut stream_a, "hello", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut stream_b, "hello", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut stream_a,
+        r#"{"op":"c_subscribe","d":{"guild_slug":"lobby","channel_slug":"general"}}"#,
+    )
+    .await;
+    websocket_send_text_frame(
+        &mut stream_b,
+        r#"{"op":"c_subscribe","d":{"guild_slug":"lobby","channel_slug":"random"}}"#,
+    )
+    .await;
+    let _ = websocket_read_json_with_op(&mut stream_a, "channel_update", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut stream_b, "channel_update", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut stream_a,
+        r#"{"op":"c_typing_start","d":{"guild_slug":"lobby","channel_slug":"general"}}"#,
+    )
+    .await;
+
+    let typing_event = websocket_read_json_with_op(&mut stream_a, "typing_start", 1_500)
+        .await
+        .expect("subscribed client should receive typing_start");
+    assert_eq!(typing_event["d"]["guild_slug"], json!("lobby"));
+    assert_eq!(typing_event["d"]["channel_slug"], json!("general"));
+
+    let other_channel_event = websocket_read_json_with_op(&mut stream_b, "typing_start", 500).await;
+    assert!(
+        other_channel_event.is_none(),
+        "non-subscribed connection unexpectedly received typing_start event"
+    );
+
+    for _ in 0..40 {
+        websocket_send_text_frame(
+            &mut stream_a,
+            r#"{"op":"c_typing_start","d":{"guild_slug":"lobby","channel_slug":"general"}}"#,
+        )
+        .await;
+    }
+
+    let rate_limit_event = websocket_read_json_with_op(&mut stream_a, "error", 2_000)
+        .await
+        .expect("expected websocket rate-limit error");
+    assert_eq!(rate_limit_event["d"]["code"], json!("RATE_LIMITED"));
+    assert_eq!(
+        rate_limit_event["d"]["details"]["op"],
+        json!("c_typing_start")
+    );
 }

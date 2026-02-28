@@ -11,7 +11,8 @@ use chrono::Utc;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use uuid::Uuid;
+
+use crate::ws::{protocol::ServerOp, registry as ws_registry};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const OFFLINE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -35,17 +36,10 @@ struct PresenceEntry {
 #[derive(Default)]
 struct PresenceRegistry {
     users: DashMap<String, PresenceEntry>,
-    sockets: DashMap<String, mpsc::UnboundedSender<Message>>,
     watchdog_started: AtomicBool,
 }
 
 static PRESENCE_REGISTRY: OnceLock<PresenceRegistry> = OnceLock::new();
-
-#[derive(Serialize)]
-struct PresenceEnvelope<'a> {
-    op: &'a str,
-    d: PresencePayload<'a>,
-}
 
 #[derive(Serialize)]
 struct PresencePayload<'a> {
@@ -59,35 +53,12 @@ fn registry() -> &'static PresenceRegistry {
 }
 
 fn broadcast_presence_update(user_id: &str, status: PresenceStatus) {
-    let message = match serde_json::to_string(&PresenceEnvelope {
-        op: "presence_update",
-        d: PresencePayload {
-            user_id,
-            status,
-            updated_at: Utc::now().to_rfc3339(),
-        },
-    }) {
-        Ok(value) => value,
-        Err(err) => {
-            tracing::warn!(error = %err, "Failed to serialize presence update");
-            return;
-        }
+    let payload = PresencePayload {
+        user_id,
+        status,
+        updated_at: Utc::now().to_rfc3339(),
     };
-
-    let mut stale_connection_ids = Vec::new();
-    for entry in registry().sockets.iter() {
-        if entry
-            .value()
-            .send(Message::Text(message.clone().into()))
-            .is_err()
-        {
-            stale_connection_ids.push(entry.key().clone());
-        }
-    }
-
-    for connection_id in stale_connection_ids {
-        registry().sockets.remove(&connection_id);
-    }
+    ws_registry::broadcast_global(ServerOp::PresenceUpdate, &payload);
 }
 
 fn evaluate_status(entry: &PresenceEntry, now: Instant) -> PresenceStatus {
@@ -138,18 +109,20 @@ pub fn ensure_watchdog_started() {
     });
 }
 
-pub fn register_connection(sender: mpsc::UnboundedSender<Message>) -> String {
-    let connection_id = Uuid::new_v4().to_string();
-    registry().sockets.insert(connection_id.clone(), sender);
-    connection_id
+pub fn register_connection(
+    user_id: &str,
+    session_id: &str,
+    sender: mpsc::UnboundedSender<Message>,
+) -> String {
+    ws_registry::register_connection(user_id, session_id, sender)
 }
 
 pub fn unregister_connection(connection_id: &str) {
-    registry().sockets.remove(connection_id);
+    ws_registry::unregister_connection(connection_id);
 }
 
 pub fn websocket_connection_count() -> u32 {
-    u32::try_from(registry().sockets.len()).unwrap_or(u32::MAX)
+    ws_registry::websocket_connection_count()
 }
 
 pub fn current_presence_status(user_id: &str) -> PresenceStatus {
@@ -242,7 +215,7 @@ mod tests {
 
     fn reset_presence_state() {
         registry().users.clear();
-        registry().sockets.clear();
+        ws_registry::reset_for_tests();
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub mod p2p;
 pub mod permissions;
 pub mod services;
 pub mod static_files;
+pub mod ws;
 
 pub use error::AppError;
 

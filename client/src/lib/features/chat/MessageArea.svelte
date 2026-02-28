@@ -1,9 +1,11 @@
 <script lang="ts">
-import { tick } from 'svelte'
+import { onMount, tick } from 'svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import AdminPanel from '$lib/components/AdminPanel.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import ProfileSettingsView from '$lib/features/identity/ProfileSettingsView.svelte'
+import { wsClient } from '$lib/ws/client'
+import type { WsLifecycleState } from '$lib/ws/protocol'
 
 type Props = {
   mode: 'home' | 'channel' | 'settings' | 'admin'
@@ -39,6 +41,9 @@ let canShowAdminPanel = $derived(mode === 'admin' && isAdmin)
 let shouldShowRecoveryNudge = $derived(
   showRecoveryNudge && (mode === 'home' || mode === 'channel'),
 )
+let wsLifecycleState = $state<WsLifecycleState>(wsClient.getLifecycleState())
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let showReconnectingBanner = $derived(wsLifecycleState === 'reconnecting')
 let composerInput = $state<HTMLInputElement | null>(null)
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
@@ -57,6 +62,12 @@ $effect(() => {
   activeChannel
   void tick().then(() => {
     composerInput?.focus()
+  })
+})
+
+onMount(() => {
+  return wsClient.subscribeLifecycle((state) => {
+    wsLifecycleState = state
   })
 })
 </script>
@@ -79,6 +90,15 @@ $effect(() => {
       <h1 class="text-2xl font-semibold tracking-tight">Messages</h1>
       <p class="text-sm text-muted-foreground">{detailText}</p>
     </header>
+
+    {#if showReconnectingBanner}
+      <p
+        class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200"
+        data-testid="reconnecting-status"
+      >
+        Reconnecting...
+      </p>
+    {/if}
 
     {#if shouldShowRecoveryNudge}
       <section class="rounded-md border border-border bg-muted p-4">
