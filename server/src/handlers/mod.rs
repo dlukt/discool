@@ -15,6 +15,8 @@ use crate::AppState;
 
 mod admin;
 mod auth;
+mod categories;
+mod channels;
 mod guilds;
 mod health;
 mod instance;
@@ -43,6 +45,34 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/guilds",
             get(guilds::list_guilds).post(guilds::create_guild),
+        )
+        .route(
+            "/guilds/{guild_slug}/channels",
+            get(channels::list_channels).post(channels::create_channel),
+        )
+        .route(
+            "/guilds/{guild_slug}/categories",
+            get(categories::list_categories).post(categories::create_category),
+        )
+        .route(
+            "/guilds/{guild_slug}/categories/reorder",
+            patch(categories::reorder_categories),
+        )
+        .route(
+            "/guilds/{guild_slug}/categories/{category_slug}",
+            patch(categories::update_category).delete(categories::delete_category),
+        )
+        .route(
+            "/guilds/{guild_slug}/categories/{category_slug}/collapse",
+            patch(categories::update_category_collapse),
+        )
+        .route(
+            "/guilds/{guild_slug}/channels/reorder",
+            patch(channels::reorder_channels),
+        )
+        .route(
+            "/guilds/{guild_slug}/channels/{channel_slug}",
+            patch(channels::update_channel).delete(channels::delete_channel),
         )
         .route("/guilds/{guild_slug}", patch(guilds::update_guild))
         .route(

@@ -2122,6 +2122,377 @@ async fn guilds_update_rejects_non_owner_and_allows_owner() {
 }
 
 #[tokio::test]
+async fn channels_mutations_require_authentication() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let create_body = json!({ "name": "Ops", "channel_type": "text" }).to_string();
+    let res = http_post(&addr, "/api/v1/guilds/lobby/channels", &create_body).await;
+    assert_eq!(response_status(&res), 401);
+
+    let reorder_body = json!({ "channel_slugs": ["general"] }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        "/api/v1/guilds/lobby/channels/reorder",
+        &reorder_body,
+        "bad-token",
+    )
+    .await;
+    assert_eq!(response_status(&res), 401);
+
+    let res =
+        http_delete_with_bearer(&addr, "/api/v1/guilds/lobby/channels/general", "bad-token").await;
+    assert_eq!(response_status(&res), 401);
+}
+
+#[tokio::test]
+async fn channels_owner_crud_reorder_and_default_fallback_work() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let token = register_and_authenticate(&addr, "owner", [41u8; 32]).await;
+    let guild_body = json!({ "name": "Owner Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap();
+
+    let list_path = format!("/api/v1/guilds/{guild_slug}/channels");
+    let res = http_response_with_bearer(&addr, &list_path, &token).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["data"].as_array().unwrap().len(), 1);
+    assert_eq!(value["data"][0]["slug"], json!("general"));
+    assert_eq!(value["data"][0]["channel_type"], json!("text"));
+
+    let create_voice = json!({
+        "name": "Standup Voice",
+        "channel_type": "voice",
+    })
+    .to_string();
+    let res = http_post_with_bearer(&addr, &list_path, &create_voice, &token).await;
+    assert_eq!(response_status(&res), 201);
+    let created_voice: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let voice_slug = created_voice["data"]["slug"].as_str().unwrap().to_string();
+
+    let create_text = json!({
+        "name": "Announcements",
+        "channel_type": "text",
+    })
+    .to_string();
+    let res = http_post_with_bearer(&addr, &list_path, &create_text, &token).await;
+    assert_eq!(response_status(&res), 201);
+    let created_text: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let text_slug = created_text["data"]["slug"].as_str().unwrap().to_string();
+
+    let rename_body = json!({ "name": "Release Notes" }).to_string();
+    let rename_path = format!("/api/v1/guilds/{guild_slug}/channels/{text_slug}");
+    let res = http_patch_with_bearer(&addr, &rename_path, &rename_body, &token).await;
+    assert_eq!(response_status(&res), 200);
+    let renamed: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let renamed_slug = renamed["data"]["slug"].as_str().unwrap().to_string();
+
+    let reorder_body = json!({
+        "channel_slugs": [voice_slug, renamed_slug, "general"],
+    })
+    .to_string();
+    let reorder_path = format!("/api/v1/guilds/{guild_slug}/channels/reorder");
+    let res = http_patch_with_bearer(&addr, &reorder_path, &reorder_body, &token).await;
+    assert_eq!(response_status(&res), 200);
+    let reordered: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(reordered["data"][0]["channel_type"], json!("voice"));
+    assert_eq!(reordered["data"][0]["position"], json!(0));
+    assert_eq!(reordered["data"][1]["slug"], json!(renamed_slug));
+    assert_eq!(reordered["data"][2]["slug"], json!("general"));
+
+    let delete_voice_path = format!("/api/v1/guilds/{guild_slug}/channels/{voice_slug}");
+    let res = http_delete_with_bearer(&addr, &delete_voice_path, &token).await;
+    assert_eq!(response_status(&res), 200);
+    let deleted_voice: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(deleted_voice["data"]["deleted_slug"], json!(voice_slug));
+    assert_eq!(
+        deleted_voice["data"]["fallback_channel_slug"],
+        json!("general")
+    );
+
+    let delete_general_path = format!("/api/v1/guilds/{guild_slug}/channels/general");
+    let res = http_delete_with_bearer(&addr, &delete_general_path, &token).await;
+    assert_eq!(response_status(&res), 200);
+    let deleted_general: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(deleted_general["data"]["deleted_slug"], json!("general"));
+    assert_eq!(
+        deleted_general["data"]["fallback_channel_slug"],
+        json!(renamed_slug)
+    );
+
+    let res = http_response_with_bearer(&addr, &list_path, &token).await;
+    assert_eq!(response_status(&res), 200);
+    let listed: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(listed["data"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["data"][0]["slug"], json!(renamed_slug));
+    assert_eq!(listed["data"][0]["is_default"], json!(true));
+
+    let delete_last_path = format!("/api/v1/guilds/{guild_slug}/channels/{renamed_slug}");
+    let res = http_delete_with_bearer(&addr, &delete_last_path, &token).await;
+    assert_eq!(response_status(&res), 422);
+}
+
+#[tokio::test]
+async fn channels_mutations_reject_non_owner() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "owner", [51u8; 32]).await;
+    let other_token = register_and_authenticate(&addr, "other", [52u8; 32]).await;
+    let guild_body = json!({ "name": "Owner Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap();
+
+    let create_path = format!("/api/v1/guilds/{guild_slug}/channels");
+    let create_body = json!({ "name": "Ops", "channel_type": "text" }).to_string();
+    let res = http_post_with_bearer(&addr, &create_path, &create_body, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+    let forbidden: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(forbidden["error"]["code"], json!("FORBIDDEN"));
+
+    let update_path = format!("/api/v1/guilds/{guild_slug}/channels/general");
+    let update_body = json!({ "name": "General Updated" }).to_string();
+    let res = http_patch_with_bearer(&addr, &update_path, &update_body, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let reorder_path = format!("/api/v1/guilds/{guild_slug}/channels/reorder");
+    let reorder_body = json!({ "channel_slugs": ["general"] }).to_string();
+    let res = http_patch_with_bearer(&addr, &reorder_path, &reorder_body, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let delete_path = format!("/api/v1/guilds/{guild_slug}/channels/general");
+    let res = http_delete_with_bearer(&addr, &delete_path, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+}
+
+#[tokio::test]
+async fn categories_mutations_require_authentication() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let create_body = json!({ "name": "Ops" }).to_string();
+    let res = http_post(&addr, "/api/v1/guilds/lobby/categories", &create_body).await;
+    assert_eq!(response_status(&res), 401);
+
+    let collapse_body = json!({ "collapsed": true }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        "/api/v1/guilds/lobby/categories/ops/collapse",
+        &collapse_body,
+        "bad-token",
+    )
+    .await;
+    assert_eq!(response_status(&res), 401);
+
+    let res =
+        http_delete_with_bearer(&addr, "/api/v1/guilds/lobby/categories/ops", "bad-token").await;
+    assert_eq!(response_status(&res), 401);
+}
+
+#[tokio::test]
+async fn categories_owner_crud_collapse_and_delete_move_channels_to_uncategorized() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let token = register_and_authenticate(&addr, "owner-categories", [53u8; 32]).await;
+    let guild_body = json!({ "name": "Category Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap();
+
+    let categories_path = format!("/api/v1/guilds/{guild_slug}/categories");
+    let create_category = json!({ "name": "Ops" }).to_string();
+    let res = http_post_with_bearer(&addr, &categories_path, &create_category, &token).await;
+    assert_eq!(response_status(&res), 201);
+    let category: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(category["data"]["slug"], json!("ops"));
+    assert_eq!(category["data"]["collapsed"], json!(false));
+
+    let list_channels_path = format!("/api/v1/guilds/{guild_slug}/channels");
+    let create_channel = json!({ "name": "Incidents", "channel_type": "text" }).to_string();
+    let res = http_post_with_bearer(&addr, &list_channels_path, &create_channel, &token).await;
+    assert_eq!(response_status(&res), 201);
+    let created_channel: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let incidents_slug = created_channel["data"]["slug"].as_str().unwrap();
+
+    let reorder_body = json!({
+        "channel_positions": [
+            { "channel_slug": "general", "category_slug": null, "position": 0 },
+            { "channel_slug": incidents_slug, "category_slug": "ops", "position": 0 }
+        ]
+    })
+    .to_string();
+    let reorder_path = format!("/api/v1/guilds/{guild_slug}/channels/reorder");
+    let res = http_patch_with_bearer(&addr, &reorder_path, &reorder_body, &token).await;
+    assert_eq!(response_status(&res), 200);
+    let reordered: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let incidents = reordered["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["slug"] == json!(incidents_slug))
+        .unwrap();
+    assert_eq!(incidents["category_slug"], json!("ops"));
+    assert_eq!(incidents["position"], json!(0));
+
+    let reorder_by_slug_body = json!({
+        "channel_slugs": [incidents_slug, "general"]
+    })
+    .to_string();
+    let res = http_patch_with_bearer(&addr, &reorder_path, &reorder_by_slug_body, &token).await;
+    assert_eq!(response_status(&res), 200);
+    let reordered_by_slug: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let incidents_after_slug_reorder = reordered_by_slug["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["slug"] == json!(incidents_slug))
+        .unwrap();
+    assert_eq!(incidents_after_slug_reorder["category_slug"], json!("ops"));
+    assert_eq!(incidents_after_slug_reorder["position"], json!(0));
+    let general_after_slug_reorder = reordered_by_slug["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["slug"] == json!("general"))
+        .unwrap();
+    assert_eq!(
+        general_after_slug_reorder["category_slug"],
+        serde_json::Value::Null
+    );
+    assert_eq!(general_after_slug_reorder["position"], json!(0));
+
+    let collapse_path = format!("/api/v1/guilds/{guild_slug}/categories/ops/collapse");
+    let collapse_body = json!({ "collapsed": true }).to_string();
+    let res = http_patch_with_bearer(&addr, &collapse_path, &collapse_body, &token).await;
+    assert_eq!(response_status(&res), 200);
+    let collapsed: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(collapsed["data"]["collapsed"], json!(true));
+
+    let res = http_response_with_bearer(&addr, &categories_path, &token).await;
+    assert_eq!(response_status(&res), 200);
+    let listed_categories: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(listed_categories["data"][0]["collapsed"], json!(true));
+
+    let rename_path = format!("/api/v1/guilds/{guild_slug}/categories/ops");
+    let rename_body = json!({ "name": "Operations" }).to_string();
+    let res = http_patch_with_bearer(&addr, &rename_path, &rename_body, &token).await;
+    assert_eq!(response_status(&res), 200);
+    let renamed: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(renamed["data"]["slug"], json!("operations"));
+
+    let delete_path = format!("/api/v1/guilds/{guild_slug}/categories/operations");
+    let res = http_delete_with_bearer(&addr, &delete_path, &token).await;
+    assert_eq!(response_status(&res), 200);
+    let deleted: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(deleted["data"]["deleted_slug"], json!("operations"));
+    assert_eq!(deleted["data"]["reassigned_channel_count"], json!(1));
+
+    let res = http_response_with_bearer(&addr, &list_channels_path, &token).await;
+    assert_eq!(response_status(&res), 200);
+    let listed_channels: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let incidents = listed_channels["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["slug"] == json!(incidents_slug))
+        .unwrap();
+    assert_eq!(incidents["category_slug"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn categories_mutations_reject_non_owner() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "owner-categories", [54u8; 32]).await;
+    let other_token = register_and_authenticate(&addr, "other-categories", [55u8; 32]).await;
+    let guild_body = json!({ "name": "Category Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap();
+
+    let categories_path = format!("/api/v1/guilds/{guild_slug}/categories");
+    let create_category = json!({ "name": "Ops" }).to_string();
+    let res = http_post_with_bearer(&addr, &categories_path, &create_category, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+
+    let create_other = json!({ "name": "Product" }).to_string();
+    let res = http_post_with_bearer(&addr, &categories_path, &create_other, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let rename_path = format!("/api/v1/guilds/{guild_slug}/categories/ops");
+    let rename_body = json!({ "name": "Operations" }).to_string();
+    let res = http_patch_with_bearer(&addr, &rename_path, &rename_body, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let reorder_path = format!("/api/v1/guilds/{guild_slug}/categories/reorder");
+    let reorder_body = json!({ "category_slugs": ["ops"] }).to_string();
+    let res = http_patch_with_bearer(&addr, &reorder_path, &reorder_body, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let collapse_path = format!("/api/v1/guilds/{guild_slug}/categories/ops/collapse");
+    let collapse_body = json!({ "collapsed": true }).to_string();
+    let res = http_patch_with_bearer(&addr, &collapse_path, &collapse_body, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let delete_path = format!("/api/v1/guilds/{guild_slug}/categories/ops");
+    let res = http_delete_with_bearer(&addr, &delete_path, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+}
+
+#[tokio::test]
 async fn users_profile_requires_authentication() {
     use serde_json::json;
 

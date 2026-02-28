@@ -8,7 +8,10 @@ use crate::{
     AppError,
     config::AvatarConfig,
     db::DbPool,
-    models::guild::{self, Guild, GuildResponse},
+    models::{
+        channel,
+        guild::{self, Guild, GuildResponse},
+    },
 };
 
 const MAX_GUILD_NAME_CHARS: usize = 64;
@@ -64,6 +67,25 @@ pub async fn create_guild(
         .await?;
 
         if inserted {
+            let default_channel_id = Uuid::new_v4().to_string();
+            let default_channel_inserted = channel::insert_channel(
+                pool,
+                &default_channel_id,
+                &id,
+                DEFAULT_CHANNEL_SLUG,
+                DEFAULT_CHANNEL_SLUG,
+                "text",
+                0,
+                None,
+                &created_at,
+                &created_at,
+            )
+            .await?;
+            if !default_channel_inserted {
+                return Err(AppError::Internal(
+                    "Failed to create default channel".to_string(),
+                ));
+            }
             let record = guild::find_guild_by_slug(pool, &slug)
                 .await?
                 .ok_or_else(|| AppError::Internal("Created guild not found".to_string()))?;
