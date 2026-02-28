@@ -87,7 +87,7 @@ development_status:
   # Epic 5: Roles, Permissions & Member Management
   epic-5: in-progress
   5-1-role-crud-and-default-roles: done
-  5-2-permission-assignment-and-bitflag-engine: backlog
+  5-2-permission-assignment-and-bitflag-engine: done
   5-3-role-hierarchy-and-ordering: backlog
   5-4-role-assignment-to-members: backlog
   5-5-channel-level-permission-overrides: backlog

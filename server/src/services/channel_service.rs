@@ -11,8 +11,8 @@ use crate::{
         category,
         channel::{self, Channel, ChannelPositionUpdate},
         guild::{self, Guild},
-        guild_member,
     },
+    permissions,
 };
 
 const MAX_CHANNEL_NAME_CHARS: usize = 64;
@@ -81,7 +81,7 @@ pub async fn create_channel(
     guild_slug: &str,
     input: CreateChannelInput,
 ) -> Result<ChannelResponse, AppError> {
-    let guild = load_owned_guild(pool, user_id, guild_slug).await?;
+    let guild = load_guild_with_channel_manage_access(pool, user_id, guild_slug).await?;
     let name = normalize_channel_name(&input.name)?;
     let channel_type = normalize_channel_type(&input.channel_type)?;
     let category_id = resolve_category_id(pool, &guild.id, input.category_slug.as_deref()).await?;
@@ -127,7 +127,7 @@ pub async fn update_channel(
     channel_slug: &str,
     input: UpdateChannelInput,
 ) -> Result<ChannelResponse, AppError> {
-    let guild = load_owned_guild(pool, user_id, guild_slug).await?;
+    let guild = load_guild_with_channel_manage_access(pool, user_id, guild_slug).await?;
     let existing = channel::find_channel_by_slug(pool, &guild.id, channel_slug)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -169,7 +169,7 @@ pub async fn delete_channel(
     guild_slug: &str,
     channel_slug: &str,
 ) -> Result<DeleteChannelResponse, AppError> {
-    let guild = load_owned_guild(pool, user_id, guild_slug).await?;
+    let guild = load_guild_with_channel_manage_access(pool, user_id, guild_slug).await?;
     let target = channel::find_channel_by_slug(pool, &guild.id, channel_slug)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -223,7 +223,7 @@ pub async fn reorder_channels(
     guild_slug: &str,
     input: ReorderChannelsInput,
 ) -> Result<Vec<ChannelResponse>, AppError> {
-    let guild = load_owned_guild(pool, user_id, guild_slug).await?;
+    let guild = load_guild_with_channel_manage_access(pool, user_id, guild_slug).await?;
     let existing = channel::list_channels_by_guild_id(pool, &guild.id).await?;
 
     if !input.channel_positions.is_empty() {
@@ -373,7 +373,7 @@ fn to_channel_response(channel: Channel, default_channel_slug: &str) -> ChannelR
     }
 }
 
-async fn load_owned_guild(
+async fn load_guild_with_channel_manage_access(
     pool: &DbPool,
     user_id: &str,
     guild_slug: &str,
@@ -381,11 +381,14 @@ async fn load_owned_guild(
     let guild = guild::find_guild_by_slug(pool, guild_slug)
         .await?
         .ok_or(AppError::NotFound)?;
-    if guild.owner_id != user_id {
-        return Err(AppError::Forbidden(
-            "Only guild owners can manage channels".to_string(),
-        ));
-    }
+    permissions::require_guild_permission(
+        pool,
+        &guild,
+        user_id,
+        permissions::MANAGE_CHANNELS,
+        "MANAGE_CHANNELS",
+    )
+    .await?;
     Ok(guild)
 }
 
@@ -397,7 +400,7 @@ async fn load_viewable_guild(
     let guild = guild::find_guild_by_slug(pool, guild_slug)
         .await?
         .ok_or(AppError::NotFound)?;
-    if guild.owner_id == user_id || guild_member::is_guild_member(pool, &guild.id, user_id).await? {
+    if permissions::can_view_guild(pool, &guild, user_id).await? {
         return Ok(guild);
     }
     Err(AppError::Forbidden(

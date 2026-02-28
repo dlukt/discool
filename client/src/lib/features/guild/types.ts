@@ -42,6 +42,7 @@ export type CreateGuildRoleInput = {
 export type UpdateGuildRoleInput = {
   name?: string
   color?: string
+  permissionsBitflag?: number
 }
 
 export type DeleteGuildRoleResult = {
@@ -140,6 +141,7 @@ export type CreateGuildRoleInputWire = {
 export type UpdateGuildRoleInputWire = {
   name?: string
   color?: string
+  permissions_bitflag?: number
 }
 
 export type DeleteGuildRoleResultWire = {
@@ -262,6 +264,9 @@ export function toUpdateGuildRoleInputWire(
   }
   if (input.color !== undefined) {
     wire.color = input.color
+  }
+  if (input.permissionsBitflag !== undefined) {
+    wire.permissions_bitflag = input.permissionsBitflag
   }
   return wire
 }

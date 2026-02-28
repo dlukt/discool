@@ -26,6 +26,8 @@ pub struct UpdateRoleRequest {
     pub name: Option<Option<String>>,
     #[serde(default)]
     pub color: Option<Option<String>>,
+    #[serde(default)]
+    pub permissions_bitflag: Option<Option<i64>>,
 }
 
 pub async fn list_roles(
@@ -80,12 +82,25 @@ pub async fn update_role(
         }
         None => None,
     };
+    let permissions_bitflag = match req.permissions_bitflag {
+        Some(Some(value)) => Some(value),
+        Some(None) => {
+            return Err(AppError::ValidationError(
+                "permissions_bitflag cannot be null".to_string(),
+            ));
+        }
+        None => None,
+    };
     let role = role_service::update_role(
         &state.pool,
         &user.user_id,
         &guild_slug,
         &role_id,
-        UpdateRoleInput { name, color },
+        UpdateRoleInput {
+            name,
+            color,
+            permissions_bitflag,
+        },
     )
     .await?;
     Ok((StatusCode::OK, Json(json!({ "data": role }))).into_response())

@@ -39,7 +39,7 @@ function ownerRoles() {
       name: 'Owner',
       color: '#f59e0b',
       position: -1,
-      permissionsBitflag: 0,
+      permissionsBitflag: 4095,
       isDefault: false,
       isSystem: true,
       canEdit: false,
@@ -63,7 +63,7 @@ function ownerRoles() {
       name: '@everyone',
       color: '#99aab5',
       position: 2147483647,
-      permissionsBitflag: 0,
+      permissionsBitflag: 1537,
       isDefault: true,
       isSystem: true,
       canEdit: false,
@@ -193,6 +193,77 @@ describe('GuildSettings', () => {
         'role-moderators',
       )
     })
+  })
+
+  it('lists canonical permissions and autosaves toggles with failure feedback', async () => {
+    const { getByLabelText, getByRole, getByText } = render(GuildSettings, {
+      open: true,
+      guildSlug: 'makers-hub',
+    })
+
+    guildState.updateRole
+      .mockResolvedValueOnce({
+        ...ownerRoles()[1],
+        permissionsBitflag: 2,
+      })
+      .mockRejectedValueOnce(new Error('Permission save failed'))
+
+    await fireEvent.click(getByLabelText('Edit permissions for Moderators'))
+    const dialog = getByRole('dialog', { name: 'Role permissions' })
+
+    expect(within(dialog).getByLabelText('Send messages')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Manage channels')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Kick members')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Ban members')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Manage roles')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Manage guild')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Manage invites')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Mute members')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('View mod log')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Attach files')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Add reactions')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Manage messages')).toBeInTheDocument()
+
+    await fireEvent.click(within(dialog).getByLabelText('Manage channels'))
+    await waitFor(() => {
+      expect(guildState.updateRole).toHaveBeenNthCalledWith(
+        1,
+        'makers-hub',
+        'role-moderators',
+        { permissionsBitflag: 2 },
+      )
+    })
+    expect(getByText('Permissions saved for Moderators.')).toBeInTheDocument()
+
+    await fireEvent.click(within(dialog).getByLabelText('Ban members'))
+    await waitFor(() => {
+      expect(guildState.updateRole).toHaveBeenNthCalledWith(
+        2,
+        'makers-hub',
+        'role-moderators',
+        { permissionsBitflag: 10 },
+      )
+    })
+    expect(
+      await within(dialog).findByText('Permission save failed'),
+    ).toBeInTheDocument()
+  })
+
+  it('shows owner permissions as read-only implicit all', async () => {
+    const { getByLabelText, getByRole } = render(GuildSettings, {
+      open: true,
+      guildSlug: 'makers-hub',
+    })
+
+    await fireEvent.click(getByLabelText('Edit permissions for Owner'))
+    const dialog = getByRole('dialog', { name: 'Role permissions' })
+
+    expect(
+      within(dialog).getByText(
+        'The Owner role always has all permissions implicitly and cannot be modified.',
+      ),
+    ).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Manage guild')).toBeDisabled()
   })
 
   it('shows owner-only guardrail for non-owners', () => {

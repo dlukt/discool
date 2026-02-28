@@ -209,16 +209,18 @@ pub async fn update_custom_role(
     role_id: &str,
     name: &str,
     color: &str,
+    permissions_bitflag: i64,
     updated_at: &str,
 ) -> Result<u64, AppError> {
     let rows = match pool {
         DbPool::Postgres(pool) => sqlx::query(
             "UPDATE roles
-                 SET name = $1, color = $2, updated_at = $3
-                 WHERE id = $4 AND is_default = 0",
+                 SET name = $1, color = $2, permissions_bitflag = $3, updated_at = $4
+                 WHERE id = $5 AND is_default = 0",
         )
         .bind(name)
         .bind(color)
+        .bind(permissions_bitflag)
         .bind(updated_at)
         .bind(role_id)
         .execute(pool)
@@ -226,11 +228,12 @@ pub async fn update_custom_role(
         .map(|result| result.rows_affected()),
         DbPool::Sqlite(pool) => sqlx::query(
             "UPDATE roles
-                 SET name = ?1, color = ?2, updated_at = ?3
-                 WHERE id = ?4 AND is_default = 0",
+                 SET name = ?1, color = ?2, permissions_bitflag = ?3, updated_at = ?4
+                 WHERE id = ?5 AND is_default = 0",
         )
         .bind(name)
         .bind(color)
+        .bind(permissions_bitflag)
         .bind(updated_at)
         .bind(role_id)
         .execute(pool)
@@ -240,6 +243,46 @@ pub async fn update_custom_role(
     .map_err(|err| AppError::Internal(err.to_string()))?;
 
     Ok(rows)
+}
+
+pub async fn list_assigned_role_permission_bitflags(
+    pool: &DbPool,
+    guild_id: &str,
+    user_id: &str,
+) -> Result<Vec<i64>, AppError> {
+    let bitflags = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT r.permissions_bitflag
+                 FROM role_assignments ra
+                 JOIN roles r ON r.id = ra.role_id
+                 WHERE ra.guild_id = $1
+                   AND ra.user_id = $2
+                   AND r.guild_id = $1",
+            )
+            .bind(guild_id)
+            .bind(user_id)
+            .fetch_all(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT r.permissions_bitflag
+                 FROM role_assignments ra
+                 JOIN roles r ON r.id = ra.role_id
+                 WHERE ra.guild_id = ?1
+                   AND ra.user_id = ?2
+                   AND r.guild_id = ?1",
+            )
+            .bind(guild_id)
+            .bind(user_id)
+            .fetch_all(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(bitflags)
 }
 
 pub async fn delete_role_assignments_by_role_id(

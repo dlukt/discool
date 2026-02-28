@@ -13,6 +13,7 @@ use crate::{
         guild::{self, Guild, GuildResponse},
         role,
     },
+    permissions,
 };
 
 const MAX_GUILD_NAME_CHARS: usize = 64;
@@ -97,7 +98,7 @@ pub async fn create_guild(
                 DEFAULT_EVERYONE_ROLE_NAME,
                 DEFAULT_EVERYONE_ROLE_COLOR,
                 DEFAULT_EVERYONE_ROLE_POSITION,
-                0,
+                permissions::default_everyone_permissions_i64(),
                 true,
                 &created_at,
                 &created_at,
@@ -132,7 +133,7 @@ pub async fn update_guild(
         ));
     }
 
-    let record = load_owned_guild(pool, user_id, guild_slug).await?;
+    let record = load_guild_with_manage_access(pool, user_id, guild_slug).await?;
     let mut name = record.name.clone();
     let mut description = record.description.clone();
 
@@ -196,7 +197,7 @@ pub async fn save_guild_icon(
         ));
     }
 
-    let record = load_owned_guild(pool, user_id, guild_slug).await?;
+    let record = load_guild_with_manage_access(pool, user_id, guild_slug).await?;
     let extension = extension_for_mime(sniffed_mime);
     let storage_key = format!("guild-{}.{}", Uuid::new_v4(), extension);
     let icon_path = guild_icon_file_path(&avatar_config.upload_dir, &storage_key);
@@ -298,6 +299,25 @@ async fn load_owned_guild(
             "Only guild owners can update guild settings".to_string(),
         ));
     }
+    Ok(record)
+}
+
+async fn load_guild_with_manage_access(
+    pool: &DbPool,
+    user_id: &str,
+    guild_slug: &str,
+) -> Result<Guild, AppError> {
+    let record = guild::find_guild_by_slug(pool, guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    permissions::require_guild_permission(
+        pool,
+        &record,
+        user_id,
+        permissions::MANAGE_GUILD,
+        "MANAGE_GUILD",
+    )
+    .await?;
     Ok(record)
 }
 

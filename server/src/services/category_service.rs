@@ -11,8 +11,8 @@ use crate::{
         category::{self, ChannelCategory},
         channel::{self, ChannelPositionUpdate},
         guild::{self, Guild},
-        guild_member,
     },
+    permissions,
 };
 
 const MAX_CATEGORY_NAME_CHARS: usize = 64;
@@ -79,7 +79,7 @@ pub async fn create_category(
     guild_slug: &str,
     input: CreateCategoryInput,
 ) -> Result<CategoryResponse, AppError> {
-    let guild = load_owned_guild(pool, user_id, guild_slug).await?;
+    let guild = load_guild_with_channel_manage_access(pool, user_id, guild_slug).await?;
     let name = normalize_category_name(&input.name)?;
     let base_slug = slugify(&name);
     let position = category::next_category_position(pool, &guild.id).await?;
@@ -119,7 +119,7 @@ pub async fn update_category(
     category_slug: &str,
     input: UpdateCategoryInput,
 ) -> Result<CategoryResponse, AppError> {
-    let guild = load_owned_guild(pool, user_id, guild_slug).await?;
+    let guild = load_guild_with_channel_manage_access(pool, user_id, guild_slug).await?;
     let existing = category::find_category_by_slug(pool, &guild.id, category_slug)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -156,7 +156,7 @@ pub async fn delete_category(
     guild_slug: &str,
     category_slug: &str,
 ) -> Result<DeleteCategoryResponse, AppError> {
-    let guild = load_owned_guild(pool, user_id, guild_slug).await?;
+    let guild = load_guild_with_channel_manage_access(pool, user_id, guild_slug).await?;
     let target = category::find_category_by_slug(pool, &guild.id, category_slug)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -200,7 +200,7 @@ pub async fn reorder_categories(
     guild_slug: &str,
     input: ReorderCategoriesInput,
 ) -> Result<Vec<CategoryResponse>, AppError> {
-    let guild = load_owned_guild(pool, user_id, guild_slug).await?;
+    let guild = load_guild_with_channel_manage_access(pool, user_id, guild_slug).await?;
     if input.category_slugs.is_empty() {
         return Err(AppError::ValidationError(
             "category_slugs is required".to_string(),
@@ -251,7 +251,7 @@ pub async fn update_category_collapse(
     category_slug: &str,
     input: UpdateCategoryCollapseInput,
 ) -> Result<CategoryResponse, AppError> {
-    let guild = load_owned_guild(pool, user_id, guild_slug).await?;
+    let guild = load_guild_with_channel_manage_access(pool, user_id, guild_slug).await?;
     let category_record = category::find_category_by_slug(pool, &guild.id, category_slug)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -280,7 +280,7 @@ fn to_category_response(category: ChannelCategory, collapsed: bool) -> CategoryR
     }
 }
 
-async fn load_owned_guild(
+async fn load_guild_with_channel_manage_access(
     pool: &DbPool,
     user_id: &str,
     guild_slug: &str,
@@ -288,11 +288,14 @@ async fn load_owned_guild(
     let guild = guild::find_guild_by_slug(pool, guild_slug)
         .await?
         .ok_or(AppError::NotFound)?;
-    if guild.owner_id != user_id {
-        return Err(AppError::Forbidden(
-            "Only guild owners can manage categories".to_string(),
-        ));
-    }
+    permissions::require_guild_permission(
+        pool,
+        &guild,
+        user_id,
+        permissions::MANAGE_CHANNELS,
+        "MANAGE_CHANNELS",
+    )
+    .await?;
     Ok(guild)
 }
 
@@ -304,7 +307,7 @@ async fn load_viewable_guild(
     let guild = guild::find_guild_by_slug(pool, guild_slug)
         .await?
         .ok_or(AppError::NotFound)?;
-    if guild.owner_id == user_id || guild_member::is_guild_member(pool, &guild.id, user_id).await? {
+    if permissions::can_view_guild(pool, &guild, user_id).await? {
         return Ok(guild);
     }
     Err(AppError::Forbidden(

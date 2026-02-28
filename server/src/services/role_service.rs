@@ -9,6 +9,7 @@ use crate::{
         guild::{self, Guild},
         role::{self, Role},
     },
+    permissions,
 };
 
 const MAX_ROLE_NAME_CHARS: usize = 64;
@@ -28,6 +29,7 @@ pub struct CreateRoleInput {
 pub struct UpdateRoleInput {
     pub name: Option<String>,
     pub color: Option<String>,
+    pub permissions_bitflag: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,7 +57,7 @@ pub async fn list_roles(
     user_id: &str,
     guild_slug: &str,
 ) -> Result<Vec<RoleResponse>, AppError> {
-    let guild = load_owned_guild(pool, user_id, guild_slug).await?;
+    let guild = load_guild_with_role_management_access(pool, user_id, guild_slug).await?;
     ensure_default_role(pool, &guild).await?;
     let roles = role::list_roles_by_guild_id(pool, &guild.id).await?;
 
@@ -71,7 +73,7 @@ pub async fn create_role(
     guild_slug: &str,
     input: CreateRoleInput,
 ) -> Result<RoleResponse, AppError> {
-    let guild = load_owned_guild(pool, user_id, guild_slug).await?;
+    let guild = load_guild_with_role_management_access(pool, user_id, guild_slug).await?;
     ensure_default_role(pool, &guild).await?;
 
     let name = normalize_custom_role_name(&input.name)?;
@@ -117,7 +119,12 @@ pub async fn update_role(
     role_id: &str,
     input: UpdateRoleInput,
 ) -> Result<RoleResponse, AppError> {
-    let guild = load_owned_guild(pool, user_id, guild_slug).await?;
+    let guild = load_guild_with_role_management_access(pool, user_id, guild_slug).await?;
+    if role_id.starts_with("owner:") {
+        return Err(AppError::ValidationError(
+            "The Owner role cannot be edited".to_string(),
+        ));
+    }
     let existing = role::find_role_by_id(pool, &guild.id, role_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -128,7 +135,7 @@ pub async fn update_role(
         ));
     }
 
-    if input.name.is_none() && input.color.is_none() {
+    if input.name.is_none() && input.color.is_none() && input.permissions_bitflag.is_none() {
         return Err(AppError::ValidationError(
             "At least one role field is required".to_string(),
         ));
@@ -148,11 +155,25 @@ pub async fn update_role(
         Some(value) => normalize_role_color(&value)?,
         None => existing.color.clone(),
     };
+    let permissions_mask = match input.permissions_bitflag {
+        Some(value) => permissions::parse_permissions_bitflag(value)?,
+        None => permissions::stored_permissions_to_mask(existing.permissions_bitflag)?,
+    };
+    let permissions_bitflag = permissions::mask_to_stored_permissions(permissions_mask)?;
     let updated_at = Utc::now().to_rfc3339();
-    let rows = role::update_custom_role(pool, &existing.id, &name, &color, &updated_at).await?;
+    let rows = role::update_custom_role(
+        pool,
+        &existing.id,
+        &name,
+        &color,
+        permissions_bitflag,
+        &updated_at,
+    )
+    .await?;
     if rows == 0 {
         return Err(AppError::NotFound);
     }
+    permissions::invalidate_guild_permission_cache(&guild.id);
 
     let updated = role::find_role_by_id(pool, &guild.id, &existing.id)
         .await?
@@ -166,7 +187,12 @@ pub async fn delete_role(
     guild_slug: &str,
     role_id: &str,
 ) -> Result<DeleteRoleResponse, AppError> {
-    let guild = load_owned_guild(pool, user_id, guild_slug).await?;
+    let guild = load_guild_with_role_management_access(pool, user_id, guild_slug).await?;
+    if role_id.starts_with("owner:") {
+        return Err(AppError::ValidationError(
+            "The Owner role cannot be deleted".to_string(),
+        ));
+    }
     let existing = role::find_role_by_id(pool, &guild.id, role_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -184,6 +210,7 @@ pub async fn delete_role(
     if rows == 0 {
         return Err(AppError::NotFound);
     }
+    permissions::invalidate_guild_permission_cache(&guild.id);
 
     Ok(DeleteRoleResponse {
         deleted_id: existing.id,
@@ -205,7 +232,7 @@ async fn ensure_default_role(pool: &DbPool, guild: &Guild) -> Result<(), AppErro
         EVERYONE_ROLE_NAME,
         DEFAULT_EVERYONE_COLOR,
         DEFAULT_EVERYONE_POSITION,
-        0,
+        permissions::default_everyone_permissions_i64(),
         true,
         &now,
         &now,
@@ -220,7 +247,7 @@ async fn ensure_default_role(pool: &DbPool, guild: &Guild) -> Result<(), AppErro
     }
 }
 
-async fn load_owned_guild(
+async fn load_guild_with_role_management_access(
     pool: &DbPool,
     user_id: &str,
     guild_slug: &str,
@@ -228,11 +255,14 @@ async fn load_owned_guild(
     let guild = guild::find_guild_by_slug(pool, guild_slug)
         .await?
         .ok_or(AppError::NotFound)?;
-    if guild.owner_id != user_id {
-        return Err(AppError::Forbidden(
-            "Only guild owners can manage roles".to_string(),
-        ));
-    }
+    permissions::require_guild_permission(
+        pool,
+        &guild,
+        user_id,
+        permissions::MANAGE_ROLES,
+        "MANAGE_ROLES",
+    )
+    .await?;
     Ok(guild)
 }
 
@@ -299,7 +329,7 @@ fn owner_role_response(guild: &Guild) -> RoleResponse {
         name: OWNER_ROLE_NAME.to_string(),
         color: OWNER_ROLE_COLOR.to_string(),
         position: -1,
-        permissions_bitflag: 0,
+        permissions_bitflag: permissions::all_permissions_i64(),
         is_default: false,
         is_system: true,
         can_edit: false,

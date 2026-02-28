@@ -2606,8 +2606,14 @@ async fn roles_owner_crud_hierarchy_and_delete_cleanup_work() {
     let listed_roles = listed["data"].as_array().unwrap();
     assert_eq!(listed_roles[0]["name"], json!("Owner"));
     assert_eq!(listed_roles[0]["is_system"], json!(true));
+    assert_eq!(listed_roles[0]["permissions_bitflag"], json!(4095));
+    let owner_role_id = listed_roles[0]["id"].as_str().unwrap().to_string();
     assert_eq!(listed_roles.last().unwrap()["name"], json!("@everyone"));
     assert_eq!(listed_roles.last().unwrap()["is_default"], json!(true));
+    assert_eq!(
+        listed_roles.last().unwrap()["permissions_bitflag"],
+        json!(1537)
+    );
     let everyone_role_id = listed_roles.last().unwrap()["id"]
         .as_str()
         .unwrap()
@@ -2620,13 +2626,22 @@ async fn roles_owner_crud_hierarchy_and_delete_cleanup_work() {
     let custom_role_id = created["data"]["id"].as_str().unwrap().to_string();
     assert_eq!(created["data"]["name"], json!("Moderators"));
 
+    let update_owner_path = format!("/api/v1/guilds/{guild_slug}/roles/{owner_role_id}");
+    let update_owner_body = json!({ "permissions_bitflag": 0 }).to_string();
+    let res =
+        http_patch_with_bearer(&addr, &update_owner_path, &update_owner_body, &owner_token).await;
+    assert_eq!(response_status(&res), 422);
+
     let update_path = format!("/api/v1/guilds/{guild_slug}/roles/{custom_role_id}");
-    let update_body = json!({ "name": "Moderation Team", "color": "#6633ff" }).to_string();
+    let update_body =
+        json!({ "name": "Moderation Team", "color": "#6633ff", "permissions_bitflag": 82 })
+            .to_string();
     let res = http_patch_with_bearer(&addr, &update_path, &update_body, &owner_token).await;
     assert_eq!(response_status(&res), 200);
     let updated: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
     assert_eq!(updated["data"]["name"], json!("Moderation Team"));
     assert_eq!(updated["data"]["color"], json!("#6633ff"));
+    assert_eq!(updated["data"]["permissions_bitflag"], json!(82));
 
     let url = format!("sqlite:{}", db_path.display());
     let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
@@ -2672,6 +2687,171 @@ async fn roles_owner_crud_hierarchy_and_delete_cleanup_work() {
     let delete_everyone_path = format!("/api/v1/guilds/{guild_slug}/roles/{everyone_role_id}");
     let res = http_delete_with_bearer(&addr, &delete_everyone_path, &owner_token).await;
     assert_eq!(response_status(&res), 422);
+}
+
+#[tokio::test]
+async fn guild_permission_bitflags_authorize_member_mutations_and_invalidate_cache() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "owner-perms", [61u8; 32]).await;
+    let manager_token = register_and_authenticate(&addr, "manager-perms", [62u8; 32]).await;
+
+    let guild_body = json!({ "name": "Permissions Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap().to_string();
+    let guild_id = guild["data"]["id"].as_str().unwrap().to_string();
+
+    let roles_path = format!("/api/v1/guilds/{guild_slug}/roles");
+    let create_role_body = json!({ "name": "Guild Manager", "color": "#3366ff" }).to_string();
+    let res = http_post_with_bearer(&addr, &roles_path, &create_role_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let created_role: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let manager_role_id = created_role["data"]["id"].as_str().unwrap().to_string();
+
+    let manager_permission_mask = 2 + 32 + 64;
+    let role_update_path = format!("/api/v1/guilds/{guild_slug}/roles/{manager_role_id}");
+    let role_update_body = json!({ "permissions_bitflag": manager_permission_mask }).to_string();
+    let res =
+        http_patch_with_bearer(&addr, &role_update_path, &role_update_body, &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+
+    let url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let manager_id = sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username = ?1")
+        .bind("manager-perms")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO guild_members (guild_id, user_id, joined_at, joined_via_invite_code) VALUES (?1, ?2, ?3, NULL)",
+    )
+    .bind(&guild_id)
+    .bind(&manager_id)
+    .bind("2026-02-28T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO role_assignments (guild_id, user_id, role_id, assigned_at) VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(&guild_id)
+    .bind(&manager_id)
+    .bind(&manager_role_id)
+    .bind("2026-02-28T00:00:01Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    drop(pool);
+
+    let update_guild_body = json!({ "name": "Permissions Guild Updated" }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}"),
+        &update_guild_body,
+        &manager_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 200);
+
+    let create_channel_body = json!({ "name": "Operations", "channel_type": "text" }).to_string();
+    let res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/channels"),
+        &create_channel_body,
+        &manager_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 201);
+
+    let create_category_body = json!({ "name": "Ops" }).to_string();
+    let res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/categories"),
+        &create_category_body,
+        &manager_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 201);
+
+    let create_invite_body = json!({ "type": "reusable" }).to_string();
+    let invites_path = format!("/api/v1/guilds/{guild_slug}/invites");
+    let res =
+        http_post_with_bearer(&addr, &invites_path, &create_invite_body, &manager_token).await;
+    assert_eq!(response_status(&res), 201);
+
+    let denied_role_update_body = json!({ "name": "Cannot Edit Roles" }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        &role_update_path,
+        &denied_role_update_body,
+        &manager_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 403);
+
+    let reduced_permission_mask = 32 + 64;
+    let remove_manage_channels_body =
+        json!({ "permissions_bitflag": reduced_permission_mask }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        &role_update_path,
+        &remove_manage_channels_body,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 200);
+
+    let blocked_channel_body = json!({ "name": "Incidents", "channel_type": "text" }).to_string();
+    let res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/channels"),
+        &blocked_channel_body,
+        &manager_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 403);
+
+    let another_invite_body = json!({ "type": "single_use" }).to_string();
+    let res =
+        http_post_with_bearer(&addr, &invites_path, &another_invite_body, &manager_token).await;
+    assert_eq!(response_status(&res), 201);
+
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    sqlx::query("DELETE FROM guild_members WHERE guild_id = ?1 AND user_id = ?2")
+        .bind(&guild_id)
+        .bind(&manager_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    drop(pool);
+
+    let post_removal_invite_body = json!({ "type": "single_use" }).to_string();
+    let res = http_post_with_bearer(
+        &addr,
+        &invites_path,
+        &post_removal_invite_body,
+        &manager_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 403);
 }
 
 #[tokio::test]

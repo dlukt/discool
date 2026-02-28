@@ -3,6 +3,13 @@
 import { ApiError } from '$lib/api'
 
 import { guildState } from './guildStore.svelte'
+import {
+  ALL_ROLE_PERMISSIONS_BITFLAG,
+  GUILD_PERMISSION_CATALOG,
+  type GuildPermissionDefinition,
+  hasGuildPermission,
+  toggleGuildPermission,
+} from './permissions'
 import type { GuildRole } from './types'
 
 const MAX_ICON_BYTES = 2 * 1024 * 1024
@@ -54,6 +61,13 @@ let deleteRoleDialogOpen = $state(false)
 let deleteRoleTarget = $state<GuildRole | null>(null)
 let deleteRoleError = $state<string | null>(null)
 let deleteRoleSubmitting = $state(false)
+
+let permissionsDialogOpen = $state(false)
+let permissionsRoleTarget = $state<GuildRole | null>(null)
+let permissionsBitflag = $state(0)
+let permissionsSavingKey = $state<string | null>(null)
+let permissionsError = $state<string | null>(null)
+const permissionCatalog = GUILD_PERMISSION_CATALOG
 
 function validateName(value: string): string | null {
   const trimmed = value.trim()
@@ -113,6 +127,12 @@ function resetRoleDialogs() {
   deleteRoleDialogOpen = false
   deleteRoleTarget = null
   deleteRoleError = null
+
+  permissionsDialogOpen = false
+  permissionsRoleTarget = null
+  permissionsBitflag = 0
+  permissionsSavingKey = null
+  permissionsError = null
 }
 
 $effect(() => {
@@ -297,6 +317,74 @@ async function handleEditRoleSubmit(event: SubmitEvent) {
   } finally {
     editRoleSubmitting = false
   }
+}
+
+function isOwnerPseudoRole(role: GuildRole): boolean {
+  return role.id.startsWith('owner:')
+}
+
+function openPermissionsDialog(role: GuildRole) {
+  if (!canEditGuild) return
+  permissionsRoleTarget = role
+  permissionsBitflag = isOwnerPseudoRole(role)
+    ? ALL_ROLE_PERMISSIONS_BITFLAG
+    : role.permissionsBitflag
+  permissionsSavingKey = null
+  permissionsError = null
+  permissionsDialogOpen = true
+}
+
+function closePermissionsDialog() {
+  permissionsDialogOpen = false
+  permissionsRoleTarget = null
+  permissionsBitflag = 0
+  permissionsSavingKey = null
+  permissionsError = null
+}
+
+async function handlePermissionToggle(
+  permission: GuildPermissionDefinition,
+  event: Event,
+) {
+  if (!guild || !permissionsRoleTarget) return
+  if (permissionsSavingKey || !permissionsRoleTarget.canEdit) return
+
+  const input = event.currentTarget as HTMLInputElement | null
+  if (!input) return
+
+  const previousBitflag = permissionsBitflag
+  const nextBitflag = toggleGuildPermission(
+    previousBitflag,
+    permission.mask,
+    input.checked,
+  )
+  if (nextBitflag === previousBitflag) return
+
+  permissionsBitflag = nextBitflag
+  permissionsSavingKey = permission.key
+  permissionsError = null
+
+  try {
+    const updated = await guildState.updateRole(
+      guild.slug,
+      permissionsRoleTarget.id,
+      {
+        permissionsBitflag: nextBitflag,
+      },
+    )
+    permissionsRoleTarget = updated
+    permissionsBitflag = updated.permissionsBitflag
+    rolesStatusMessage = `Permissions saved for ${updated.name}.`
+  } catch (err) {
+    permissionsBitflag = previousBitflag
+    permissionsError = messageFromError(err, 'Failed to save role permissions.')
+  } finally {
+    permissionsSavingKey = null
+  }
+}
+
+function permissionIsEnabled(permission: GuildPermissionDefinition): boolean {
+  return hasGuildPermission(permissionsBitflag, permission)
 }
 
 function openDeleteRoleDialog(role: GuildRole) {
@@ -493,6 +581,14 @@ async function handleClose() {
                   </div>
 
                   <div class="flex shrink-0 items-center gap-2">
+                    <button
+                      type="button"
+                      class="rounded-md bg-muted px-2 py-1 text-xs text-foreground hover:opacity-90"
+                      onclick={() => openPermissionsDialog(role)}
+                      aria-label={`Edit permissions for ${role.name}`}
+                    >
+                      Permissions
+                    </button>
                     {#if role.canEdit}
                       <button
                         type="button"
@@ -663,6 +759,74 @@ async function handleClose() {
             {editRoleSubmitting ? 'Saving...' : 'Save role'}
           </button>
         </form>
+      </div>
+    </div>
+  {/if}
+
+  {#if permissionsDialogOpen && permissionsRoleTarget}
+    <div class="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" role="presentation">
+      <div
+        class="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-lg border border-border bg-card p-6 shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Role permissions"
+      >
+        <header class="mb-4 flex items-center justify-between">
+          <h3 class="text-lg font-semibold">Role permissions</h3>
+          <button
+            type="button"
+            class="rounded-md bg-muted px-3 py-1 text-sm text-foreground hover:opacity-90"
+            onclick={closePermissionsDialog}
+          >
+            Close
+          </button>
+        </header>
+
+        <p class="mb-3 text-sm text-foreground">
+          Managing permissions for <strong>{permissionsRoleTarget.name}</strong>.
+        </p>
+
+        {#if isOwnerPseudoRole(permissionsRoleTarget)}
+          <p class="mb-3 rounded-md border border-fire/40 bg-fire/10 p-3 text-sm text-fire">
+            The Owner role always has all permissions implicitly and cannot be modified.
+          </p>
+        {/if}
+
+        {#if permissionsError}
+          <p class="mb-3 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive" role="alert">
+            {permissionsError}
+          </p>
+        {/if}
+
+        <ul class="space-y-2">
+          {#each permissionCatalog as permission (permission.key)}
+            <li class="flex items-start justify-between gap-3 rounded-md border border-border bg-background p-3">
+              <div class="min-w-0">
+                <p class="text-sm font-medium text-foreground">{permission.label}</p>
+                <p class="text-xs text-muted-foreground">{permission.description}</p>
+              </div>
+              <label class="flex shrink-0 items-center gap-2">
+                <input
+                  type="checkbox"
+                  class="h-4 w-4 accent-fire"
+                  checked={permissionIsEnabled(permission)}
+                  onchange={(event) => void handlePermissionToggle(permission, event)}
+                  disabled={!permissionsRoleTarget.canEdit || permissionsSavingKey !== null}
+                  aria-label={permission.label}
+                />
+                <span class="text-xs text-muted-foreground">
+                  {permissionIsEnabled(permission) ? 'On' : 'Off'}
+                </span>
+              </label>
+            </li>
+          {/each}
+        </ul>
+
+        {#if permissionsSavingKey}
+          <p class="mt-3 text-xs text-muted-foreground" aria-live="polite">
+            Saving permission change...
+          </p>
+        {/if}
       </div>
     </div>
   {/if}

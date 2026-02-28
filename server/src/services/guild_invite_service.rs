@@ -9,6 +9,7 @@ use crate::{
         guild::{self, Guild},
         guild_invite::{self, GuildInviteWithCreator},
     },
+    permissions,
 };
 
 const MAX_INVITE_CODE_ATTEMPTS: usize = 50;
@@ -211,12 +212,14 @@ async fn load_managed_guild(
     let guild = guild::find_guild_by_slug(pool, guild_slug)
         .await?
         .ok_or(AppError::NotFound)?;
-    // Owner-only for now; Epic 5 permissions can plug in here.
-    if guild.owner_id != user_id {
-        return Err(AppError::Forbidden(
-            "Only guild owners can manage invites".to_string(),
-        ));
-    }
+    permissions::require_guild_permission(
+        pool,
+        &guild,
+        user_id,
+        permissions::MANAGE_INVITES,
+        "MANAGE_INVITES",
+    )
+    .await?;
     Ok(guild)
 }
 
