@@ -103,7 +103,7 @@ development_status:
   6-4-edit-and-delete-own-messages: done
   6-5-emoji-reactions: done
   6-6-file-upload-and-sharing: done
-  6-7-rich-embeds-and-markdown-rendering: backlog
+  6-7-rich-embeds-and-markdown-rendering: done
   6-8-typing-indicators-and-channel-activity: backlog
   6-9-direct-messages: backlog
   6-10-user-blocking-complete-erasure: backlog

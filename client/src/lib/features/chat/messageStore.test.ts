@@ -53,6 +53,14 @@ const historyApiMock = vi.hoisted(() => {
           count: number
           reacted: boolean
         }>
+        embeds: Array<{
+          id: string
+          url: string
+          domain: string
+          title: string | null
+          description: string | null
+          thumbnailUrl: string | null
+        }>
       }>
       cursor: string | null
     }>,
@@ -84,6 +92,14 @@ const historyApiMock = vi.hoisted(() => {
         emoji: string
         count: number
         reacted: boolean
+      }>
+      embeds: Array<{
+        id: string
+        url: string
+        domain: string
+        title: string | null
+        description: string | null
+        thumbnailUrl: string | null
       }>
     } | null,
   }
@@ -129,6 +145,7 @@ function makeMessage(id: string, createdAt: string) {
     optimistic: false,
     attachments: [],
     reactions: [],
+    embeds: [],
   }
 }
 
@@ -186,6 +203,16 @@ describe('messageState', () => {
         updated_at: '2026-02-28T00:00:00Z',
         client_nonce: payload.client_nonce,
         attachments: [],
+        embeds: [
+          {
+            id: 'embed-1',
+            url: 'https://example.com/post',
+            domain: 'example.com',
+            title: 'Example',
+            description: 'Embed description',
+            thumbnail_url: 'https://example.com/thumb.png',
+          },
+        ],
       },
     })
 
@@ -194,6 +221,16 @@ describe('messageState', () => {
     expect(reconciled[0]?.id).toBe('message-1')
     expect(reconciled[0]?.optimistic).toBe(false)
     expect(reconciled[0]?.content).toBe('Hello &lt;b&gt;team&lt;/b&gt;')
+    expect(reconciled[0]?.embeds).toEqual([
+      {
+        id: 'embed-1',
+        url: 'https://example.com/post',
+        domain: 'example.com',
+        title: 'Example',
+        description: 'Embed description',
+        thumbnailUrl: 'https://example.com/thumb.png',
+      },
+    ])
   })
 
   it('loads initial and older message history pages with cursor state', async () => {

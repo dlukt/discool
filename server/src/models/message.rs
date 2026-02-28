@@ -121,37 +121,96 @@ pub async fn update_message_content_by_id_channel_and_author(
     content: &str,
     updated_at: &str,
 ) -> Result<bool, AppError> {
+    update_message_content_if_unmodified_by_id_channel_and_author(
+        pool,
+        message_id,
+        channel_id,
+        author_user_id,
+        content,
+        updated_at,
+        None,
+    )
+    .await
+}
+
+pub async fn update_message_content_if_unmodified_by_id_channel_and_author(
+    pool: &DbPool,
+    message_id: &str,
+    channel_id: &str,
+    author_user_id: &str,
+    content: &str,
+    updated_at: &str,
+    previous_updated_at: Option<&str>,
+) -> Result<bool, AppError> {
     let rows = match pool {
-        DbPool::Postgres(pool) => sqlx::query(
-            "UPDATE messages
-                 SET content = $1, updated_at = $2
-                 WHERE id = $3
-                   AND channel_id = $4
-                   AND author_user_id = $5",
-        )
-        .bind(content)
-        .bind(updated_at)
-        .bind(message_id)
-        .bind(channel_id)
-        .bind(author_user_id)
-        .execute(pool)
-        .await
-        .map(|result| result.rows_affected()),
-        DbPool::Sqlite(pool) => sqlx::query(
-            "UPDATE messages
-                 SET content = ?1, updated_at = ?2
-                 WHERE id = ?3
-                   AND channel_id = ?4
-                   AND author_user_id = ?5",
-        )
-        .bind(content)
-        .bind(updated_at)
-        .bind(message_id)
-        .bind(channel_id)
-        .bind(author_user_id)
-        .execute(pool)
-        .await
-        .map(|result| result.rows_affected()),
+        DbPool::Postgres(pool) => match previous_updated_at {
+            Some(expected_updated_at) => sqlx::query(
+                "UPDATE messages
+                     SET content = $1, updated_at = $2
+                     WHERE id = $3
+                       AND channel_id = $4
+                       AND author_user_id = $5
+                       AND updated_at = $6",
+            )
+            .bind(content)
+            .bind(updated_at)
+            .bind(message_id)
+            .bind(channel_id)
+            .bind(author_user_id)
+            .bind(expected_updated_at)
+            .execute(pool)
+            .await
+            .map(|result| result.rows_affected()),
+            None => sqlx::query(
+                "UPDATE messages
+                     SET content = $1, updated_at = $2
+                     WHERE id = $3
+                       AND channel_id = $4
+                       AND author_user_id = $5",
+            )
+            .bind(content)
+            .bind(updated_at)
+            .bind(message_id)
+            .bind(channel_id)
+            .bind(author_user_id)
+            .execute(pool)
+            .await
+            .map(|result| result.rows_affected()),
+        },
+        DbPool::Sqlite(pool) => match previous_updated_at {
+            Some(expected_updated_at) => sqlx::query(
+                "UPDATE messages
+                     SET content = ?1, updated_at = ?2
+                     WHERE id = ?3
+                       AND channel_id = ?4
+                       AND author_user_id = ?5
+                       AND updated_at = ?6",
+            )
+            .bind(content)
+            .bind(updated_at)
+            .bind(message_id)
+            .bind(channel_id)
+            .bind(author_user_id)
+            .bind(expected_updated_at)
+            .execute(pool)
+            .await
+            .map(|result| result.rows_affected()),
+            None => sqlx::query(
+                "UPDATE messages
+                     SET content = ?1, updated_at = ?2
+                     WHERE id = ?3
+                       AND channel_id = ?4
+                       AND author_user_id = ?5",
+            )
+            .bind(content)
+            .bind(updated_at)
+            .bind(message_id)
+            .bind(channel_id)
+            .bind(author_user_id)
+            .execute(pool)
+            .await
+            .map(|result| result.rows_affected()),
+        },
     }
     .map_err(|err| AppError::Internal(err.to_string()))?;
 

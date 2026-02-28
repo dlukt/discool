@@ -20,6 +20,7 @@ function makeMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
     optimistic: false,
     attachments: [],
     reactions: [],
+    embeds: [],
     ...overrides,
   }
 }
@@ -147,5 +148,102 @@ describe('MessageBubble', () => {
 
     await fireEvent.click(getByTestId('message-attachment-image-message-1-0'))
     expect(getByTestId('message-image-preview-message-1')).toBeInTheDocument()
+  })
+
+  it('renders markdown syntax and safe autolinks', () => {
+    const { getByTestId } = render(MessageBubble, {
+      message: makeMessage({
+        content:
+          '**bold** *italic* ~~strike~~ `inline`\n> quote\n\n```ts\nconst answer = 42\n```\nhttps://example.com',
+      }),
+      currentUserId: 'user-1',
+    })
+
+    const content = getByTestId('message-content-message-1')
+    expect(content.querySelector('strong')?.textContent).toBe('bold')
+    expect(content.querySelector('em')?.textContent).toBe('italic')
+    expect(content.querySelector('del')?.textContent).toBe('strike')
+    expect(content.querySelector('blockquote')).toBeInTheDocument()
+    expect(content.querySelector('pre code.hljs')).toBeInTheDocument()
+    const link = content.querySelector('a') as HTMLAnchorElement | null
+    expect(link).not.toBeNull()
+    expect(link?.getAttribute('href')).toBe('https://example.com')
+    expect(link?.getAttribute('rel')).toContain('noopener')
+  })
+
+  it('ignores unsafe code fence language attributes', () => {
+    const { getByTestId } = render(MessageBubble, {
+      message: makeMessage({
+        content:
+          '```" onmouseover="alert(1)\nconst answer = 42\n```\nhttps://example.com',
+      }),
+      currentUserId: 'user-1',
+    })
+
+    const content = getByTestId('message-content-message-1')
+    const codeBlock = content.querySelector('pre code')
+    expect(codeBlock).toBeInTheDocument()
+    expect(codeBlock?.getAttribute('class')).toBe('hljs')
+    expect(content.querySelector('[onmouseover]')).toBeNull()
+  })
+
+  it('does not create clickable links or thumbnails for local/private URLs', () => {
+    const { getByTestId } = render(MessageBubble, {
+      message: makeMessage({
+        content: 'http://127.0.0.1/admin',
+        embeds: [
+          {
+            id: 'embed-local',
+            url: 'http://127.0.0.1/admin',
+            domain: '127.0.0.1',
+            title: 'Local admin',
+            description: null,
+            thumbnailUrl: 'http://[::1]/thumb.png',
+          },
+        ],
+      }),
+      currentUserId: 'user-1',
+    })
+
+    const content = getByTestId('message-content-message-1')
+    expect(content.querySelector('a')).toBeNull()
+
+    const card = getByTestId('message-embed-card-message-1-0')
+    expect(card.querySelector('a')).toBeNull()
+    expect(card.querySelector('img')).toBeNull()
+    expect(card).toHaveTextContent('Local admin')
+  })
+
+  it('renders compact embed cards and tolerates missing fields', () => {
+    const { getByTestId, queryByTestId } = render(MessageBubble, {
+      message: makeMessage({
+        embeds: [
+          {
+            id: 'embed-1',
+            url: 'https://example.com/post',
+            domain: 'example.com',
+            title: 'Example Post',
+            description: 'Description',
+            thumbnailUrl: 'https://example.com/thumb.png',
+          },
+          {
+            id: 'embed-2',
+            url: 'https://example.com/empty',
+            domain: 'example.com',
+            title: null,
+            description: null,
+            thumbnailUrl: null,
+          },
+        ],
+      }),
+      currentUserId: 'user-1',
+    })
+
+    const firstCard = getByTestId('message-embed-card-message-1-0')
+    expect(firstCard).toBeInTheDocument()
+    const firstLink = firstCard.querySelector('a') as HTMLAnchorElement | null
+    expect(firstLink?.getAttribute('href')).toBe('https://example.com/post')
+    expect(firstLink?.getAttribute('rel')).toContain('noopener')
+    expect(queryByTestId('message-embed-card-message-1-1')).toBeInTheDocument()
   })
 })

@@ -4266,6 +4266,10 @@ async fn message_attachment_upload_creates_message_broadcasts_and_serves_file() 
         .as_array()
         .expect("expected attachments array");
     assert_eq!(attachments.len(), 1);
+    let embeds = upload_payload["data"]["embeds"]
+        .as_array()
+        .expect("expected embeds array");
+    assert!(embeds.is_empty());
     let attachment = &attachments[0];
     let attachment_id = attachment["id"].as_str().unwrap().to_string();
     let attachment_url = attachment["url"].as_str().unwrap().to_string();
@@ -4281,6 +4285,10 @@ async fn message_attachment_upload_creates_message_broadcasts_and_serves_file() 
         ws_event["d"]["attachments"][0]["id"],
         json!(attachment_id.as_str())
     );
+    let ws_embeds = ws_event["d"]["embeds"]
+        .as_array()
+        .expect("expected embeds array on websocket payload");
+    assert!(ws_embeds.is_empty());
 
     let download_res = http_get_bytes_with_bearer(&addr, &attachment_url, &owner_token).await;
     let (header, downloaded_body) = response_header_and_body_bytes(&download_res);
@@ -4704,6 +4712,10 @@ async fn websocket_message_create_persists_then_broadcasts_to_subscribed_peers()
         json!("Hello &lt;b&gt;team&lt;/b&gt;")
     );
     assert_eq!(owner_event["d"]["client_nonce"], json!("nonce-1"));
+    let owner_embeds = owner_event["d"]["embeds"]
+        .as_array()
+        .expect("expected embeds array");
+    assert!(owner_embeds.is_empty());
     assert_eq!(peer_event["d"]["id"], owner_event["d"]["id"]);
     assert_eq!(
         peer_event["d"]["content"],
@@ -5569,6 +5581,22 @@ async fn rest_message_history_supports_cursor_pagination_and_permissions() {
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query(
+        "INSERT INTO message_embeds (id, message_id, url, normalized_url, title, description, thumbnail_url, domain, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )
+    .bind("embed-1")
+    .bind("msg-003")
+    .bind("https://example.com/article")
+    .bind("https://example.com/article")
+    .bind("Example article")
+    .bind("Example description")
+    .bind("https://example.com/thumb.png")
+    .bind("example.com")
+    .bind("2026-02-28T00:00:07Z")
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let first_path = format!("/api/v1/guilds/{guild_slug}/channels/general/messages?limit=2");
     let first_res = http_get_with_bearer(&addr, &first_path, &member_token).await;
@@ -5581,9 +5609,18 @@ async fn rest_message_history_supports_cursor_pagination_and_permissions() {
     assert_eq!(first_data[0]["reactions"][0]["emoji"], json!("😀"));
     assert_eq!(first_data[0]["reactions"][0]["count"], json!(2));
     assert_eq!(first_data[0]["reactions"][0]["reacted"], json!(true));
+    assert_eq!(
+        first_data[0]["embeds"][0]["url"],
+        json!("https://example.com/article")
+    );
+    assert_eq!(first_data[0]["embeds"][0]["domain"], json!("example.com"));
     assert_eq!(first_data[1]["reactions"][0]["emoji"], json!("🎉"));
     assert_eq!(first_data[1]["reactions"][0]["count"], json!(1));
     assert_eq!(first_data[1]["reactions"][0]["reacted"], json!(false));
+    let second_message_embeds = first_data[1]["embeds"]
+        .as_array()
+        .expect("expected embeds array for second message");
+    assert!(second_message_embeds.is_empty());
     let cursor = first_payload["cursor"]
         .as_str()
         .expect("expected history cursor on first page")

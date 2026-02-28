@@ -31,6 +31,7 @@ type MessageCreatePayload = {
   client_nonce?: string
   attachments?: unknown
   reactions?: unknown
+  embeds?: unknown
 }
 
 type MessageDeletePayload = {
@@ -205,6 +206,16 @@ function parseMessageMutationEnvelope(
           emoji?: string
           count?: number
           reacted?: boolean
+        }>)
+      : undefined,
+    embeds: Array.isArray(payload.embeds)
+      ? (payload.embeds as Array<{
+          id?: string
+          url?: string
+          domain?: string
+          title?: string | null
+          description?: string | null
+          thumbnail_url?: string | null
         }>)
       : undefined,
   })
@@ -587,6 +598,7 @@ export const messageState = $state({
       clientNonce: nonce,
       attachments: [],
       reactions: [],
+      embeds: [],
     }
 
     messageState.messagesByChannel[channelKey] = sortMessages([

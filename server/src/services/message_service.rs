@@ -13,10 +13,13 @@ use crate::{
         channel::{self, Channel},
         channel_permission_override,
         guild::{self, Guild},
-        guild_member, message, message_attachment, message_reaction, role,
+        guild_member, message, message_attachment, message_embed, message_reaction, role,
     },
     permissions,
-    services::file_storage_service::{self, FileStorageProvider},
+    services::{
+        embed_service,
+        file_storage_service::{self, FileStorageProvider},
+    },
 };
 
 const MAX_MESSAGE_CHARS: usize = 2_000;
@@ -88,6 +91,19 @@ pub struct MessageReactionSummaryResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct MessageEmbedResponse {
+    pub id: String,
+    pub url: String,
+    pub domain: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbnail_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct MessageReactionUpdateResponse {
     pub guild_slug: String,
     pub channel_slug: String,
@@ -115,6 +131,7 @@ pub struct MessageResponse {
     pub client_nonce: Option<String>,
     pub attachments: Vec<MessageAttachmentResponse>,
     pub reactions: Vec<MessageReactionSummaryResponse>,
+    pub embeds: Vec<MessageEmbedResponse>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -179,6 +196,7 @@ pub async fn create_message(
             "Message id collision while creating message".to_string(),
         ));
     }
+    sync_message_embeds_best_effort(pool, &message_id, &normalized_content).await;
 
     let stored = message::find_message_by_id(pool, &message_id)
         .await?
@@ -190,6 +208,7 @@ pub async fn create_message(
         stored,
         user_id,
         normalized_nonce,
+        None,
         None,
         None,
     )
@@ -341,6 +360,7 @@ pub async fn create_attachment_message(
         }
         return Err(storage_err);
     }
+    sync_message_embeds_best_effort(pool, &message_id, &normalized_content).await;
 
     let stored = message::find_message_by_id(pool, &message_id)
         .await?
@@ -361,6 +381,7 @@ pub async fn create_attachment_message(
             size_bytes,
             created_at: now,
         }]),
+        None,
         None,
     )
     .await
@@ -419,18 +440,22 @@ pub async fn update_message(
     }
 
     let updated_at = Utc::now().to_rfc3339();
-    let updated = message::update_message_content_by_id_channel_and_author(
+    let updated = message::update_message_content_if_unmodified_by_id_channel_and_author(
         pool,
         &normalized_message_id,
         &access.channel.id,
         user_id,
         &normalized_content,
         &updated_at,
+        Some(existing.updated_at.as_str()),
     )
     .await?;
     if !updated {
-        return Err(AppError::NotFound);
+        return Err(AppError::Conflict(
+            "Message was modified by another request; retry your edit".to_string(),
+        ));
     }
+    sync_message_embeds_best_effort(pool, &normalized_message_id, &normalized_content).await;
 
     let stored = message::find_message_by_id(pool, &normalized_message_id)
         .await?
@@ -441,6 +466,7 @@ pub async fn update_message(
         &access.channel,
         stored,
         user_id,
+        None,
         None,
         None,
         None,
@@ -681,11 +707,13 @@ pub async fn list_channel_messages(
             .await?;
     let attachment_map =
         message_attachment::list_message_attachments_by_message_ids(pool, &message_ids).await?;
+    let embed_map = message_embed::list_message_embeds_by_message_ids(pool, &message_ids).await?;
 
     let mut responses = Vec::with_capacity(page.messages.len());
     for item in page.messages {
         let preloaded_reactions = Some(reaction_map.get(&item.id).cloned().unwrap_or_default());
         let preloaded_attachments = Some(attachment_map.get(&item.id).cloned().unwrap_or_default());
+        let preloaded_embeds = Some(embed_map.get(&item.id).cloned().unwrap_or_default());
         responses.push(
             build_message_response(
                 pool,
@@ -696,6 +724,7 @@ pub async fn list_channel_messages(
                 None,
                 preloaded_attachments,
                 preloaded_reactions,
+                preloaded_embeds,
             )
             .await?,
         );
@@ -772,6 +801,33 @@ fn to_message_attachment_response(
     }
 }
 
+fn to_message_embed_response(embed: message_embed::MessageEmbed) -> MessageEmbedResponse {
+    MessageEmbedResponse {
+        id: embed.id,
+        url: embed.url,
+        domain: embed.domain,
+        title: embed.title,
+        description: embed.description,
+        thumbnail_url: embed.thumbnail_url,
+    }
+}
+
+async fn sync_message_embeds_best_effort(
+    pool: &DbPool,
+    message_id: &str,
+    normalized_message_content: &str,
+) {
+    if let Err(err) =
+        embed_service::sync_message_embeds(pool, message_id, normalized_message_content).await
+    {
+        tracing::warn!(
+            error = ?err,
+            message_id = %message_id,
+            "Failed to sync message embeds"
+        );
+    }
+}
+
 async fn build_message_reaction_summaries(
     pool: &DbPool,
     message_id: &str,
@@ -796,6 +852,7 @@ async fn build_message_response(
     client_nonce: Option<String>,
     preloaded_attachments: Option<Vec<message_attachment::MessageAttachment>>,
     preloaded_reactions: Option<Vec<message_reaction::MessageReactionSummary>>,
+    preloaded_embeds: Option<Vec<message_embed::MessageEmbed>>,
 ) -> Result<MessageResponse, AppError> {
     let profile = guild_member::find_user_profile_by_id(pool, &message.author_user_id)
         .await?
@@ -835,6 +892,20 @@ async fn build_message_response(
             .collect(),
         None => build_message_reaction_summaries(pool, &message.id, viewer_user_id).await?,
     };
+    let embeds = match preloaded_embeds {
+        Some(items) => items,
+        None => {
+            let mut grouped = message_embed::list_message_embeds_by_message_ids(
+                pool,
+                std::slice::from_ref(&message.id),
+            )
+            .await?;
+            grouped.remove(&message.id).unwrap_or_default()
+        }
+    }
+    .into_iter()
+    .map(to_message_embed_response)
+    .collect();
 
     Ok(MessageResponse {
         id: message.id,
@@ -852,6 +923,7 @@ async fn build_message_response(
         client_nonce,
         attachments,
         reactions,
+        embeds,
     })
 }
 

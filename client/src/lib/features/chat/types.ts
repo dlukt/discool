@@ -16,6 +16,15 @@ export type ChatMessageAttachment = {
   url: string
 }
 
+export type ChatMessageEmbed = {
+  id: string
+  url: string
+  domain: string
+  title: string | null
+  description: string | null
+  thumbnailUrl: string | null
+}
+
 export type ChatMessageReactionWire = {
   emoji?: string
   count?: number
@@ -30,6 +39,15 @@ export type ChatMessageAttachmentWire = {
   size_bytes?: number
   is_image?: boolean
   url?: string
+}
+
+export type ChatMessageEmbedWire = {
+  id?: string
+  url?: string
+  domain?: string
+  title?: string | null
+  description?: string | null
+  thumbnail_url?: string | null
 }
 
 export type ChatMessage = {
@@ -49,6 +67,7 @@ export type ChatMessage = {
   clientNonce?: string
   attachments: ChatMessageAttachment[]
   reactions: ChatMessageReaction[]
+  embeds: ChatMessageEmbed[]
 }
 
 export type ChatMessageWire = {
@@ -67,6 +86,7 @@ export type ChatMessageWire = {
   client_nonce?: string | null
   attachments?: ChatMessageAttachmentWire[]
   reactions?: ChatMessageReactionWire[]
+  embeds?: ChatMessageEmbedWire[]
 }
 
 export function toChatMessageReactions(
@@ -136,6 +156,38 @@ export function toChatMessageAttachments(
     )
 }
 
+export function toChatMessageEmbeds(
+  wireEmbeds: ChatMessageEmbedWire[] | undefined,
+): ChatMessageEmbed[] {
+  if (!Array.isArray(wireEmbeds)) return []
+
+  return wireEmbeds
+    .map((embed) => {
+      const id = embed.id?.trim()
+      const url = embed.url?.trim()
+      const domain = embed.domain?.trim()
+      if (!id || !url || !domain) return null
+
+      const title = typeof embed.title === 'string' ? embed.title.trim() : null
+      const description =
+        typeof embed.description === 'string' ? embed.description.trim() : null
+      const thumbnailUrl =
+        typeof embed.thumbnail_url === 'string'
+          ? embed.thumbnail_url.trim()
+          : null
+      return {
+        id,
+        url,
+        domain,
+        title: title && title.length > 0 ? title : null,
+        description: description && description.length > 0 ? description : null,
+        thumbnailUrl:
+          thumbnailUrl && thumbnailUrl.length > 0 ? thumbnailUrl : null,
+      }
+    })
+    .filter((embed): embed is ChatMessageEmbed => embed !== null)
+}
+
 export function toChatMessage(wire: ChatMessageWire): ChatMessage {
   return {
     id: wire.id,
@@ -157,5 +209,6 @@ export function toChatMessage(wire: ChatMessageWire): ChatMessage {
     clientNonce: wire.client_nonce || undefined,
     attachments: toChatMessageAttachments(wire.attachments),
     reactions: toChatMessageReactions(wire.reactions),
+    embeds: toChatMessageEmbeds(wire.embeds),
   }
 }

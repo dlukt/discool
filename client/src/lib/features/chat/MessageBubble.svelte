@@ -1,6 +1,11 @@
 <script lang="ts">
 // biome-ignore-all lint/correctness/noUnusedVariables: Svelte template usage isn't detected reliably.
-import type { ChatMessage, ChatMessageAttachment } from './types'
+import { isSafeExternalUrl, renderMessageMarkdown } from './messageMarkdown'
+import type {
+  ChatMessage,
+  ChatMessageAttachment,
+  ChatMessageEmbed,
+} from './types'
 
 const EMOJI_PICKER_OPTIONS = ['😀', '😂', '😍', '👍', '🎉', '🔥', '👏', '😢']
 
@@ -27,6 +32,9 @@ let {
 let timestampLabel = $derived(formatTimestamp(message.createdAt))
 let isEdited = $derived(message.updatedAt !== message.createdAt)
 let hasContent = $derived(message.content.trim().length > 0)
+let renderedContent = $derived(
+  hasContent ? renderMessageMarkdown(message.content) : '',
+)
 let isOwnMessage = $derived(
   Boolean(currentUserId && currentUserId === message.authorUserId),
 )
@@ -79,6 +87,17 @@ function formatFileSize(sizeBytes: number): string {
 
 function openImagePreview(attachment: ChatMessageAttachment): void {
   imagePreviewAttachment = attachment
+}
+
+function safeEmbedLink(embed: ChatMessageEmbed): string | null {
+  if (!isSafeExternalUrl(embed.url)) return null
+  return embed.url
+}
+
+function safeEmbedThumbnail(embed: ChatMessageEmbed): string | null {
+  const thumbnail = embed.thumbnailUrl ?? ''
+  if (!isSafeExternalUrl(thumbnail)) return null
+  return thumbnail
 }
 
 function closeImagePreview(): void {
@@ -209,12 +228,57 @@ function handleRowFocusOut(event: FocusEvent): void {
         </div>
       {/if}
       {#if hasContent}
-        <p
-          class="whitespace-pre-wrap break-words text-sm text-foreground"
+        <div
+          class="message-markdown break-words text-sm text-foreground"
           data-testid={`message-content-${message.id}`}
         >
-          {message.content}
-        </p>
+          {@html renderedContent}
+        </div>
+      {/if}
+      {#if message.embeds.length > 0}
+        <div class="mt-2 space-y-2" data-testid={`message-embeds-${message.id}`}>
+          {#each message.embeds as embed, index (`${embed.id}-${index}`)}
+            {@const embedHref = safeEmbedLink(embed)}
+            {@const thumbnail = safeEmbedThumbnail(embed)}
+            <article
+              class="overflow-hidden rounded-md border border-border/70 bg-background/80"
+              data-testid={`message-embed-card-${message.id}-${index}`}
+            >
+              {#if thumbnail}
+                <img
+                  src={thumbnail}
+                  alt={embed.title ?? embed.domain}
+                  loading="lazy"
+                  class="h-28 w-full object-cover"
+                />
+              {/if}
+              <div class="space-y-1 px-3 py-2">
+                {#if embedHref}
+                  <a
+                    href={embedHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="line-clamp-1 text-sm font-medium text-foreground underline decoration-border/80 underline-offset-2"
+                  >
+                    {embed.title ?? embed.domain}
+                  </a>
+                {:else}
+                  <span class="line-clamp-1 text-sm font-medium text-foreground">
+                    {embed.title ?? embed.domain}
+                  </span>
+                {/if}
+                {#if embed.description}
+                  <p class="line-clamp-2 text-xs text-muted-foreground">
+                    {embed.description}
+                  </p>
+                {/if}
+                <p class="text-[11px] uppercase tracking-wide text-muted-foreground">
+                  {embed.domain}
+                </p>
+              </div>
+            </article>
+          {/each}
+        </div>
       {/if}
       {#if message.attachments.length > 0}
         <div
@@ -430,3 +494,51 @@ function handleRowFocusOut(event: FocusEvent): void {
     </div>
   {/if}
 {/if}
+
+<style>
+  .message-markdown :global(p),
+  .message-markdown :global(pre),
+  .message-markdown :global(blockquote) {
+    margin: 0;
+  }
+
+  .message-markdown :global(pre),
+  .message-markdown :global(code) {
+    font-family:
+      ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+      'Courier New', monospace;
+  }
+
+  .message-markdown :global(pre) {
+    margin-top: 0.5rem;
+    overflow-x: auto;
+    border-radius: 0.375rem;
+    border: 1px solid rgba(148, 163, 184, 0.3);
+    background: rgba(15, 23, 42, 0.55);
+    padding: 0.5rem 0.625rem;
+  }
+
+  .message-markdown :global(code) {
+    border-radius: 0.25rem;
+    background: rgba(148, 163, 184, 0.16);
+    padding: 0.05rem 0.3rem;
+  }
+
+  .message-markdown :global(pre code) {
+    border-radius: 0;
+    background: transparent;
+    padding: 0;
+  }
+
+  .message-markdown :global(blockquote) {
+    margin-top: 0.5rem;
+    border-left: 2px solid rgba(148, 163, 184, 0.6);
+    padding-left: 0.625rem;
+    color: rgb(148, 163, 184);
+  }
+
+  .message-markdown :global(a) {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+</style>

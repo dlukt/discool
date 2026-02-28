@@ -44,7 +44,9 @@ const COMPACT_MESSAGE_ROW_HEIGHT = 46
 const SYSTEM_ROW_HEIGHT = 36
 const IMAGE_ATTACHMENT_HEIGHT = 220
 const FILE_ATTACHMENT_ROW_HEIGHT = 60
+const EMBED_CARD_HEIGHT = 146
 const ATTACHMENT_ROW_GAP = 8
+const MARKDOWN_LINE_HEIGHT = 18
 const VIRTUAL_OVERSCAN_PX = 320
 const HISTORY_LOAD_TRIGGER_PX = 120
 const JUMP_TO_PRESENT_THRESHOLD_PX = 320
@@ -74,6 +76,7 @@ let wsLifecycleState = $state<WsLifecycleState>(wsClient.getLifecycleState())
 let showReconnectingBanner = $derived(wsLifecycleState === 'reconnecting')
 let composerInput = $state<HTMLTextAreaElement | null>(null)
 let composerValue = $state('')
+let composerSelection = $state({ start: 0, end: 0 })
 let composerEdit = $state<ComposerEditState | null>(null)
 let timelineViewport = $state<HTMLDivElement | null>(null)
 let scrollTop = $state(0)
@@ -125,13 +128,33 @@ function estimateMessageRowHeight(
   if (message.isSystem) return SYSTEM_ROW_HEIGHT
 
   const base = compact ? COMPACT_MESSAGE_ROW_HEIGHT : MESSAGE_ROW_HEIGHT
-  if (message.attachments.length === 0) return base
+  let extra = 0
+
+  const contentLineEstimate = message.content
+    .split('\n')
+    .reduce(
+      (lines, segment) => lines + Math.max(1, Math.ceil(segment.length / 90)),
+      0,
+    )
+  if (contentLineEstimate > 2) {
+    extra += (contentLineEstimate - 2) * MARKDOWN_LINE_HEIGHT
+  }
+  if (message.content.includes('```')) {
+    extra += 96
+  }
+  if (message.content.includes('\n>') || message.content.startsWith('&gt;')) {
+    extra += 20
+  }
+  if (message.embeds.length > 0) {
+    extra += message.embeds.length * EMBED_CARD_HEIGHT
+    extra += Math.max(0, message.embeds.length - 1) * ATTACHMENT_ROW_GAP
+    extra += 12
+  }
 
   const imageCount = message.attachments.filter(
     (attachment) => attachment.isImage,
   ).length
   const fileCount = message.attachments.length - imageCount
-  let extra = 0
 
   if (imageCount > 0) {
     extra += imageCount * IMAGE_ATTACHMENT_HEIGHT
@@ -234,6 +257,9 @@ let canSubmitComposer = $derived(
       ? composerValue.trim().length > 0
       : composerValue.trim().length > 0 || selectedAttachment !== null),
 )
+let hasComposerSelection = $derived(
+  composerSelection.end > composerSelection.start,
+)
 let emptyStateCopy = $derived(
   `This is the beginning of #${activeChannel}. Say something!`,
 )
@@ -288,6 +314,49 @@ function clearSelectedAttachment(clearInput = true): void {
 function selectAttachment(file: File): void {
   selectedAttachment = file
   attachmentError = null
+}
+
+function updateComposerSelection(target: HTMLTextAreaElement | null): void {
+  if (!target) {
+    composerSelection = { start: 0, end: 0 }
+    return
+  }
+  const start = Math.max(0, target.selectionStart ?? 0)
+  const end = Math.max(0, target.selectionEnd ?? start)
+  composerSelection = { start, end }
+}
+
+function applyMarkdownWrap(prefix: string, suffix = prefix): void {
+  const target = composerInput
+  if (!target) return
+  const start = target.selectionStart ?? 0
+  const end = target.selectionEnd ?? start
+  if (end <= start) return
+
+  const selected = composerValue.slice(start, end)
+  composerValue = `${composerValue.slice(0, start)}${prefix}${selected}${suffix}${composerValue.slice(end)}`
+
+  const nextStart = start + prefix.length
+  const nextEnd = nextStart + selected.length
+  void tick().then(() => {
+    if (!composerInput) return
+    composerInput.focus()
+    composerInput.selectionStart = nextStart
+    composerInput.selectionEnd = nextEnd
+    updateComposerSelection(composerInput)
+  })
+}
+
+function formatSelectionBold(): void {
+  applyMarkdownWrap('**')
+}
+
+function formatSelectionItalic(): void {
+  applyMarkdownWrap('*')
+}
+
+function formatSelectionCode(): void {
+  applyMarkdownWrap('`')
 }
 
 function openAttachmentPicker(): void {
@@ -358,6 +427,7 @@ async function sendComposerMessage() {
     if (sent) {
       composerValue = ''
       composerEdit = null
+      composerSelection = { start: 0, end: 0 }
     }
     return
   }
@@ -378,6 +448,7 @@ async function sendComposerMessage() {
         },
       })
       composerValue = ''
+      composerSelection = { start: 0, end: 0 }
       clearSelectedAttachment()
     } catch (error) {
       attachmentError = messageFromError(error, 'Failed to upload attachment')
@@ -396,6 +467,7 @@ async function sendComposerMessage() {
   )
   if (sent) {
     composerValue = ''
+    composerSelection = { start: 0, end: 0 }
   }
 }
 
@@ -430,12 +502,14 @@ function startEditingMessage(message: ChatMessage): void {
     const end = composerValue.length
     composerInput.selectionStart = end
     composerInput.selectionEnd = end
+    updateComposerSelection(composerInput)
   })
 }
 
 function cancelComposerEdit(): void {
   composerEdit = null
   composerValue = ''
+  composerSelection = { start: 0, end: 0 }
   composerInput?.focus()
 }
 
@@ -479,7 +553,32 @@ function handleReactionRequest(message: ChatMessage, emoji: string): void {
   )
 }
 
+function handleComposerSelectionEvent(event: Event): void {
+  const target = event.currentTarget as HTMLTextAreaElement | null
+  updateComposerSelection(target)
+}
+
 function handleComposerKeydown(event: KeyboardEvent) {
+  const isShortcutModifier = event.ctrlKey || event.metaKey
+  if (isShortcutModifier && !event.shiftKey && !event.altKey) {
+    const key = event.key.toLowerCase()
+    if (key === 'b') {
+      event.preventDefault()
+      formatSelectionBold()
+      return
+    }
+    if (key === 'i') {
+      event.preventDefault()
+      formatSelectionItalic()
+      return
+    }
+    if (key === 'e') {
+      event.preventDefault()
+      formatSelectionCode()
+      return
+    }
+  }
+
   if (
     event.key === 'ArrowUp' &&
     !event.altKey &&
@@ -634,6 +733,7 @@ $effect(() => {
 $effect(() => {
   if (mode !== 'channel') {
     composerEdit = null
+    composerSelection = { start: 0, end: 0 }
     pendingDeleteMessage = null
     attachmentContextKey = null
     clearSelectedAttachment()
@@ -968,6 +1068,40 @@ onMount(() => {
             </p>
           </div>
         {/if}
+        {#if hasComposerSelection}
+          <div
+            class="mb-2 flex flex-wrap items-center gap-1 rounded-md border border-border/70 bg-background/70 px-2 py-1"
+            data-testid="message-markdown-toolbar"
+          >
+            <button
+              type="button"
+              class="rounded px-2 py-1 text-xs text-foreground hover:bg-muted"
+              onmousedown={(event) => event.preventDefault()}
+              onclick={formatSelectionBold}
+              data-testid="message-format-bold"
+            >
+              Bold
+            </button>
+            <button
+              type="button"
+              class="rounded px-2 py-1 text-xs text-foreground hover:bg-muted"
+              onmousedown={(event) => event.preventDefault()}
+              onclick={formatSelectionItalic}
+              data-testid="message-format-italic"
+            >
+              Italic
+            </button>
+            <button
+              type="button"
+              class="rounded px-2 py-1 text-xs text-foreground hover:bg-muted"
+              onmousedown={(event) => event.preventDefault()}
+              onclick={formatSelectionCode}
+              data-testid="message-format-code"
+            >
+              Code
+            </button>
+          </div>
+        {/if}
         <div class="flex items-end gap-2">
           <button
             type="button"
@@ -990,6 +1124,10 @@ onMount(() => {
             bind:this={composerInput}
             bind:value={composerValue}
             onkeydown={handleComposerKeydown}
+            onfocus={handleComposerSelectionEvent}
+            onclick={handleComposerSelectionEvent}
+            onkeyup={handleComposerSelectionEvent}
+            onselect={handleComposerSelectionEvent}
             disabled={attachmentUploadInFlight}
           ></textarea>
           <button
@@ -1006,7 +1144,7 @@ onMount(() => {
           {#if composerEdit}
             Editing message · Enter to save · Escape to cancel
           {:else}
-            Enter to send · Shift+Enter for newline · Up to edit latest own message · Drag/drop or paperclip to attach files
+            Enter to send · Shift+Enter for newline · Ctrl+B/Ctrl+I/Ctrl+E format selected text · Up to edit latest own message · Drag/drop or paperclip to attach files
           {/if}
         </p>
       </section>

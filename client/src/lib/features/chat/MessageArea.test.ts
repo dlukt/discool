@@ -46,6 +46,14 @@ const {
         count: number
         reacted: boolean
       }>
+      embeds: Array<{
+        id: string
+        url: string
+        domain: string
+        title: string | null
+        description: string | null
+        thumbnailUrl: string | null
+      }>
     }>
   > = {}
 
@@ -214,6 +222,7 @@ function seedChannelMessages(channelKey: string, count: number): void {
     optimistic: false,
     attachments: [],
     reactions: [],
+    embeds: [],
   }))
 }
 
@@ -309,6 +318,38 @@ describe('MessageArea', () => {
 
     expect(messageState.sendMessage).not.toHaveBeenCalled()
     expect(composer.value).toBe('line one\n')
+  })
+
+  it('applies markdown toolbar and keyboard shortcuts to selected text', async () => {
+    const { getByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    const composer = getByTestId(
+      'message-composer-input',
+    ) as HTMLTextAreaElement
+    await fireEvent.input(composer, { target: { value: 'hello world' } })
+
+    composer.focus()
+    composer.setSelectionRange(0, 5)
+    await fireEvent.select(composer)
+    await fireEvent.click(getByTestId('message-format-bold'))
+    expect(composer.value).toBe('**hello** world')
+
+    composer.setSelectionRange(10, 15)
+    await fireEvent.select(composer)
+    await fireEvent.keyDown(composer, { key: 'e', ctrlKey: true })
+    expect(composer.value).toBe('**hello** `world`')
+
+    composer.setSelectionRange(2, 7)
+    await fireEvent.select(composer)
+    await fireEvent.keyDown(composer, { key: 'i', ctrlKey: true })
+    expect(composer.value).toBe('***hello*** `world`')
   })
 
   it('virtualizes long timelines and loads older history on upward scroll', async () => {
