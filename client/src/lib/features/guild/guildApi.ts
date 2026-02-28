@@ -7,12 +7,18 @@ import {
   type GuildInvite,
   type GuildInviteWire,
   type GuildWire,
+  type InviteMetadata,
+  type InviteMetadataWire,
+  type JoinGuildByInviteResult,
+  type JoinGuildByInviteResultWire,
   type RevokeGuildInviteResult,
   type RevokeGuildInviteResultWire,
   toCreateGuildInputWire,
   toCreateGuildInviteInputWire,
   toGuild,
   toGuildInvite,
+  toInviteMetadata,
+  toJoinGuildByInviteResult,
   toRevokeGuildInviteResult,
   toUpdateGuildInputWire,
   type UpdateGuildInput,
@@ -85,4 +91,22 @@ export function revokeInvite(
       method: 'DELETE',
     },
   ).then(toRevokeGuildInviteResult)
+}
+
+export function getInviteMetadata(inviteCode: string): Promise<InviteMetadata> {
+  return apiFetch<InviteMetadataWire>(
+    `/api/v1/invites/${encodeURIComponent(inviteCode)}`,
+  ).then(toInviteMetadata)
+}
+
+export function joinGuildByInvite(
+  inviteCode: string,
+): Promise<JoinGuildByInviteResult> {
+  return apiFetch<JoinGuildByInviteResultWire>(
+    `/api/v1/invites/${encodeURIComponent(inviteCode)}/join`,
+    {
+      method: 'POST',
+      body: '{}',
+    },
+  ).then(toJoinGuildByInviteResult)
 }

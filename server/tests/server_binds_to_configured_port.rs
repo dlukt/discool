@@ -2626,6 +2626,182 @@ async fn invites_mutations_reject_non_owner() {
 }
 
 #[tokio::test]
+async fn invite_resolution_and_join_flow_supports_membership_reads_and_single_use_semantics() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "owner-join", [59u8; 32]).await;
+    let member_token = register_and_authenticate(&addr, "member-join", [60u8; 32]).await;
+    let third_token = register_and_authenticate(&addr, "third-join", [61u8; 32]).await;
+
+    let guild_body = json!({ "name": "Join Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap().to_string();
+
+    let create_invite_body = json!({ "type": "single_use" }).to_string();
+    let res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/invites"),
+        &create_invite_body,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 201);
+    let invite: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let invite_code = invite["data"]["code"].as_str().unwrap().to_string();
+
+    let res = http_response(&addr, &format!("/api/v1/invites/{invite_code}")).await;
+    assert_eq!(response_status(&res), 200);
+    let metadata: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(metadata["data"]["guild_slug"], json!(guild_slug));
+    assert_eq!(metadata["data"]["guild_name"], json!("Join Guild"));
+    assert_eq!(metadata["data"]["default_channel_slug"], json!("general"));
+    assert_eq!(metadata["data"]["welcome_screen"]["enabled"], json!(false));
+
+    let res = http_response_with_bearer(&addr, "/api/v1/guilds", &member_token).await;
+    assert_eq!(response_status(&res), 200);
+    let before_join: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(before_join["data"].as_array().unwrap().len(), 0);
+
+    let res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/invites/{invite_code}/join"),
+        "{}",
+        &member_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 200);
+    let joined: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(joined["data"]["guild_slug"], json!(guild_slug));
+    assert_eq!(joined["data"]["default_channel_slug"], json!("general"));
+    assert_eq!(joined["data"]["already_member"], json!(false));
+
+    let res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/invites/{invite_code}/join"),
+        "{}",
+        &member_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 200);
+    let joined_again: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(joined_again["data"]["already_member"], json!(true));
+
+    let res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/invites/{invite_code}/join"),
+        "{}",
+        &third_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 422);
+    let exhausted: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        exhausted["error"]["message"],
+        json!("This invite link is invalid or has expired")
+    );
+
+    let res = http_response_with_bearer(&addr, "/api/v1/guilds", &member_token).await;
+    assert_eq!(response_status(&res), 200);
+    let after_join: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(after_join["data"].as_array().unwrap().len(), 1);
+    assert_eq!(after_join["data"][0]["slug"], json!(guild_slug));
+    assert_eq!(after_join["data"][0]["is_owner"], json!(false));
+
+    let channels_path = format!("/api/v1/guilds/{guild_slug}/channels");
+    let res = http_response_with_bearer(&addr, &channels_path, &member_token).await;
+    assert_eq!(response_status(&res), 200);
+
+    let categories_path = format!("/api/v1/guilds/{guild_slug}/categories");
+    let res = http_response_with_bearer(&addr, &categories_path, &member_token).await;
+    assert_eq!(response_status(&res), 200);
+
+    let create_channel_body = json!({ "name": "ops", "channel_type": "text" }).to_string();
+    let res =
+        http_post_with_bearer(&addr, &channels_path, &create_channel_body, &member_token).await;
+    assert_eq!(response_status(&res), 403);
+}
+
+#[tokio::test]
+async fn invite_endpoints_return_exact_invalid_message_for_unknown_codes() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let token = register_and_authenticate(&addr, "invalid-invite", [62u8; 32]).await;
+    let res = http_response(&addr, "/api/v1/invites/does-not-exist").await;
+    assert_eq!(response_status(&res), 422);
+    let invalid_resolve: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        invalid_resolve["error"]["message"],
+        json!("This invite link is invalid or has expired")
+    );
+
+    let res =
+        http_post_with_bearer(&addr, "/api/v1/invites/does-not-exist/join", "{}", &token).await;
+    assert_eq!(response_status(&res), 422);
+    let invalid_join: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        invalid_join["error"]["message"],
+        json!("This invite link is invalid or has expired")
+    );
+}
+
+#[tokio::test]
+async fn invite_path_serves_open_graph_metadata_for_valid_invites() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "owner-og", [63u8; 32]).await;
+    let guild_body = json!({ "name": "OG Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap();
+
+    let create_invite_body = json!({ "type": "reusable" }).to_string();
+    let res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/invites"),
+        &create_invite_body,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 201);
+    let invite: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let invite_code = invite["data"]["code"].as_str().unwrap();
+
+    let res = http_response(&addr, &format!("/invite/{invite_code}")).await;
+    assert_eq!(response_status(&res), 200);
+    let body = response_body(&res);
+    assert!(body.contains("og:title"));
+    assert!(body.contains("Join OG Guild on Discool"));
+    assert!(body.contains(&format!("/?invite={invite_code}")));
+}
+
+#[tokio::test]
 async fn users_profile_requires_authentication() {
     use serde_json::json;
 

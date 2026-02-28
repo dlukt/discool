@@ -11,6 +11,7 @@ use crate::{
         category,
         channel::{self, Channel, ChannelPositionUpdate},
         guild::{self, Guild},
+        guild_member,
     },
 };
 
@@ -66,7 +67,7 @@ pub async fn list_channels(
     user_id: &str,
     guild_slug: &str,
 ) -> Result<Vec<ChannelResponse>, AppError> {
-    let guild = load_owned_guild(pool, user_id, guild_slug).await?;
+    let guild = load_viewable_guild(pool, user_id, guild_slug).await?;
     let channels = channel::list_channels_by_guild_id(pool, &guild.id).await?;
     Ok(channels
         .into_iter()
@@ -386,6 +387,22 @@ async fn load_owned_guild(
         ));
     }
     Ok(guild)
+}
+
+async fn load_viewable_guild(
+    pool: &DbPool,
+    user_id: &str,
+    guild_slug: &str,
+) -> Result<Guild, AppError> {
+    let guild = guild::find_guild_by_slug(pool, guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if guild.owner_id == user_id || guild_member::is_guild_member(pool, &guild.id, user_id).await? {
+        return Ok(guild);
+    }
+    Err(AppError::Forbidden(
+        "Only guild members can view channels".to_string(),
+    ))
 }
 
 async fn resolve_category_id(

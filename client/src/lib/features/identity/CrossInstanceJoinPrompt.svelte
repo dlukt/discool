@@ -1,6 +1,7 @@
 <script lang="ts">
 type Props = {
   guildName?: string | null
+  guildIconUrl?: string | null
   inviteContextInvalid?: boolean
   username: string
   displayName: string
@@ -30,6 +31,13 @@ let avatarInitial = $derived(
   <div class="mx-auto flex w-full max-w-md flex-col gap-6 rounded-lg border border-border bg-card p-8">
     <header class="space-y-2 text-center">
       <p class="text-sm font-medium text-muted-foreground">Discool</p>
+      {#if props.guildIconUrl}
+        <img
+          src={props.guildIconUrl}
+          alt="Guild icon"
+          class="mx-auto h-12 w-12 rounded-full border border-border object-cover"
+        />
+      {/if}
       <h1 class="text-3xl font-semibold tracking-tight">
         Join {targetName} as {props.displayName}?
       </h1>

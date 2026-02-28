@@ -1,11 +1,12 @@
 use axum::{
     body::Body,
+    extract::State,
     http::{HeaderValue, StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
 use rust_embed::{EmbeddedFile, RustEmbed};
 
-use crate::AppError;
+use crate::{AppError, AppState, services::guild_invite_service};
 
 #[derive(RustEmbed)]
 #[folder = "../client/dist/"]
@@ -27,12 +28,30 @@ const MISSING_CLIENT_DIST_HTML: &str = r#"<!doctype html>
 "#;
 
 pub async fn handler(uri: Uri) -> Response {
-    let path = match uri.path().strip_prefix('/') {
+    let path = normalize_path(&uri);
+    serve_path(path)
+}
+
+pub async fn handler_with_state(State(state): State<AppState>, uri: Uri) -> Response {
+    let path = normalize_path(&uri);
+    if let Some(invite_code) = invite_code_from_path(path)
+        && let Ok(metadata) =
+            guild_invite_service::resolve_invite_metadata(&state.pool, invite_code).await
+    {
+        return invite_meta_response(invite_code, &metadata.guild_name, metadata.guild_icon_url);
+    }
+    serve_path(path)
+}
+
+fn normalize_path(uri: &Uri) -> &str {
+    match uri.path().strip_prefix('/') {
         Some("") | None => "index.html",
         Some(path) if path.ends_with('/') => "index.html",
         Some(path) => path,
-    };
+    }
+}
 
+fn serve_path(path: &str) -> Response {
     if let Some(file) = ClientDist::get(path) {
         return file_response(path, file);
     }
@@ -51,6 +70,83 @@ pub async fn handler(uri: Uri) -> Response {
         Some(index) => file_response("index.html", index),
         None => fallback_index_response(),
     }
+}
+
+fn invite_code_from_path(path: &str) -> Option<&str> {
+    let code = path.strip_prefix("invite/")?;
+    if code.is_empty() || code.contains('/') {
+        return None;
+    }
+    Some(code)
+}
+
+fn invite_meta_response(
+    invite_code: &str,
+    guild_name: &str,
+    guild_icon_url: Option<String>,
+) -> Response {
+    let escaped_code = html_escape(invite_code);
+    let escaped_guild_name = html_escape(guild_name);
+    let redirect_target = format!("/?invite={escaped_code}");
+    let escaped_redirect_target = html_escape(&redirect_target);
+    let title = format!("Join {escaped_guild_name} on Discool");
+    let description = format!("Join {escaped_guild_name} on Discool.");
+
+    let mut html = format!(
+        "<!doctype html>
+<html lang=\"en\">
+  <head>
+    <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
+    <title>{title}</title>
+    <meta property=\"og:title\" content=\"{title}\" />
+    <meta property=\"og:description\" content=\"{description}\" />
+    <meta property=\"og:type\" content=\"website\" />
+    <meta property=\"og:url\" content=\"/invite/{escaped_code}\" />
+    <meta name=\"twitter:card\" content=\"summary\" />
+    <meta name=\"twitter:title\" content=\"{title}\" />
+    <meta name=\"twitter:description\" content=\"{description}\" />
+    <meta http-equiv=\"refresh\" content=\"0;url={escaped_redirect_target}\" />
+  </head>
+  <body>
+    <p>Redirecting…</p>
+    <script>
+      window.location.replace('{escaped_redirect_target}');
+    </script>
+  </body>
+</html>",
+    );
+
+    if let Some(icon_url) = guild_icon_url {
+        let escaped_icon_url = html_escape(&icon_url);
+        let icon_meta = format!(
+            "<meta property=\"og:image\" content=\"{escaped_icon_url}\" />
+    <meta name=\"twitter:image\" content=\"{escaped_icon_url}\" />"
+        );
+        html = html.replace(
+            "<meta name=\"twitter:card\" content=\"summary\" />",
+            &format!("{icon_meta}\n    <meta name=\"twitter:card\" content=\"summary\" />"),
+        );
+    }
+
+    let mut response = Response::new(Body::from(html));
+    *response.status_mut() = StatusCode::OK;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 fn file_response(path: &str, file: EmbeddedFile) -> Response {
@@ -127,7 +223,10 @@ fn fallback_index_response() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::{StatusCode, header};
+    use axum::{
+        body::to_bytes,
+        http::{StatusCode, header},
+    };
 
     #[tokio::test]
     async fn serves_index_for_root_and_spa_routes() {
@@ -157,5 +256,30 @@ mod tests {
             cache_control("assets/index-abcdef12.js"),
             "public, max-age=31536000, immutable"
         );
+    }
+
+    #[tokio::test]
+    async fn invite_meta_response_includes_open_graph_tags() {
+        let res = invite_meta_response(
+            "invite123",
+            "Makers Hub",
+            Some("/api/v1/guilds/makers-hub/icon".to_string()),
+        );
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(
+            res.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-cache"
+        );
+
+        let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("og:title"));
+        assert!(body.contains("Join Makers Hub on Discool"));
+        assert!(body.contains("og:image"));
+        assert!(body.contains("/?invite=invite123"));
     }
 }

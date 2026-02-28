@@ -1,4 +1,5 @@
 <script lang="ts">
+import { tick } from 'svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import AdminPanel from '$lib/components/AdminPanel.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
@@ -38,6 +39,7 @@ let canShowAdminPanel = $derived(mode === 'admin' && isAdmin)
 let shouldShowRecoveryNudge = $derived(
   showRecoveryNudge && (mode === 'home' || mode === 'channel'),
 )
+let composerInput = $state<HTMLInputElement | null>(null)
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 async function handleOpenSettings() {
@@ -48,6 +50,15 @@ async function handleOpenSettings() {
 async function handleDismissRecoveryNudge() {
   await onDismissRecoveryNudge?.()
 }
+
+$effect(() => {
+  if (mode !== 'channel') return
+  activeGuild
+  activeChannel
+  void tick().then(() => {
+    composerInput?.focus()
+  })
+})
 </script>
 
 {#if mode === 'admin'}
@@ -108,5 +119,24 @@ async function handleDismissRecoveryNudge() {
         </li>
       </ul>
     </section>
+
+    {#if mode === 'channel'}
+      <section class="rounded-md border border-border bg-card p-4">
+        <label
+          for="message-composer"
+          class="mb-2 block text-sm font-medium text-foreground"
+        >
+          Message
+        </label>
+        <input
+          id="message-composer"
+          data-testid="message-composer-input"
+          class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+          type="text"
+          placeholder={`Message #${activeChannel}`}
+          bind:this={composerInput}
+        />
+      </section>
+    {/if}
   </section>
 {/if}

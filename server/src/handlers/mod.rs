@@ -43,6 +43,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/auth/recovery-email/recover", get(auth::recover_identity))
         .route("/auth/logout", delete(auth::logout))
+        .route("/invites/{invite_code}", get(invites::resolve_invite))
+        .route("/invites/{invite_code}/join", post(invites::join_invite))
         .route(
             "/guilds",
             get(guilds::list_guilds).post(guilds::create_guild),
@@ -109,7 +111,7 @@ pub fn router(state: AppState) -> Router {
     let mut tracked = Router::new()
         .nest("/api/v1", api)
         .route("/ws", get(ws_not_found))
-        .fallback(get(crate::static_files::handler));
+        .fallback(get(crate::static_files::handler_with_state));
 
     // /metrics should not be tracked (it is scraped frequently like /healthz and /readyz).
     let mut metrics = Router::new().route("/metrics", get(metrics_not_found));

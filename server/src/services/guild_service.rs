@@ -33,7 +33,7 @@ pub struct UpdateGuildInput {
 }
 
 pub async fn list_guilds(pool: &DbPool, user_id: &str) -> Result<Vec<GuildResponse>, AppError> {
-    let guilds = guild::list_guilds_by_owner(pool, user_id).await?;
+    let guilds = guild::list_guilds_for_user(pool, user_id).await?;
     Ok(guilds
         .into_iter()
         .map(|record| GuildResponse::from_guild(record, user_id))

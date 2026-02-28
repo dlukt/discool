@@ -61,3 +61,22 @@ pub async fn revoke_invite(
             .await?;
     Ok((StatusCode::OK, Json(json!({ "data": result }))).into_response())
 }
+
+pub async fn resolve_invite(
+    State(state): State<AppState>,
+    Path(invite_code): Path<String>,
+) -> Result<Response, AppError> {
+    let invite = guild_invite_service::resolve_invite_metadata(&state.pool, &invite_code).await?;
+    Ok((StatusCode::OK, Json(json!({ "data": invite }))).into_response())
+}
+
+pub async fn join_invite(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(invite_code): Path<String>,
+) -> Result<Response, AppError> {
+    let result =
+        guild_invite_service::join_guild_by_invite(&state.pool, &user.user_id, &invite_code)
+            .await?;
+    Ok((StatusCode::OK, Json(json!({ "data": result }))).into_response())
+}

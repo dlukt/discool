@@ -41,6 +41,31 @@ export type RevokeGuildInviteResult = {
   revoked: boolean
 }
 
+export type InviteWelcomeScreen = {
+  enabled: boolean
+  title?: string
+  rules?: string
+  acceptLabel?: string
+}
+
+export type InviteMetadata = {
+  code: string
+  guildSlug: string
+  guildName: string
+  guildIconUrl?: string
+  defaultChannelSlug: string
+  welcomeScreen: InviteWelcomeScreen
+}
+
+export type JoinGuildByInviteResult = {
+  guildSlug: string
+  guildName: string
+  guildIconUrl?: string
+  defaultChannelSlug: string
+  alreadyMember: boolean
+  welcomeScreen: InviteWelcomeScreen
+}
+
 export type GuildWire = {
   id: string
   slug: string
@@ -80,6 +105,31 @@ export type CreateGuildInviteInputWire = {
 export type RevokeGuildInviteResultWire = {
   code: string
   revoked: boolean
+}
+
+export type InviteWelcomeScreenWire = {
+  enabled: boolean
+  title?: string
+  rules?: string
+  accept_label?: string
+}
+
+export type InviteMetadataWire = {
+  code: string
+  guild_slug: string
+  guild_name: string
+  guild_icon_url?: string
+  default_channel_slug: string
+  welcome_screen: InviteWelcomeScreenWire
+}
+
+export type JoinGuildByInviteResultWire = {
+  guild_slug: string
+  guild_name: string
+  guild_icon_url?: string
+  default_channel_slug: string
+  already_member: boolean
+  welcome_screen: InviteWelcomeScreenWire
 }
 
 export function toGuild(wire: GuildWire): Guild {
@@ -144,5 +194,40 @@ export function toRevokeGuildInviteResult(
   return {
     code: wire.code,
     revoked: wire.revoked,
+  }
+}
+
+function toInviteWelcomeScreen(
+  wire: InviteWelcomeScreenWire,
+): InviteWelcomeScreen {
+  return {
+    enabled: wire.enabled,
+    title: wire.title,
+    rules: wire.rules,
+    acceptLabel: wire.accept_label,
+  }
+}
+
+export function toInviteMetadata(wire: InviteMetadataWire): InviteMetadata {
+  return {
+    code: wire.code,
+    guildSlug: wire.guild_slug,
+    guildName: wire.guild_name,
+    guildIconUrl: wire.guild_icon_url,
+    defaultChannelSlug: wire.default_channel_slug,
+    welcomeScreen: toInviteWelcomeScreen(wire.welcome_screen),
+  }
+}
+
+export function toJoinGuildByInviteResult(
+  wire: JoinGuildByInviteResultWire,
+): JoinGuildByInviteResult {
+  return {
+    guildSlug: wire.guild_slug,
+    guildName: wire.guild_name,
+    guildIconUrl: wire.guild_icon_url,
+    defaultChannelSlug: wire.default_channel_slug,
+    alreadyMember: wire.already_member,
+    welcomeScreen: toInviteWelcomeScreen(wire.welcome_screen),
   }
 }

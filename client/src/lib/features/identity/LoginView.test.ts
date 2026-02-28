@@ -126,4 +126,20 @@ describe('LoginView', () => {
 
     expect(onrecover).toHaveBeenCalledTimes(1)
   })
+
+  it('shows invite onboarding copy when invite metadata is provided', () => {
+    const { getByRole, getByText } = render(LoginView, {
+      inviteGuildName: 'Guild Alpha',
+      inviteGuildIconUrl: '/api/v1/guilds/guild-alpha/icon',
+      inviteErrorMessage: 'This invite link is invalid or has expired',
+    })
+
+    expect(
+      getByRole('heading', { name: 'Pick a username to join Guild Alpha' }),
+    ).toBeInTheDocument()
+    expect(getByRole('img', { name: 'Guild icon' })).toBeInTheDocument()
+    expect(
+      getByText('This invite link is invalid or has expired'),
+    ).toBeInTheDocument()
+  })
 })

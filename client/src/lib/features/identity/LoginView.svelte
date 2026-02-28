@@ -25,10 +25,22 @@ type Props = {
   oncomplete?: () => void
   onrecover?: () => void
   mode?: 'create' | 'reregister'
+  inviteGuildName?: string | null
+  inviteGuildIconUrl?: string | null
+  inviteErrorMessage?: string | null
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
-let { oncomplete, onrecover, mode = 'create' }: Props = $props()
+let {
+  oncomplete,
+  // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+  onrecover,
+  mode = 'create',
+  inviteGuildName = null,
+  // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+  inviteGuildIconUrl = null,
+  // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+  inviteErrorMessage = null,
+}: Props = $props()
 
 let username = $state('')
 let avatarColor = $state<AvatarColorValue>(avatarColors[0].value)
@@ -44,6 +56,21 @@ let avatarButtons: Array<HTMLButtonElement | null> = $state([])
 
 let usernameTrimmed = $derived(username.trim())
 let usernameValidation = $derived(validateUsername(usernameTrimmed))
+let inviteTargetName = $derived(inviteGuildName?.trim() || null)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let titleText = $derived(
+  mode === 'reregister'
+    ? 'Choose a different name'
+    : inviteTargetName
+      ? `Pick a username to join ${inviteTargetName}`
+      : 'Pick a username',
+)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let subtitleText = $derived(
+  mode === 'create' && inviteTargetName
+    ? 'Create your identity to continue.'
+    : null,
+)
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let canSubmit = $derived(usernameValidation === null && !submitting)
 
@@ -204,10 +231,27 @@ async function onSubmit(event: SubmitEvent) {
   <div class="mx-auto flex w-full max-w-md flex-col gap-6 rounded-lg border border-border bg-card p-8">
     <header class="space-y-2 text-center">
       <p class="text-sm font-medium text-muted-foreground">Discool</p>
-      <h1 class="text-3xl font-semibold tracking-tight">
-        {mode === 'reregister' ? 'Choose a different name' : 'Pick a username'}
-      </h1>
+      {#if mode === 'create' && inviteGuildIconUrl}
+        <img
+          src={inviteGuildIconUrl}
+          alt="Guild icon"
+          class="mx-auto h-12 w-12 rounded-full border border-border object-cover"
+        />
+      {/if}
+      <h1 class="text-3xl font-semibold tracking-tight">{titleText}</h1>
+      {#if subtitleText}
+        <p class="text-sm text-muted-foreground">{subtitleText}</p>
+      {/if}
     </header>
+
+    {#if inviteErrorMessage}
+      <div
+        class="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive"
+        role="alert"
+      >
+        {inviteErrorMessage}
+      </div>
+    {/if}
 
     {#if serverError}
       <div

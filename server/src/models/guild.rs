@@ -51,21 +51,57 @@ impl GuildResponse {
     }
 }
 
-pub async fn list_guilds_by_owner(pool: &DbPool, owner_id: &str) -> Result<Vec<Guild>, AppError> {
+pub async fn list_guilds_for_user(pool: &DbPool, user_id: &str) -> Result<Vec<Guild>, AppError> {
     let guilds: Vec<Guild> = match pool {
         DbPool::Postgres(pool) => {
             sqlx::query_as(
-                "SELECT id, slug, name, description, owner_id, default_channel_slug, icon_storage_key, icon_mime_type, icon_size_bytes, icon_updated_at, created_at, updated_at FROM guilds WHERE owner_id = $1 ORDER BY created_at ASC",
+                "SELECT g.id,
+                        g.slug,
+                        g.name,
+                        g.description,
+                        g.owner_id,
+                        g.default_channel_slug,
+                        g.icon_storage_key,
+                        g.icon_mime_type,
+                        g.icon_size_bytes,
+                        g.icon_updated_at,
+                        g.created_at,
+                        g.updated_at
+                 FROM guilds g
+                 LEFT JOIN guild_members gm
+                   ON gm.guild_id = g.id
+                  AND gm.user_id = $1
+                 WHERE g.owner_id = $1
+                    OR gm.user_id IS NOT NULL
+                 ORDER BY g.created_at ASC",
             )
-            .bind(owner_id)
+            .bind(user_id)
             .fetch_all(pool)
             .await
         }
         DbPool::Sqlite(pool) => {
             sqlx::query_as(
-                "SELECT id, slug, name, description, owner_id, default_channel_slug, icon_storage_key, icon_mime_type, icon_size_bytes, icon_updated_at, created_at, updated_at FROM guilds WHERE owner_id = ?1 ORDER BY created_at ASC",
+                "SELECT g.id,
+                        g.slug,
+                        g.name,
+                        g.description,
+                        g.owner_id,
+                        g.default_channel_slug,
+                        g.icon_storage_key,
+                        g.icon_mime_type,
+                        g.icon_size_bytes,
+                        g.icon_updated_at,
+                        g.created_at,
+                        g.updated_at
+                 FROM guilds g
+                 LEFT JOIN guild_members gm
+                   ON gm.guild_id = g.id
+                  AND gm.user_id = ?1
+                 WHERE g.owner_id = ?1
+                    OR gm.user_id IS NOT NULL
+                 ORDER BY g.created_at ASC",
             )
-            .bind(owner_id)
+            .bind(user_id)
             .fetch_all(pool)
             .await
         }

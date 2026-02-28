@@ -11,6 +11,7 @@ use crate::{
         category::{self, ChannelCategory},
         channel::{self, ChannelPositionUpdate},
         guild::{self, Guild},
+        guild_member,
     },
 };
 
@@ -59,7 +60,7 @@ pub async fn list_categories(
     user_id: &str,
     guild_slug: &str,
 ) -> Result<Vec<CategoryResponse>, AppError> {
-    let guild = load_owned_guild(pool, user_id, guild_slug).await?;
+    let guild = load_viewable_guild(pool, user_id, guild_slug).await?;
     let categories = category::list_categories_by_guild_id(pool, &guild.id).await?;
     let collapsed_ids = category::list_collapsed_category_ids(pool, user_id, &guild.id).await?;
     let collapsed_set: HashSet<String> = collapsed_ids.into_iter().collect();
@@ -293,6 +294,22 @@ async fn load_owned_guild(
         ));
     }
     Ok(guild)
+}
+
+async fn load_viewable_guild(
+    pool: &DbPool,
+    user_id: &str,
+    guild_slug: &str,
+) -> Result<Guild, AppError> {
+    let guild = guild::find_guild_by_slug(pool, guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if guild.owner_id == user_id || guild_member::is_guild_member(pool, &guild.id, user_id).await? {
+        return Ok(guild);
+    }
+    Err(AppError::Forbidden(
+        "Only guild members can view categories".to_string(),
+    ))
 }
 
 async fn choose_available_slug_for_update(

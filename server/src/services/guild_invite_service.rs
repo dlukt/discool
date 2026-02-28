@@ -12,6 +12,7 @@ use crate::{
 };
 
 const MAX_INVITE_CODE_ATTEMPTS: usize = 50;
+pub const INVALID_INVITE_MESSAGE: &str = "This invite link is invalid or has expired";
 
 #[derive(Debug, Clone)]
 pub struct CreateGuildInviteInput {
@@ -34,6 +35,39 @@ pub struct GuildInviteResponse {
 pub struct RevokeGuildInviteResponse {
     pub code: String,
     pub revoked: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InviteWelcomeScreenResponse {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accept_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InviteMetadataResponse {
+    pub code: String,
+    pub guild_slug: String,
+    pub guild_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guild_icon_url: Option<String>,
+    pub default_channel_slug: String,
+    pub welcome_screen: InviteWelcomeScreenResponse,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JoinGuildByInviteResponse {
+    pub guild_slug: String,
+    pub guild_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guild_icon_url: Option<String>,
+    pub default_channel_slug: String,
+    pub already_member: bool,
+    pub welcome_screen: InviteWelcomeScreenResponse,
 }
 
 pub async fn list_invites(
@@ -103,6 +137,46 @@ pub async fn revoke_invite(
     })
 }
 
+pub async fn resolve_invite_metadata(
+    pool: &DbPool,
+    code: &str,
+) -> Result<InviteMetadataResponse, AppError> {
+    let invite = guild_invite::find_active_invite_with_guild_by_code(pool, code)
+        .await?
+        .ok_or_else(|| AppError::ValidationError(INVALID_INVITE_MESSAGE.to_string()))?;
+
+    Ok(InviteMetadataResponse {
+        code: invite.code,
+        guild_slug: invite.guild_slug.clone(),
+        guild_name: invite.guild_name,
+        guild_icon_url: icon_url_for_guild(
+            &invite.guild_slug,
+            invite.guild_icon_storage_key.as_deref(),
+        ),
+        default_channel_slug: invite.guild_default_channel_slug,
+        welcome_screen: default_welcome_screen(),
+    })
+}
+
+pub async fn join_guild_by_invite(
+    pool: &DbPool,
+    user_id: &str,
+    code: &str,
+) -> Result<JoinGuildByInviteResponse, AppError> {
+    let joined = guild_invite::join_guild_via_invite(pool, code, user_id, &Utc::now().to_rfc3339())
+        .await?
+        .ok_or_else(|| AppError::ValidationError(INVALID_INVITE_MESSAGE.to_string()))?;
+
+    Ok(JoinGuildByInviteResponse {
+        guild_slug: joined.guild_slug.clone(),
+        guild_name: joined.guild_name,
+        guild_icon_url: icon_url_for_guild(&joined.guild_slug, joined.icon_storage_key.as_deref()),
+        default_channel_slug: joined.default_channel_slug,
+        already_member: joined.already_member,
+        welcome_screen: default_welcome_screen(),
+    })
+}
+
 fn to_invite_response(record: GuildInviteWithCreator) -> GuildInviteResponse {
     GuildInviteResponse {
         code: record.code.clone(),
@@ -113,6 +187,19 @@ fn to_invite_response(record: GuildInviteWithCreator) -> GuildInviteResponse {
         created_at: record.created_at,
         revoked: record.revoked != 0,
         invite_url: format!("/invite/{}", record.code),
+    }
+}
+
+fn icon_url_for_guild(guild_slug: &str, icon_storage_key: Option<&str>) -> Option<String> {
+    icon_storage_key.map(|_| format!("/api/v1/guilds/{guild_slug}/icon"))
+}
+
+fn default_welcome_screen() -> InviteWelcomeScreenResponse {
+    InviteWelcomeScreenResponse {
+        enabled: false,
+        title: None,
+        rules: None,
+        accept_label: None,
     }
 }
 
