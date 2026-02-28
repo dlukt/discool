@@ -5,7 +5,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use crate::services::presence_service;
+use crate::{
+    AppError,
+    db::DbPool,
+    services::{message_service, presence_service},
+};
 
 use super::{
     protocol::{
@@ -31,6 +35,8 @@ struct MessageCreatePayload {
     channel_slug: String,
     #[serde(default)]
     content: String,
+    #[serde(default)]
+    client_nonce: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,6 +95,49 @@ fn send_protocol_error(connection_id: &str, error: ProtocolError) {
     registry::send_event(connection_id, ServerOp::Error, &payload);
 }
 
+fn app_error_payload(error: AppError) -> Value {
+    match error {
+        AppError::NotFound => json!({
+            "code": "NOT_FOUND",
+            "message": "Resource not found",
+            "details": {},
+        }),
+        AppError::Unauthorized(message) => json!({
+            "code": "UNAUTHORIZED",
+            "message": message,
+            "details": {},
+        }),
+        AppError::Forbidden(message) => json!({
+            "code": "FORBIDDEN",
+            "message": message,
+            "details": {},
+        }),
+        AppError::Conflict(message) => json!({
+            "code": "CONFLICT",
+            "message": message,
+            "details": {},
+        }),
+        AppError::ValidationError(message) => json!({
+            "code": "VALIDATION_ERROR",
+            "message": message,
+            "details": {},
+        }),
+        AppError::Internal(message) => {
+            tracing::error!(%message, "Websocket message handling failed");
+            json!({
+                "code": "INTERNAL_ERROR",
+                "message": "An internal error occurred",
+                "details": {},
+            })
+        }
+    }
+}
+
+fn send_app_error(connection_id: &str, error: AppError) {
+    let payload = app_error_payload(error);
+    registry::send_event(connection_id, ServerOp::Error, &payload);
+}
+
 fn parse_envelope(payload: &str) -> Result<ClientEnvelope, ProtocolError> {
     serde_json::from_str::<ClientEnvelope>(payload).map_err(|_| {
         ProtocolError::validation("Malformed websocket payload")
@@ -126,20 +175,29 @@ fn handle_subscribe(connection_id: &str, payload: SubscribePayload, subscribe: b
     registry::send_event(connection_id, ServerOp::ChannelUpdate, &event_payload);
 }
 
-fn handle_message_create(connection_id: &str, user_id: &str, payload: MessageCreatePayload) {
-    let event_payload = json!({
-        "guild_slug": payload.guild_slug,
-        "channel_slug": payload.channel_slug,
-        "author_user_id": user_id,
-        "content": payload.content,
-        "connection_id": connection_id,
-    });
+async fn handle_message_create(
+    pool: &DbPool,
+    user_id: &str,
+    payload: MessageCreatePayload,
+) -> Result<(), AppError> {
+    let created = message_service::create_message(
+        pool,
+        user_id,
+        message_service::CreateMessageInput {
+            guild_slug: payload.guild_slug,
+            channel_slug: payload.channel_slug,
+            content: payload.content,
+            client_nonce: payload.client_nonce,
+        },
+    )
+    .await?;
     registry::broadcast_to_channel(
-        event_payload["guild_slug"].as_str().unwrap_or_default(),
-        event_payload["channel_slug"].as_str().unwrap_or_default(),
+        &created.guild_slug,
+        &created.channel_slug,
         ServerOp::MessageCreate,
-        &event_payload,
+        &created,
     );
+    Ok(())
 }
 
 fn handle_typing_start(connection_id: &str, user_id: &str, payload: TypingStartPayload) {
@@ -172,7 +230,8 @@ fn handle_resume(connection_id: &str, envelope: &ClientEnvelope) {
     registry::send_event(connection_id, ServerOp::ResumeAck, &resume_payload);
 }
 
-fn process_client_message(
+async fn process_client_message(
+    pool: &DbPool,
     connection_id: &str,
     user_id: &str,
     envelope: ClientEnvelope,
@@ -222,7 +281,11 @@ fn process_client_message(
         }
         ClientOp::MessageCreate => {
             match parse_payload::<MessageCreatePayload>(envelope.d, &envelope.op) {
-                Ok(payload) => handle_message_create(connection_id, user_id, payload),
+                Ok(payload) => {
+                    if let Err(error) = handle_message_create(pool, user_id, payload).await {
+                        send_app_error(connection_id, error);
+                    }
+                }
                 Err(error) => send_protocol_error(connection_id, error),
             }
         }
@@ -236,7 +299,12 @@ fn process_client_message(
     }
 }
 
-pub async fn handle_socket(mut socket: WebSocket, user_id: String, session_id: String) {
+pub async fn handle_socket(
+    mut socket: WebSocket,
+    user_id: String,
+    session_id: String,
+    pool: DbPool,
+) {
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let connection_id = presence_service::register_connection(&user_id, &session_id, sender);
     presence_service::ensure_watchdog_started();
@@ -270,7 +338,16 @@ pub async fn handle_socket(mut socket: WebSocket, user_id: String, session_id: S
                 match inbound {
                     Some(Ok(Message::Text(payload))) => {
                         match parse_envelope(payload.as_str()) {
-                            Ok(envelope) => process_client_message(&connection_id, &user_id, envelope, &mut rate_limiter),
+                            Ok(envelope) => {
+                                process_client_message(
+                                    &pool,
+                                    &connection_id,
+                                    &user_id,
+                                    envelope,
+                                    &mut rate_limiter,
+                                )
+                                .await
+                            }
                             Err(error) => send_protocol_error(&connection_id, error),
                         }
                     }

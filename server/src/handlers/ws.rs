@@ -23,9 +23,10 @@ pub async fn connect(
     let (session, _user) = auth_service::validate_session(&state.pool, &token).await?;
     let user_id = session.user_id;
     let session_id = session.id;
+    let pool = state.pool.clone();
 
     Ok(ws
-        .on_upgrade(move |socket| gateway::handle_socket(socket, user_id, session_id))
+        .on_upgrade(move |socket| gateway::handle_socket(socket, user_id, session_id, pool))
         .into_response())
 }
 

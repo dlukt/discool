@@ -1,11 +1,15 @@
 <script lang="ts">
+// biome-ignore-all lint/correctness/noUnusedVariables: Svelte template usage isn't detected reliably.
+// biome-ignore-all lint/correctness/noUnusedImports: Svelte template usage isn't detected reliably.
 import { onMount, tick } from 'svelte'
-// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import AdminPanel from '$lib/components/AdminPanel.svelte'
-// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
+import { guildState } from '$lib/features/guild/guildStore.svelte'
+import { identityState } from '$lib/features/identity/identityStore.svelte'
 import ProfileSettingsView from '$lib/features/identity/ProfileSettingsView.svelte'
 import { wsClient } from '$lib/ws/client'
 import type { WsLifecycleState } from '$lib/ws/protocol'
+import MessageBubble from './MessageBubble.svelte'
+import { type ChatAuthorInput, messageState } from './messageStore.svelte'
 
 type Props = {
   mode: 'home' | 'channel' | 'settings' | 'admin'
@@ -29,31 +33,93 @@ let {
   onDismissRecoveryNudge,
 }: Props = $props()
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let detailText = $derived(
   mode === 'channel'
     ? `#${activeChannel} in ${activeGuild}`
     : `Signed in as ${displayName}.`,
 )
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let canShowAdminPanel = $derived(mode === 'admin' && isAdmin)
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let shouldShowRecoveryNudge = $derived(
   showRecoveryNudge && (mode === 'home' || mode === 'channel'),
 )
 let wsLifecycleState = $state<WsLifecycleState>(wsClient.getLifecycleState())
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let showReconnectingBanner = $derived(wsLifecycleState === 'reconnecting')
-let composerInput = $state<HTMLInputElement | null>(null)
+let composerInput = $state<HTMLTextAreaElement | null>(null)
+let composerValue = $state('')
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let timelineMessages = $derived.by(() => {
+  const _messageVersion = messageState.version
+  if (mode !== 'channel') return []
+  return messageState.timeline(activeGuild, activeChannel)
+})
+let currentSessionUser = $derived(identityState.session?.user ?? null)
+let currentMember = $derived(
+  currentSessionUser
+    ? guildState.memberByUserId(activeGuild, currentSessionUser.id)
+    : null,
+)
+let currentRoleColor = $derived(
+  currentMember?.highestRoleColor ??
+    currentSessionUser?.avatarColor ??
+    '#99aab5',
+)
+let emptyStateCopy = $derived(
+  `This is the beginning of #${activeChannel}. Say something!`,
+)
+
 async function handleOpenSettings() {
   await onOpenSettings?.()
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 async function handleDismissRecoveryNudge() {
   await onDismissRecoveryNudge?.()
+}
+
+function buildCurrentAuthor(): ChatAuthorInput | null {
+  if (!currentSessionUser) return null
+  return {
+    userId: currentSessionUser.id,
+    username: currentSessionUser.username,
+    displayName: currentSessionUser.displayName,
+    avatarColor: currentSessionUser.avatarColor,
+    roleColor: currentRoleColor,
+  }
+}
+
+function sendComposerMessage() {
+  const author = buildCurrentAuthor()
+  if (!author || mode !== 'channel') return
+  const sent = messageState.sendMessage(
+    activeGuild,
+    activeChannel,
+    composerValue,
+    author,
+  )
+  if (sent) {
+    composerValue = ''
+  }
+}
+
+function handleComposerKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Enter') return
+
+  if (event.shiftKey) {
+    event.preventDefault()
+    const target = event.currentTarget as HTMLTextAreaElement | null
+    const start = target?.selectionStart ?? composerValue.length
+    const end = target?.selectionEnd ?? composerValue.length
+    composerValue = `${composerValue.slice(0, start)}\n${composerValue.slice(end)}`
+    if (target) {
+      void tick().then(() => {
+        target.selectionStart = start + 1
+        target.selectionEnd = start + 1
+      })
+    }
+    return
+  }
+
+  event.preventDefault()
+  sendComposerMessage()
 }
 
 $effect(() => {
@@ -127,17 +193,31 @@ onMount(() => {
       </section>
     {/if}
 
-    <section class="rounded-md border border-border bg-card p-4">
+    <section class="min-h-0 flex-1 rounded-md border border-border bg-card p-4">
       <h2 class="text-sm font-medium text-foreground">Channel Timeline</h2>
-      <ul class="mt-3 space-y-2 text-sm text-muted-foreground">
-        <li class="rounded-md bg-muted px-3 py-2">Welcome to Discool.</li>
-        <li class="rounded-md bg-muted px-3 py-2">
-          Placeholder messages will be replaced in upcoming stories.
-        </li>
-        <li class="rounded-md bg-muted px-3 py-2">
-          Current route: /{activeGuild}/{activeChannel}
-        </li>
-      </ul>
+      <div class="mt-3 space-y-2" data-testid="channel-timeline">
+        {#if timelineMessages.length === 0}
+          <p
+            class="rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground"
+            data-testid="message-empty-state"
+          >
+            {emptyStateCopy}
+          </p>
+        {:else}
+          {#each timelineMessages as message, index (message.id)}
+            {@const previous = index > 0 ? timelineMessages[index - 1] : null}
+            <MessageBubble
+              {message}
+              compact={Boolean(
+                previous &&
+                  !previous.isSystem &&
+                  !message.isSystem &&
+                  previous.authorUserId === message.authorUserId
+              )}
+            />
+          {/each}
+        {/if}
+      </div>
     </section>
 
     {#if mode === 'channel'}
@@ -148,14 +228,28 @@ onMount(() => {
         >
           Message
         </label>
-        <input
-          id="message-composer"
-          data-testid="message-composer-input"
-          class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-          type="text"
-          placeholder={`Message #${activeChannel}`}
-          bind:this={composerInput}
-        />
+        <div class="flex items-end gap-2">
+          <textarea
+            id="message-composer"
+            data-testid="message-composer-input"
+            class="min-h-[44px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            placeholder={`Message #${activeChannel}`}
+            bind:this={composerInput}
+            bind:value={composerValue}
+            onkeydown={handleComposerKeydown}
+          ></textarea>
+          <button
+            type="button"
+            class="inline-flex h-[44px] items-center justify-center rounded-md bg-fire px-4 text-sm font-medium text-fire-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            onclick={sendComposerMessage}
+            disabled={!currentSessionUser || composerValue.trim().length === 0}
+          >
+            Send
+          </button>
+        </div>
+        <p class="mt-2 text-xs text-muted-foreground">
+          Enter to send · Shift+Enter for newline
+        </p>
       </section>
     {/if}
   </section>

@@ -21,6 +21,7 @@ mod guilds;
 mod health;
 mod instance;
 mod invites;
+mod messages;
 mod roles;
 mod users;
 mod ws;
@@ -98,6 +99,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/guilds/{guild_slug}/channels/{channel_slug}",
             patch(channels::update_channel).delete(channels::delete_channel),
+        )
+        .route(
+            "/guilds/{guild_slug}/channels/{channel_slug}/messages",
+            get(messages::list_messages),
         )
         .route(
             "/guilds/{guild_slug}/channels/{channel_slug}/permission-overrides",

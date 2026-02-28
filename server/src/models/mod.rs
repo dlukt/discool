@@ -4,6 +4,7 @@ pub mod channel_permission_override;
 pub mod guild;
 pub mod guild_invite;
 pub mod guild_member;
+pub mod message;
 pub mod recovery_email;
 pub mod role;
 pub mod session;

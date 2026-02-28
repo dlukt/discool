@@ -4255,3 +4255,250 @@ async fn websocket_channel_fanout_is_targeted_and_rate_limited() {
         json!("c_typing_start")
     );
 }
+
+#[tokio::test]
+async fn websocket_message_create_persists_then_broadcasts_to_subscribed_peers() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "ws-msg-owner", [101u8; 32]).await;
+    let peer_token = register_and_authenticate(&addr, "ws-msg-peer", [102u8; 32]).await;
+
+    let guild_body = json!({ "name": "Message Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap().to_string();
+    let guild_id = guild["data"]["id"].as_str().unwrap().to_string();
+
+    let url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let owner_id = sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username = ?1")
+        .bind("ws-msg-owner")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let peer_id = sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username = ?1")
+        .bind("ws-msg-peer")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO guild_members (guild_id, user_id, joined_at, joined_via_invite_code)
+         VALUES (?1, ?2, ?3, NULL)",
+    )
+    .bind(&guild_id)
+    .bind(&peer_id)
+    .bind("2026-02-28T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (mut owner_stream, owner_response) =
+        websocket_connect(&addr, "/ws", Some(&owner_token)).await;
+    let (mut peer_stream, peer_response) = websocket_connect(&addr, "/ws", Some(&peer_token)).await;
+    assert_eq!(response_status(&owner_response), 101);
+    assert_eq!(response_status(&peer_response), 101);
+
+    let _ = websocket_read_json_with_op(&mut owner_stream, "hello", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut peer_stream, "hello", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_subscribe",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    websocket_send_text_frame(
+        &mut peer_stream,
+        &json!({
+            "op": "c_subscribe",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let _ = websocket_read_json_with_op(&mut owner_stream, "channel_update", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut peer_stream, "channel_update", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_message_create",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general",
+                "content": "Hello <b>team</b>",
+                "client_nonce": "nonce-1"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let owner_event = websocket_read_json_with_op(&mut owner_stream, "message_create", 1_500)
+        .await
+        .expect("owner should receive message_create");
+    let peer_event = websocket_read_json_with_op(&mut peer_stream, "message_create", 1_500)
+        .await
+        .expect("peer should receive message_create");
+
+    assert_eq!(owner_event["d"]["guild_slug"], json!(guild_slug.as_str()));
+    assert_eq!(owner_event["d"]["channel_slug"], json!("general"));
+    assert_eq!(owner_event["d"]["author_user_id"], json!(owner_id.as_str()));
+    assert_eq!(
+        owner_event["d"]["content"],
+        json!("Hello &lt;b&gt;team&lt;/b&gt;")
+    );
+    assert_eq!(owner_event["d"]["client_nonce"], json!("nonce-1"));
+    assert_eq!(peer_event["d"]["id"], owner_event["d"]["id"]);
+    assert_eq!(
+        peer_event["d"]["content"],
+        json!("Hello &lt;b&gt;team&lt;/b&gt;")
+    );
+
+    let message_id = owner_event["d"]["id"].as_str().unwrap().to_string();
+    let channel_id = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM channels WHERE guild_id = ?1 AND slug = ?2",
+    )
+    .bind(&guild_id)
+    .bind("general")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let persisted_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM messages
+         WHERE id = ?1
+           AND guild_id = ?2
+           AND channel_id = ?3
+           AND author_user_id = ?4
+           AND content = ?5",
+    )
+    .bind(&message_id)
+    .bind(&guild_id)
+    .bind(&channel_id)
+    .bind(&owner_id)
+    .bind("Hello &lt;b&gt;team&lt;/b&gt;")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted_count, 1);
+}
+
+#[tokio::test]
+async fn websocket_message_create_rejects_forbidden_and_invalid_payloads() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "ws-msg-owner-2", [111u8; 32]).await;
+    let outsider_token = register_and_authenticate(&addr, "ws-msg-outsider", [112u8; 32]).await;
+
+    let guild_body = json!({ "name": "Forbidden Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap().to_string();
+
+    let (mut outsider_stream, outsider_response) =
+        websocket_connect(&addr, "/ws", Some(&outsider_token)).await;
+    assert_eq!(response_status(&outsider_response), 101);
+    let _ = websocket_read_json_with_op(&mut outsider_stream, "hello", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut outsider_stream,
+        &json!({
+            "op": "c_message_create",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general",
+                "content": "hi from outsider"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let outsider_error = websocket_read_json_with_op(&mut outsider_stream, "error", 1_500)
+        .await
+        .expect("outsider should receive forbidden error");
+    assert_eq!(outsider_error["d"]["code"], json!("FORBIDDEN"));
+
+    let (mut owner_stream, owner_response) =
+        websocket_connect(&addr, "/ws", Some(&owner_token)).await;
+    assert_eq!(response_status(&owner_response), 101);
+    let _ = websocket_read_json_with_op(&mut owner_stream, "hello", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_message_create",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general",
+                "content": "   "
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let empty_content_error = websocket_read_json_with_op(&mut owner_stream, "error", 1_500)
+        .await
+        .expect("empty message should return validation error");
+    assert_eq!(empty_content_error["d"]["code"], json!("VALIDATION_ERROR"));
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_message_create",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general",
+                "content": 123
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let invalid_payload_error = websocket_read_json_with_op(&mut owner_stream, "error", 1_500)
+        .await
+        .expect("invalid payload shape should return validation error");
+    assert_eq!(
+        invalid_payload_error["d"]["code"],
+        json!("VALIDATION_ERROR")
+    );
+    assert_eq!(
+        invalid_payload_error["d"]["details"]["reason"],
+        json!("invalid_payload_shape")
+    );
+}
