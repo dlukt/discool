@@ -76,7 +76,7 @@ development_status:
   # Epic 4: Guilds, Channels & Invites
   epic-4: in-progress
   4-1-spa-navigation-shell-and-routing: done
-  4-2-guild-creation-and-settings: review
+  4-2-guild-creation-and-settings: done
   4-3-text-and-voice-channel-management: backlog
   4-4-channel-categories: backlog
   4-5-invite-link-generation-and-management: backlog
