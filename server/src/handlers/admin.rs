@@ -18,7 +18,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use crate::middleware::auth::AuthenticatedUser;
-use crate::{AppError, AppState, db::DbPool};
+use crate::{AppError, AppState, db::DbPool, services::presence_service};
 
 #[cfg(target_os = "linux")]
 use std::sync::{Mutex, OnceLock};
@@ -153,7 +153,7 @@ pub async fn get_health(
         db_pool_active,
         db_pool_idle,
         db_pool_max,
-        websocket_connections: 0,
+        websocket_connections: presence_service::websocket_connection_count(),
         p2p_discovered_instances,
         p2p_connection_count,
         p2p_message_rate_per_minute,

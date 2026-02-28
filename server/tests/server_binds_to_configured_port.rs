@@ -10,7 +10,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    time::sleep,
+    time::{sleep, timeout},
 };
 
 fn server_exe() -> &'static str {
@@ -135,6 +135,35 @@ async fn http_response_with_bearer(addr: &str, path: &str, token: &str) -> Strin
 
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await.unwrap();
+    String::from_utf8_lossy(&buf).to_string()
+}
+
+async fn websocket_upgrade_response(addr: &str, path: &str, bearer_token: Option<&str>) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade, close\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+    );
+    if let Some(token) = bearer_token {
+        req.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
+    req.push_str("\r\n");
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    loop {
+        let mut chunk = [0_u8; 1024];
+        let read_result = timeout(Duration::from_secs(2), stream.read(&mut chunk)).await;
+        match read_result {
+            Ok(Ok(0)) => break,
+            Ok(Ok(bytes_read)) => {
+                buf.extend_from_slice(&chunk[..bytes_read]);
+                if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
     String::from_utf8_lossy(&buf).to_string()
 }
 
@@ -2762,6 +2791,12 @@ async fn roles_mutations_require_authentication() {
     let res = http_response(&addr, "/api/v1/guilds/lobby/members").await;
     assert_eq!(response_status(&res), 401);
 
+    let res = websocket_upgrade_response(&addr, "/ws", None).await;
+    assert_eq!(response_status(&res), 401);
+
+    let res = websocket_upgrade_response(&addr, "/ws?token=bad-token", None).await;
+    assert_eq!(response_status(&res), 401);
+
     let update_member_roles_body = json!({ "role_ids": ["example-role"] }).to_string();
     let res = http_patch_with_bearer(
         &addr,
@@ -3154,6 +3189,14 @@ async fn member_role_assignment_enforces_hierarchy_and_invalidates_permission_ca
     let res = http_response_with_bearer(&addr, &members_path, &manager_token).await;
     assert_eq!(response_status(&res), 200);
     let listed: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let listed_members = listed["data"]["members"].as_array().unwrap();
+    assert!(!listed_members.is_empty());
+    for member in listed_members {
+        let Some(presence_status) = member["presence_status"].as_str() else {
+            panic!("presence_status should be present for every member");
+        };
+        assert!(matches!(presence_status, "online" | "idle" | "offline"));
+    }
     let assignable_role_ids = listed["data"]["assignable_role_ids"].as_array().unwrap();
     assert!(assignable_role_ids.contains(&json!(helper_role_id)));
     assert!(!assignable_role_ids.contains(&json!(high_role_id)));
@@ -3204,6 +3247,7 @@ async fn member_role_assignment_enforces_hierarchy_and_invalidates_permission_ca
         assigned["data"]["role_ids"],
         json!([helper_role_id.clone()])
     );
+    assert_eq!(assigned["data"]["presence_status"], json!("offline"));
 
     let res = http_patch_with_bearer(
         &addr,
@@ -3243,6 +3287,7 @@ async fn member_role_assignment_enforces_hierarchy_and_invalidates_permission_ca
     assert_eq!(response_status(&res), 200);
     let removed: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
     assert_eq!(removed["data"]["role_ids"], json!([]));
+    assert_eq!(removed["data"]["presence_status"], json!("offline"));
 
     let res = http_post_with_bearer(&addr, &invites_path, &invite_create_body, &target_token).await;
     assert_eq!(response_status(&res), 403);

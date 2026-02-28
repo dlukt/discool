@@ -13,6 +13,7 @@ use crate::{
         role::{self, Role},
     },
     permissions,
+    services::presence_service,
 };
 
 const MAX_ROLE_NAME_CHARS: usize = 64;
@@ -71,6 +72,7 @@ pub struct GuildMemberResponse {
     pub username: String,
     pub display_name: String,
     pub avatar_color: Option<String>,
+    pub presence_status: presence_service::PresenceStatus,
     pub highest_role_color: String,
     pub role_ids: Vec<String>,
     pub is_owner: bool,
@@ -727,15 +729,17 @@ fn build_guild_member_response(
     can_assign_roles: bool,
 ) -> GuildMemberResponse {
     sort_role_ids_by_authority(&mut role_ids, role_by_id);
-    let is_owner = member.user_id == guild.owner_id;
+    let user_id = member.user_id;
+    let is_owner = user_id == guild.owner_id;
     GuildMemberResponse {
-        user_id: member.user_id,
+        user_id: user_id.clone(),
         username: member.username.clone(),
         display_name: normalize_member_display_name(
             member.display_name.as_deref(),
             &member.username,
         ),
         avatar_color: member.avatar_color,
+        presence_status: presence_service::current_presence_status(&user_id),
         highest_role_color: resolve_highest_role_color(
             default_role_color,
             role_by_id,

@@ -54,11 +54,14 @@ export type DeleteGuildRoleResult = {
   removedAssignmentCount: number
 }
 
+export type PresenceStatus = 'online' | 'idle' | 'offline'
+
 export type GuildMember = {
   userId: string
   username: string
   displayName: string
   avatarColor?: string
+  presenceStatus: PresenceStatus
   highestRoleColor: string
   roleIds: string[]
   isOwner: boolean
@@ -184,6 +187,7 @@ export type GuildMemberWire = {
   username: string
   display_name: string
   avatar_color?: string
+  presence_status?: PresenceStatus
   highest_role_color: string
   role_ids: string[]
   is_owner: boolean
@@ -346,6 +350,7 @@ export function toGuildMember(wire: GuildMemberWire): GuildMember {
     username: wire.username,
     displayName: wire.display_name,
     avatarColor: wire.avatar_color,
+    presenceStatus: wire.presence_status ?? 'offline',
     highestRoleColor: wire.highest_role_color,
     roleIds: [...wire.role_ids],
     isOwner: wire.is_owner,

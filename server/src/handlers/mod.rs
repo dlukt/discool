@@ -23,6 +23,7 @@ mod instance;
 mod invites;
 mod roles;
 mod users;
+mod ws;
 
 // Keep `connect-src` strict until we have a safe, non-Host-header-derived allow-list for WebSockets.
 // Keep `style-src` strict (no 'unsafe-inline') to reduce XSS blast radius.
@@ -140,7 +141,7 @@ pub fn router(state: AppState) -> Router {
 
     let mut tracked = Router::new()
         .nest("/api/v1", api)
-        .route("/ws", get(ws_not_found))
+        .route("/ws", get(ws::connect))
         .fallback(get(crate::static_files::handler_with_state));
 
     // /metrics should not be tracked (it is scraped frequently like /healthz and /readyz).
@@ -214,10 +215,6 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
 }
 
 async fn api_not_found() -> crate::AppError {
-    crate::AppError::NotFound
-}
-
-async fn ws_not_found() -> crate::AppError {
     crate::AppError::NotFound
 }
 

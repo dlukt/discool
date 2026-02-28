@@ -104,6 +104,17 @@ describe('ShellRoute', () => {
     expect(await findByTestId('tablet-member-list')).toBeInTheDocument()
   })
 
+  it('keeps desktop member rail mounted at fixed sidebar width', () => {
+    setViewport(1280)
+    const props = buildProps()
+    const { getByTestId } = render(ShellRoute, props)
+
+    const memberList = getByTestId('member-list')
+    expect(memberList).toBeInTheDocument()
+    expect(memberList.parentElement).toHaveClass('w-[240px]')
+    expect(memberList.parentElement).toHaveClass('border-l')
+  })
+
   it('shows mobile drill-down with bottom navigation', async () => {
     setViewport(600)
     const props = buildProps()
