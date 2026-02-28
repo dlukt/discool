@@ -11,7 +11,9 @@ use serde_json::json;
 use crate::{
     AppError, AppState,
     middleware::auth::AuthenticatedUser,
-    services::role_service::{self, CreateRoleInput, ReorderRolesInput, UpdateRoleInput},
+    services::role_service::{
+        self, CreateRoleInput, ReorderRolesInput, UpdateMemberRolesInput, UpdateRoleInput,
+    },
 };
 
 #[derive(Debug, Deserialize)]
@@ -32,6 +34,11 @@ pub struct UpdateRoleRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct ReorderRolesRequest {
+    pub role_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateMemberRolesRequest {
     pub role_ids: Option<Vec<String>>,
 }
 
@@ -139,4 +146,35 @@ pub async fn reorder_roles(
     )
     .await?;
     Ok((StatusCode::OK, Json(json!({ "data": roles }))).into_response())
+}
+
+pub async fn list_guild_members(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(guild_slug): Path<String>,
+) -> Result<Response, AppError> {
+    let members = role_service::list_guild_members(&state.pool, &user.user_id, &guild_slug).await?;
+    Ok((StatusCode::OK, Json(json!({ "data": members }))).into_response())
+}
+
+pub async fn update_member_roles(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path((guild_slug, member_user_id)): Path<(String, String)>,
+    payload: Result<Json<UpdateMemberRolesRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+    let role_ids = req
+        .role_ids
+        .ok_or_else(|| AppError::ValidationError("role_ids is required".to_string()))?;
+    let member = role_service::update_member_roles(
+        &state.pool,
+        &user.user_id,
+        &guild_slug,
+        &member_user_id,
+        UpdateMemberRolesInput { role_ids },
+    )
+    .await?;
+    Ok((StatusCode::OK, Json(json!({ "data": member }))).into_response())
 }

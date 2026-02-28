@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use serde::Serialize;
@@ -9,6 +9,7 @@ use crate::{
     db::DbPool,
     models::{
         guild::{self, Guild},
+        guild_member::{self, GuildMemberProfile},
         role::{self, Role},
     },
     permissions,
@@ -57,6 +58,31 @@ pub struct RoleResponse {
 pub struct DeleteRoleResponse {
     pub deleted_id: String,
     pub removed_assignment_count: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateMemberRolesInput {
+    pub role_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GuildMemberResponse {
+    pub user_id: String,
+    pub username: String,
+    pub display_name: String,
+    pub avatar_color: Option<String>,
+    pub highest_role_color: String,
+    pub role_ids: Vec<String>,
+    pub is_owner: bool,
+    pub can_assign_roles: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GuildMemberRoleDataResponse {
+    pub members: Vec<GuildMemberResponse>,
+    pub roles: Vec<RoleResponse>,
+    pub assignable_role_ids: Vec<String>,
+    pub can_manage_roles: bool,
 }
 
 pub async fn list_roles(
@@ -271,6 +297,192 @@ pub async fn reorder_roles(
     Ok(response)
 }
 
+pub async fn list_guild_members(
+    pool: &DbPool,
+    user_id: &str,
+    guild_slug: &str,
+) -> Result<GuildMemberRoleDataResponse, AppError> {
+    let guild = load_viewable_guild(pool, user_id, guild_slug).await?;
+    ensure_default_role(pool, &guild).await?;
+    let roles = role::list_roles_by_guild_id(pool, &guild.id).await?;
+    let role_by_id: HashMap<String, Role> = roles
+        .iter()
+        .cloned()
+        .map(|record| (record.id.clone(), record))
+        .collect();
+    let default_role_color = roles
+        .iter()
+        .find(|record| record.is_default != 0)
+        .map(|record| record.color.clone())
+        .ok_or_else(|| AppError::Internal("Default role not found".to_string()))?;
+
+    let mut members = guild_member::list_guild_member_profiles(pool, &guild.id).await?;
+    if !members
+        .iter()
+        .any(|member| member.user_id == guild.owner_id)
+        && let Some(owner_profile) =
+            guild_member::find_user_profile_by_id(pool, &guild.owner_id).await?
+    {
+        members.insert(
+            0,
+            GuildMemberProfile {
+                user_id: owner_profile.user_id,
+                username: owner_profile.username,
+                display_name: owner_profile.display_name,
+                avatar_color: owner_profile.avatar_color,
+                joined_at: guild.created_at.clone(),
+            },
+        );
+    }
+
+    let assignments = role::list_role_assignments_by_guild_id(pool, &guild.id).await?;
+    let mut role_ids_by_user: HashMap<String, Vec<String>> = HashMap::new();
+    for assignment in assignments {
+        role_ids_by_user
+            .entry(assignment.user_id)
+            .or_default()
+            .push(assignment.role_id);
+    }
+    for role_ids in role_ids_by_user.values_mut() {
+        sort_role_ids_by_authority(role_ids, &role_by_id);
+    }
+
+    let can_manage_roles = actor_can_manage_roles(pool, &guild, user_id).await?;
+    let actor_authority = if can_manage_roles {
+        permissions::highest_guild_role_authority(pool, &guild, user_id).await?
+    } else {
+        None
+    };
+    let assignable_role_ids = collect_assignable_custom_role_ids(&roles, actor_authority);
+
+    let mut member_responses = Vec::with_capacity(members.len());
+    for member in members {
+        let role_ids = role_ids_by_user.remove(&member.user_id).unwrap_or_default();
+        let can_assign_roles = if can_manage_roles {
+            can_actor_assign_member(pool, &guild, user_id, &member.user_id, actor_authority).await?
+        } else {
+            false
+        };
+        member_responses.push(build_guild_member_response(
+            member,
+            &guild,
+            &default_role_color,
+            &role_by_id,
+            role_ids,
+            can_assign_roles,
+        ));
+    }
+
+    let mut role_responses = Vec::with_capacity(roles.len() + 1);
+    role_responses.push(owner_role_response(&guild));
+    role_responses.extend(roles.into_iter().map(to_role_response));
+
+    Ok(GuildMemberRoleDataResponse {
+        members: member_responses,
+        roles: role_responses,
+        assignable_role_ids,
+        can_manage_roles,
+    })
+}
+
+pub async fn update_member_roles(
+    pool: &DbPool,
+    user_id: &str,
+    guild_slug: &str,
+    target_user_id: &str,
+    input: UpdateMemberRolesInput,
+) -> Result<GuildMemberResponse, AppError> {
+    let guild = load_guild_with_role_management_access(pool, user_id, guild_slug).await?;
+    ensure_default_role(pool, &guild).await?;
+
+    if !guild_member::is_guild_member(pool, &guild.id, target_user_id).await? {
+        return Err(AppError::ValidationError(
+            "target user is not a guild member".to_string(),
+        ));
+    }
+    if target_user_id == guild.owner_id {
+        return Err(AppError::ValidationError(
+            "Guild owner role assignments cannot be modified".to_string(),
+        ));
+    }
+
+    let actor_authority = permissions::highest_guild_role_authority(pool, &guild, user_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::Forbidden("Missing MANAGE_ROLES permission in this guild".to_string())
+        })?;
+    if user_id != guild.owner_id
+        && !permissions::actor_outranks_target_member(pool, &guild, user_id, target_user_id).await?
+    {
+        return Err(AppError::Forbidden(
+            "You can only assign roles to members below your highest role".to_string(),
+        ));
+    }
+
+    let normalized_role_ids = normalize_role_ids(&input.role_ids)?;
+    let roles = role::list_roles_by_guild_id(pool, &guild.id).await?;
+    let role_by_id: HashMap<String, Role> = roles
+        .iter()
+        .cloned()
+        .map(|record| (record.id.clone(), record))
+        .collect();
+    let default_role_color = roles
+        .iter()
+        .find(|record| record.is_default != 0)
+        .map(|record| record.color.clone())
+        .ok_or_else(|| AppError::Internal("Default role not found".to_string()))?;
+
+    for role_id in &normalized_role_ids {
+        if role_id.starts_with("owner:") {
+            return Err(AppError::ValidationError(
+                "owner role cannot be assigned".to_string(),
+            ));
+        }
+        let Some(candidate_role) = role_by_id.get(role_id) else {
+            return Err(AppError::ValidationError(
+                "role_ids contains unknown role".to_string(),
+            ));
+        };
+        if candidate_role.is_default != 0 {
+            return Err(AppError::ValidationError(
+                "@everyone cannot be assigned manually".to_string(),
+            ));
+        }
+        if !role_is_assignable_to_actor(actor_authority, candidate_role) {
+            return Err(AppError::Forbidden(
+                "Cannot assign roles equal to or above your highest role".to_string(),
+            ));
+        }
+    }
+
+    let assigned_at = Utc::now().to_rfc3339();
+    role::set_role_assignments_for_user(
+        pool,
+        &guild.id,
+        target_user_id,
+        &normalized_role_ids,
+        &assigned_at,
+    )
+    .await?;
+    permissions::invalidate_guild_permission_cache(&guild.id);
+
+    let target_member = guild_member::find_guild_member_profile(pool, &guild.id, target_user_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::ValidationError("target user is not a guild member".to_string())
+        })?;
+    let assigned_role_ids = role::list_assigned_role_ids(pool, &guild.id, target_user_id).await?;
+    Ok(build_guild_member_response(
+        target_member,
+        &guild,
+        &default_role_color,
+        &role_by_id,
+        assigned_role_ids,
+        can_actor_assign_member(pool, &guild, user_id, target_user_id, Some(actor_authority))
+            .await?,
+    ))
+}
+
 async fn ensure_default_role(pool: &DbPool, guild: &Guild) -> Result<(), AppError> {
     let existing = role::find_default_role_by_guild_id(pool, &guild.id).await?;
     if existing.is_some() {
@@ -317,6 +529,181 @@ async fn load_guild_with_role_management_access(
     )
     .await?;
     Ok(guild)
+}
+
+async fn load_viewable_guild(
+    pool: &DbPool,
+    user_id: &str,
+    guild_slug: &str,
+) -> Result<Guild, AppError> {
+    let guild = guild::find_guild_by_slug(pool, guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if permissions::can_view_guild(pool, &guild, user_id).await? {
+        return Ok(guild);
+    }
+    Err(AppError::Forbidden(
+        "Only guild members can view member list".to_string(),
+    ))
+}
+
+async fn actor_can_manage_roles(
+    pool: &DbPool,
+    guild: &Guild,
+    user_id: &str,
+) -> Result<bool, AppError> {
+    if user_id == guild.owner_id {
+        return Ok(true);
+    }
+    let effective = permissions::effective_guild_permissions(pool, guild, user_id).await?;
+    Ok(permissions::has_permission(
+        effective,
+        permissions::MANAGE_ROLES,
+    ))
+}
+
+async fn can_actor_assign_member(
+    pool: &DbPool,
+    guild: &Guild,
+    actor_user_id: &str,
+    target_user_id: &str,
+    actor_authority: Option<permissions::RoleAuthority>,
+) -> Result<bool, AppError> {
+    if actor_user_id == target_user_id {
+        return Ok(false);
+    }
+    if target_user_id == guild.owner_id {
+        return Ok(false);
+    }
+    if actor_user_id == guild.owner_id {
+        return guild_member::is_guild_member(pool, &guild.id, target_user_id).await;
+    }
+    let Some(_) = actor_authority else {
+        return Ok(false);
+    };
+    permissions::actor_outranks_target_member(pool, guild, actor_user_id, target_user_id).await
+}
+
+fn role_is_assignable_to_actor(
+    authority: permissions::RoleAuthority,
+    candidate_role: &Role,
+) -> bool {
+    if candidate_role.is_default != 0 {
+        return false;
+    }
+    match authority {
+        permissions::RoleAuthority::Owner => true,
+        permissions::RoleAuthority::Position(position) => candidate_role.position > position,
+    }
+}
+
+fn collect_assignable_custom_role_ids(
+    roles: &[Role],
+    actor_authority: Option<permissions::RoleAuthority>,
+) -> Vec<String> {
+    let Some(actor_authority) = actor_authority else {
+        return Vec::new();
+    };
+    roles
+        .iter()
+        .filter(|record| role_is_assignable_to_actor(actor_authority, record))
+        .map(|record| record.id.clone())
+        .collect()
+}
+
+fn normalize_role_ids(role_ids: &[String]) -> Result<Vec<String>, AppError> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::with_capacity(role_ids.len());
+    for role_id in role_ids {
+        let trimmed = role_id.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::ValidationError(
+                "role_ids contains invalid role id".to_string(),
+            ));
+        }
+        let candidate = trimmed.to_string();
+        if !seen.insert(candidate.clone()) {
+            return Err(AppError::ValidationError(
+                "role_ids contains duplicate roles".to_string(),
+            ));
+        }
+        normalized.push(candidate);
+    }
+    Ok(normalized)
+}
+
+fn sort_role_ids_by_authority(role_ids: &mut [String], role_by_id: &HashMap<String, Role>) {
+    role_ids.sort_by(|left, right| {
+        let left_position = role_by_id
+            .get(left)
+            .map(|role| role.position)
+            .unwrap_or(i64::MAX);
+        let right_position = role_by_id
+            .get(right)
+            .map(|role| role.position)
+            .unwrap_or(i64::MAX);
+        left_position
+            .cmp(&right_position)
+            .then_with(|| left.cmp(right))
+    });
+}
+
+fn normalize_member_display_name(display_name: Option<&str>, username: &str) -> String {
+    display_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(username)
+        .to_string()
+}
+
+fn resolve_highest_role_color(
+    default_role_color: &str,
+    role_by_id: &HashMap<String, Role>,
+    assigned_role_ids: &[String],
+    is_owner: bool,
+) -> String {
+    if is_owner {
+        return OWNER_ROLE_COLOR.to_string();
+    }
+    for role_id in assigned_role_ids {
+        if let Some(role) = role_by_id.get(role_id) {
+            return role.color.clone();
+        }
+    }
+    if let Some(default_role) = role_by_id.values().find(|role| role.is_default != 0) {
+        return default_role.color.clone();
+    }
+    default_role_color.to_string()
+}
+
+fn build_guild_member_response(
+    member: GuildMemberProfile,
+    guild: &Guild,
+    default_role_color: &str,
+    role_by_id: &HashMap<String, Role>,
+    mut role_ids: Vec<String>,
+    can_assign_roles: bool,
+) -> GuildMemberResponse {
+    sort_role_ids_by_authority(&mut role_ids, role_by_id);
+    let is_owner = member.user_id == guild.owner_id;
+    GuildMemberResponse {
+        user_id: member.user_id,
+        username: member.username.clone(),
+        display_name: normalize_member_display_name(
+            member.display_name.as_deref(),
+            &member.username,
+        ),
+        avatar_color: member.avatar_color,
+        highest_role_color: resolve_highest_role_color(
+            default_role_color,
+            role_by_id,
+            &role_ids,
+            is_owner,
+        ),
+        role_ids,
+        is_owner,
+        can_assign_roles,
+    }
 }
 
 async fn role_name_exists(
@@ -416,5 +803,70 @@ mod tests {
         assert_eq!(normalize_role_color("#3366FF").unwrap(), "#3366ff");
         assert!(normalize_role_color("3366ff").is_err());
         assert!(normalize_role_color("#zzz999").is_err());
+    }
+
+    #[test]
+    fn collect_assignable_custom_roles_excludes_everyone_and_higher_roles() {
+        let roles = vec![
+            Role {
+                id: "role-a".to_string(),
+                guild_id: "guild-1".to_string(),
+                name: "A".to_string(),
+                color: "#111111".to_string(),
+                position: 0,
+                permissions_bitflag: 0,
+                is_default: 0,
+                created_at: "2026-02-28T00:00:00.000Z".to_string(),
+                updated_at: "2026-02-28T00:00:00.000Z".to_string(),
+            },
+            Role {
+                id: "role-b".to_string(),
+                guild_id: "guild-1".to_string(),
+                name: "B".to_string(),
+                color: "#222222".to_string(),
+                position: 1,
+                permissions_bitflag: 0,
+                is_default: 0,
+                created_at: "2026-02-28T00:00:00.000Z".to_string(),
+                updated_at: "2026-02-28T00:00:00.000Z".to_string(),
+            },
+            Role {
+                id: "role-everyone".to_string(),
+                guild_id: "guild-1".to_string(),
+                name: "@everyone".to_string(),
+                color: "#99aab5".to_string(),
+                position: 2_147_483_647,
+                permissions_bitflag: 1537,
+                is_default: 1,
+                created_at: "2026-02-28T00:00:00.000Z".to_string(),
+                updated_at: "2026-02-28T00:00:00.000Z".to_string(),
+            },
+        ];
+
+        let owner_assignable =
+            collect_assignable_custom_role_ids(&roles, Some(permissions::RoleAuthority::Owner));
+        assert_eq!(owner_assignable, vec!["role-a", "role-b"]);
+
+        let manager_assignable = collect_assignable_custom_role_ids(
+            &roles,
+            Some(permissions::RoleAuthority::Position(1)),
+        );
+        assert!(manager_assignable.is_empty());
+
+        let helper_assignable = collect_assignable_custom_role_ids(
+            &roles,
+            Some(permissions::RoleAuthority::Position(0)),
+        );
+        assert_eq!(helper_assignable, vec!["role-b"]);
+    }
+
+    #[test]
+    fn normalize_role_ids_rejects_duplicates_and_blanks() {
+        assert!(normalize_role_ids(&["".to_string()]).is_err());
+        assert!(normalize_role_ids(&["role-1".to_string(), "role-1".to_string()]).is_err());
+        assert_eq!(
+            normalize_role_ids(&[" role-1 ".to_string(), "role-2".to_string()]).unwrap(),
+            vec!["role-1".to_string(), "role-2".to_string()]
+        );
     }
 }

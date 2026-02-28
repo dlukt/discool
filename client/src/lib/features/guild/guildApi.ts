@@ -9,6 +9,10 @@ import {
   type Guild,
   type GuildInvite,
   type GuildInviteWire,
+  type GuildMember,
+  type GuildMemberRoleData,
+  type GuildMemberRoleDataWire,
+  type GuildMemberWire,
   type GuildRole,
   type GuildRoleWire,
   type GuildWire,
@@ -25,14 +29,18 @@ import {
   toDeleteGuildRoleResult,
   toGuild,
   toGuildInvite,
+  toGuildMember,
+  toGuildMemberRoleData,
   toGuildRole,
   toInviteMetadata,
   toJoinGuildByInviteResult,
   toReorderGuildRolesInputWire,
   toRevokeGuildInviteResult,
   toUpdateGuildInputWire,
+  toUpdateGuildMemberRolesInputWire,
   toUpdateGuildRoleInputWire,
   type UpdateGuildInput,
+  type UpdateGuildMemberRolesInput,
   type UpdateGuildRoleInput,
 } from './types'
 
@@ -130,6 +138,26 @@ export function reorderRoles(
       body: JSON.stringify(toReorderGuildRolesInputWire(input)),
     },
   ).then((roles) => roles.map(toGuildRole))
+}
+
+export function listMembers(guildSlug: string): Promise<GuildMemberRoleData> {
+  return apiFetch<GuildMemberRoleDataWire>(
+    `/api/v1/guilds/${encodeURIComponent(guildSlug)}/members`,
+  ).then(toGuildMemberRoleData)
+}
+
+export function updateMemberRoles(
+  guildSlug: string,
+  memberUserId: string,
+  input: UpdateGuildMemberRolesInput,
+): Promise<GuildMember> {
+  return apiFetch<GuildMemberWire>(
+    `/api/v1/guilds/${encodeURIComponent(guildSlug)}/members/${encodeURIComponent(memberUserId)}/roles`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(toUpdateGuildMemberRolesInputWire(input)),
+    },
+  ).then(toGuildMember)
 }
 
 export function listInvites(guildSlug: string): Promise<GuildInvite[]> {

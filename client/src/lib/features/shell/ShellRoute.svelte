@@ -243,7 +243,7 @@ $effect(() => {
       {:else if activeMobilePanel === 'channels'}
         <ChannelList activeGuild={activeGuild} activeChannel={activeChannel} />
       {:else if activeMobilePanel === 'members'}
-        <MemberList />
+        <MemberList activeGuild={activeGuild} />
       {:else}
         <MessageArea
           mode={shellMode}
@@ -391,14 +391,14 @@ $effect(() => {
 
     {#if viewport === 'desktop'}
       <aside class="w-[240px] shrink-0 border-l border-border">
-        <MemberList />
+        <MemberList activeGuild={activeGuild} />
       </aside>
     {:else if isTabletMembersVisible}
       <aside
         class="absolute inset-y-0 right-0 z-10 w-[240px] border-l border-border bg-card shadow-2xl"
         data-testid="tablet-member-list"
       >
-        <MemberList />
+        <MemberList activeGuild={activeGuild} />
       </aside>
     {/if}
   </div>

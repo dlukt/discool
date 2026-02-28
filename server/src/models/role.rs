@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::{AppError, db::DbPool};
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -11,6 +13,13 @@ pub struct Role {
     pub is_default: i64,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RoleAssignment {
+    pub guild_id: String,
+    pub user_id: String,
+    pub role_id: String,
 }
 
 pub async fn list_roles_by_guild_id(pool: &DbPool, guild_id: &str) -> Result<Vec<Role>, AppError> {
@@ -394,6 +403,197 @@ pub async fn list_assigned_role_positions(
     .map_err(|err| AppError::Internal(err.to_string()))?;
 
     Ok(positions)
+}
+
+pub async fn list_assigned_role_ids(
+    pool: &DbPool,
+    guild_id: &str,
+    user_id: &str,
+) -> Result<Vec<String>, AppError> {
+    let role_ids = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_scalar::<_, String>(
+                "SELECT ra.role_id
+                 FROM role_assignments ra
+                 JOIN roles r ON r.id = ra.role_id
+                 WHERE ra.guild_id = $1
+                   AND ra.user_id = $2
+                   AND r.guild_id = $1
+                 ORDER BY r.position ASC, r.created_at ASC, r.id ASC",
+            )
+            .bind(guild_id)
+            .bind(user_id)
+            .fetch_all(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_scalar::<_, String>(
+                "SELECT ra.role_id
+                 FROM role_assignments ra
+                 JOIN roles r ON r.id = ra.role_id
+                 WHERE ra.guild_id = ?1
+                   AND ra.user_id = ?2
+                   AND r.guild_id = ?1
+                 ORDER BY r.position ASC, r.created_at ASC, r.id ASC",
+            )
+            .bind(guild_id)
+            .bind(user_id)
+            .fetch_all(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(role_ids)
+}
+
+pub async fn list_role_assignments_by_guild_id(
+    pool: &DbPool,
+    guild_id: &str,
+) -> Result<Vec<RoleAssignment>, AppError> {
+    let assignments = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_as(
+                "SELECT guild_id, user_id, role_id
+                 FROM role_assignments
+                 WHERE guild_id = $1
+                 ORDER BY user_id ASC, role_id ASC",
+            )
+            .bind(guild_id)
+            .fetch_all(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_as(
+                "SELECT guild_id, user_id, role_id
+                 FROM role_assignments
+                 WHERE guild_id = ?1
+                 ORDER BY user_id ASC, role_id ASC",
+            )
+            .bind(guild_id)
+            .fetch_all(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(assignments)
+}
+
+pub async fn set_role_assignments_for_user(
+    pool: &DbPool,
+    guild_id: &str,
+    user_id: &str,
+    role_ids: &[String],
+    assigned_at: &str,
+) -> Result<(), AppError> {
+    let desired_role_ids: HashSet<String> = role_ids.iter().cloned().collect();
+    match pool {
+        DbPool::Postgres(pool) => {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+
+            let existing_role_ids: HashSet<String> = sqlx::query_scalar::<_, String>(
+                "SELECT role_id
+                 FROM role_assignments
+                 WHERE guild_id = $1 AND user_id = $2",
+            )
+            .bind(guild_id)
+            .bind(user_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?
+            .into_iter()
+            .collect();
+
+            for role_id in existing_role_ids.difference(&desired_role_ids) {
+                sqlx::query(
+                    "DELETE FROM role_assignments
+                     WHERE guild_id = $1 AND user_id = $2 AND role_id = $3",
+                )
+                .bind(guild_id)
+                .bind(user_id)
+                .bind(role_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+            }
+
+            for role_id in desired_role_ids.difference(&existing_role_ids) {
+                sqlx::query(
+                    "INSERT INTO role_assignments (guild_id, user_id, role_id, assigned_at)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT DO NOTHING",
+                )
+                .bind(guild_id)
+                .bind(user_id)
+                .bind(role_id)
+                .bind(assigned_at)
+                .execute(&mut *tx)
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+            }
+
+            tx.commit()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+        }
+        DbPool::Sqlite(pool) => {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+
+            let existing_role_ids: HashSet<String> = sqlx::query_scalar::<_, String>(
+                "SELECT role_id
+                 FROM role_assignments
+                 WHERE guild_id = ?1 AND user_id = ?2",
+            )
+            .bind(guild_id)
+            .bind(user_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?
+            .into_iter()
+            .collect();
+
+            for role_id in existing_role_ids.difference(&desired_role_ids) {
+                sqlx::query(
+                    "DELETE FROM role_assignments
+                     WHERE guild_id = ?1 AND user_id = ?2 AND role_id = ?3",
+                )
+                .bind(guild_id)
+                .bind(user_id)
+                .bind(role_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+            }
+
+            for role_id in desired_role_ids.difference(&existing_role_ids) {
+                sqlx::query(
+                    "INSERT INTO role_assignments (guild_id, user_id, role_id, assigned_at)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT DO NOTHING",
+                )
+                .bind(guild_id)
+                .bind(user_id)
+                .bind(role_id)
+                .bind(assigned_at)
+                .execute(&mut *tx)
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+            }
+
+            tx.commit()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn delete_role_assignments_by_role_id(

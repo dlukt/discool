@@ -67,6 +67,10 @@ pub fn router(state: AppState) -> Router {
             get(roles::list_roles).post(roles::create_role),
         )
         .route(
+            "/guilds/{guild_slug}/members",
+            get(roles::list_guild_members),
+        )
+        .route(
             "/guilds/{guild_slug}/invites/{invite_code}",
             delete(invites::revoke_invite),
         )
@@ -97,6 +101,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/guilds/{guild_slug}/roles/{role_id}",
             patch(roles::update_role).delete(roles::delete_role),
+        )
+        .route(
+            "/guilds/{guild_slug}/members/{member_user_id}/roles",
+            patch(roles::update_member_roles),
         )
         .route("/guilds/{guild_slug}", patch(guilds::update_guild))
         .route(

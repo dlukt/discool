@@ -54,6 +54,28 @@ export type DeleteGuildRoleResult = {
   removedAssignmentCount: number
 }
 
+export type GuildMember = {
+  userId: string
+  username: string
+  displayName: string
+  avatarColor?: string
+  highestRoleColor: string
+  roleIds: string[]
+  isOwner: boolean
+  canAssignRoles: boolean
+}
+
+export type GuildMemberRoleData = {
+  members: GuildMember[]
+  roles: GuildRole[]
+  assignableRoleIds: string[]
+  canManageRoles: boolean
+}
+
+export type UpdateGuildMemberRolesInput = {
+  roleIds: string[]
+}
+
 export type InviteType = 'reusable' | 'single_use'
 
 export type GuildInvite = {
@@ -155,6 +177,28 @@ export type ReorderGuildRolesInputWire = {
 export type DeleteGuildRoleResultWire = {
   deleted_id: string
   removed_assignment_count: number
+}
+
+export type GuildMemberWire = {
+  user_id: string
+  username: string
+  display_name: string
+  avatar_color?: string
+  highest_role_color: string
+  role_ids: string[]
+  is_owner: boolean
+  can_assign_roles: boolean
+}
+
+export type GuildMemberRoleDataWire = {
+  members: GuildMemberWire[]
+  roles: GuildRoleWire[]
+  assignable_role_ids: string[]
+  can_manage_roles: boolean
+}
+
+export type UpdateGuildMemberRolesInputWire = {
+  role_ids: string[]
 }
 
 export type GuildInviteWire = {
@@ -293,6 +337,38 @@ export function toDeleteGuildRoleResult(
   return {
     deletedId: wire.deleted_id,
     removedAssignmentCount: wire.removed_assignment_count,
+  }
+}
+
+export function toGuildMember(wire: GuildMemberWire): GuildMember {
+  return {
+    userId: wire.user_id,
+    username: wire.username,
+    displayName: wire.display_name,
+    avatarColor: wire.avatar_color,
+    highestRoleColor: wire.highest_role_color,
+    roleIds: [...wire.role_ids],
+    isOwner: wire.is_owner,
+    canAssignRoles: wire.can_assign_roles,
+  }
+}
+
+export function toGuildMemberRoleData(
+  wire: GuildMemberRoleDataWire,
+): GuildMemberRoleData {
+  return {
+    members: wire.members.map(toGuildMember),
+    roles: wire.roles.map(toGuildRole),
+    assignableRoleIds: [...wire.assignable_role_ids],
+    canManageRoles: wire.can_manage_roles,
+  }
+}
+
+export function toUpdateGuildMemberRolesInputWire(
+  input: UpdateGuildMemberRolesInput,
+): UpdateGuildMemberRolesInputWire {
+  return {
+    role_ids: input.roleIds,
   }
 }
 

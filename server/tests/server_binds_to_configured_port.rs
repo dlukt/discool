@@ -2535,6 +2535,19 @@ async fn roles_mutations_require_authentication() {
     )
     .await;
     assert_eq!(response_status(&res), 401);
+
+    let res = http_response(&addr, "/api/v1/guilds/lobby/members").await;
+    assert_eq!(response_status(&res), 401);
+
+    let update_member_roles_body = json!({ "role_ids": ["example-role"] }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        "/api/v1/guilds/lobby/members/example-user/roles",
+        &update_member_roles_body,
+        "bad-token",
+    )
+    .await;
+    assert_eq!(response_status(&res), 401);
 }
 
 #[tokio::test]
@@ -2582,6 +2595,21 @@ async fn roles_mutations_reject_non_owner() {
     let reorder_body = json!({ "role_ids": [role_id] }).to_string();
     let reorder_path = format!("/api/v1/guilds/{guild_slug}/roles/reorder");
     let res = http_patch_with_bearer(&addr, &reorder_path, &reorder_body, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let members_path = format!("/api/v1/guilds/{guild_slug}/members");
+    let res = http_response_with_bearer(&addr, &members_path, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let update_member_roles_path = format!("/api/v1/guilds/{guild_slug}/members/{role_id}/roles");
+    let update_member_roles_body = json!({ "role_ids": [role_id] }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        &update_member_roles_path,
+        &update_member_roles_body,
+        &other_token,
+    )
+    .await;
     assert_eq!(response_status(&res), 403);
 }
 
@@ -2744,6 +2772,221 @@ async fn roles_owner_crud_hierarchy_and_delete_cleanup_work() {
     let delete_everyone_path = format!("/api/v1/guilds/{guild_slug}/roles/{everyone_role_id}");
     let res = http_delete_with_bearer(&addr, &delete_everyone_path, &owner_token).await;
     assert_eq!(response_status(&res), 422);
+}
+
+#[tokio::test]
+async fn member_role_assignment_enforces_hierarchy_and_invalidates_permission_cache() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "owner-member-roles", [71u8; 32]).await;
+    let manager_token = register_and_authenticate(&addr, "manager-member-roles", [72u8; 32]).await;
+    let target_token = register_and_authenticate(&addr, "target-member-roles", [73u8; 32]).await;
+
+    let guild_body = json!({ "name": "Member Roles Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap().to_string();
+    let guild_id = guild["data"]["id"].as_str().unwrap().to_string();
+
+    let roles_path = format!("/api/v1/guilds/{guild_slug}/roles");
+    let create_high_body = json!({ "name": "High Guard", "color": "#a855f7" }).to_string();
+    let res = http_post_with_bearer(&addr, &roles_path, &create_high_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let high_role: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let high_role_id = high_role["data"]["id"].as_str().unwrap().to_string();
+
+    let create_manager_body = json!({ "name": "Role Manager", "color": "#3366ff" }).to_string();
+    let res = http_post_with_bearer(&addr, &roles_path, &create_manager_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let manager_role: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let manager_role_id = manager_role["data"]["id"].as_str().unwrap().to_string();
+
+    let create_helper_body = json!({ "name": "Invite Helper", "color": "#22aa88" }).to_string();
+    let res = http_post_with_bearer(&addr, &roles_path, &create_helper_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let helper_role: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let helper_role_id = helper_role["data"]["id"].as_str().unwrap().to_string();
+
+    let update_manager_path = format!("/api/v1/guilds/{guild_slug}/roles/{manager_role_id}");
+    let update_manager_permissions = json!({ "permissions_bitflag": (16 + 64) }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        &update_manager_path,
+        &update_manager_permissions,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 200);
+
+    let update_helper_path = format!("/api/v1/guilds/{guild_slug}/roles/{helper_role_id}");
+    let update_helper_permissions = json!({ "permissions_bitflag": 64 }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        &update_helper_path,
+        &update_helper_permissions,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 200);
+
+    let url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let manager_id = sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username = ?1")
+        .bind("manager-member-roles")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let target_id = sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username = ?1")
+        .bind("target-member-roles")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO guild_members (guild_id, user_id, joined_at, joined_via_invite_code) VALUES (?1, ?2, ?3, NULL)",
+    )
+    .bind(&guild_id)
+    .bind(&manager_id)
+    .bind("2026-02-28T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO guild_members (guild_id, user_id, joined_at, joined_via_invite_code) VALUES (?1, ?2, ?3, NULL)",
+    )
+    .bind(&guild_id)
+    .bind(&target_id)
+    .bind("2026-02-28T00:00:01Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO role_assignments (guild_id, user_id, role_id, assigned_at) VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(&guild_id)
+    .bind(&manager_id)
+    .bind(&manager_role_id)
+    .bind("2026-02-28T00:00:02Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    drop(pool);
+
+    let members_path = format!("/api/v1/guilds/{guild_slug}/members");
+    let res = http_response_with_bearer(&addr, &members_path, &manager_token).await;
+    assert_eq!(response_status(&res), 200);
+    let listed: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let assignable_role_ids = listed["data"]["assignable_role_ids"].as_array().unwrap();
+    assert!(assignable_role_ids.contains(&json!(helper_role_id)));
+    assert!(!assignable_role_ids.contains(&json!(high_role_id)));
+    assert!(!assignable_role_ids.contains(&json!(manager_role_id)));
+
+    let update_target_path = format!("/api/v1/guilds/{guild_slug}/members/{target_id}/roles");
+    let high_role_assignment = json!({ "role_ids": [high_role_id.clone()] }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        &update_target_path,
+        &high_role_assignment,
+        &manager_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 403);
+
+    let unknown_role_assignment = json!({ "role_ids": ["unknown-role-id"] }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        &update_target_path,
+        &unknown_role_assignment,
+        &manager_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 422);
+
+    let helper_assignment = json!({ "role_ids": [helper_role_id.clone()] }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        &update_target_path,
+        &helper_assignment,
+        &manager_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 200);
+    let assigned: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        assigned["data"]["role_ids"],
+        json!([helper_role_id.clone()])
+    );
+
+    let res = http_patch_with_bearer(
+        &addr,
+        &update_target_path,
+        &helper_assignment,
+        &manager_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 200);
+
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let assigned_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM role_assignments WHERE guild_id = ?1 AND user_id = ?2 AND role_id = ?3",
+    )
+    .bind(&guild_id)
+    .bind(&target_id)
+    .bind(&helper_role_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(assigned_count, 1);
+    drop(pool);
+
+    let invite_create_body = json!({ "type": "single_use" }).to_string();
+    let invites_path = format!("/api/v1/guilds/{guild_slug}/invites");
+    let res = http_post_with_bearer(&addr, &invites_path, &invite_create_body, &target_token).await;
+    assert_eq!(response_status(&res), 201);
+
+    let remove_helper_assignment = json!({ "role_ids": [] }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        &update_target_path,
+        &remove_helper_assignment,
+        &manager_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 200);
+    let removed: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(removed["data"]["role_ids"], json!([]));
+
+    let res = http_post_with_bearer(&addr, &invites_path, &invite_create_body, &target_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let assigned_after_removal = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM role_assignments WHERE guild_id = ?1 AND user_id = ?2 AND role_id = ?3",
+    )
+    .bind(&guild_id)
+    .bind(&target_id)
+    .bind(&helper_role_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(assigned_after_removal, 0);
 }
 
 #[tokio::test]

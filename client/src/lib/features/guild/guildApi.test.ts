@@ -11,7 +11,9 @@ import {
   joinGuildByInvite,
   listGuilds,
   listInvites,
+  listMembers,
   revokeInvite,
+  updateMemberRoles,
 } from './guildApi'
 
 describe('guildApi invites', () => {
@@ -203,5 +205,109 @@ describe('guildApi guild listing', () => {
         createdAt: '2026-02-28T00:00:00.000Z',
       },
     ])
+  })
+})
+
+describe('guildApi member role assignment', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('listMembers maps member + role assignment payload', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      members: [
+        {
+          user_id: 'user-1',
+          username: 'manager',
+          display_name: 'Role Manager',
+          highest_role_color: '#3366ff',
+          role_ids: ['role-manager'],
+          is_owner: false,
+          can_assign_roles: true,
+        },
+      ],
+      roles: [
+        {
+          id: 'role-manager',
+          name: 'Role Manager',
+          color: '#3366ff',
+          position: 1,
+          permissions_bitflag: 80,
+          is_default: false,
+          is_system: false,
+          can_edit: true,
+          can_delete: true,
+          created_at: '2026-02-28T00:00:00.000Z',
+        },
+      ],
+      assignable_role_ids: ['role-manager'],
+      can_manage_roles: true,
+    })
+
+    await expect(listMembers('makers')).resolves.toEqual({
+      members: [
+        {
+          userId: 'user-1',
+          username: 'manager',
+          displayName: 'Role Manager',
+          avatarColor: undefined,
+          highestRoleColor: '#3366ff',
+          roleIds: ['role-manager'],
+          isOwner: false,
+          canAssignRoles: true,
+        },
+      ],
+      roles: [
+        {
+          id: 'role-manager',
+          name: 'Role Manager',
+          color: '#3366ff',
+          position: 1,
+          permissionsBitflag: 80,
+          isDefault: false,
+          isSystem: false,
+          canEdit: true,
+          canDelete: true,
+          createdAt: '2026-02-28T00:00:00.000Z',
+        },
+      ],
+      assignableRoleIds: ['role-manager'],
+      canManageRoles: true,
+    })
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/guilds/makers/members')
+  })
+
+  it('updateMemberRoles posts expected payload and maps member response', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      user_id: 'user-2',
+      username: 'target',
+      display_name: 'Target User',
+      highest_role_color: '#22aa88',
+      role_ids: ['role-helper'],
+      is_owner: false,
+      can_assign_roles: true,
+    })
+
+    await expect(
+      updateMemberRoles('makers', 'user-2', { roleIds: ['role-helper'] }),
+    ).resolves.toEqual({
+      userId: 'user-2',
+      username: 'target',
+      displayName: 'Target User',
+      avatarColor: undefined,
+      highestRoleColor: '#22aa88',
+      roleIds: ['role-helper'],
+      isOwner: false,
+      canAssignRoles: true,
+    })
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/guilds/makers/members/user-2/roles',
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ role_ids: ['role-helper'] }),
+      },
+    )
   })
 })

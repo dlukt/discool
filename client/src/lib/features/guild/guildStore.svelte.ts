@@ -7,9 +7,11 @@ import {
   createRole as createRoleApi,
   deleteRole as deleteRoleApi,
   listGuilds as listGuildsApi,
+  listMembers as listMembersApi,
   listRoles as listRolesApi,
   reorderRoles as reorderRolesApi,
   updateGuild as updateGuildApi,
+  updateMemberRoles as updateMemberRolesApi,
   updateRole as updateRoleApi,
   uploadGuildIcon as uploadGuildIconApi,
 } from './guildApi'
@@ -18,8 +20,11 @@ import type {
   CreateGuildRoleInput,
   DeleteGuildRoleResult,
   Guild,
+  GuildMember,
+  GuildMemberRoleData,
   GuildRole,
   UpdateGuildInput,
+  UpdateGuildMemberRolesInput,
   UpdateGuildRoleInput,
 } from './types'
 
@@ -86,9 +91,25 @@ function replaceRoleInGuild(guildSlug: string, role: GuildRole): GuildRole[] {
   return nextRoles
 }
 
+function setMemberRoleDataForGuild(
+  guildSlug: string,
+  data: GuildMemberRoleData,
+): GuildMemberRoleData {
+  const nextData: GuildMemberRoleData = {
+    members: [...data.members],
+    roles: [...data.roles],
+    assignableRoleIds: [...data.assignableRoleIds],
+    canManageRoles: data.canManageRoles,
+  }
+  guildState.memberRoleDataByGuild[guildSlug] = nextData
+  guildState.rolesByGuild[guildSlug] = [...nextData.roles]
+  return nextData
+}
+
 export const guildState = $state({
   guilds: [] as Guild[],
   rolesByGuild: {} as Record<string, GuildRole[]>,
+  memberRoleDataByGuild: {} as Record<string, GuildMemberRoleData>,
   loading: false,
   saving: false,
   loaded: false,
@@ -171,6 +192,35 @@ export const guildState = $state({
     } catch (err) {
       guildState.error =
         err instanceof Error ? err.message : 'Failed to load roles'
+      throw err
+    }
+  },
+
+  loadMembers: async (
+    guildSlug: string,
+    force = false,
+  ): Promise<GuildMemberRoleData> => {
+    if (!guildSlug) {
+      return {
+        members: [],
+        roles: [],
+        assignableRoleIds: [],
+        canManageRoles: false,
+      }
+    }
+    if (guildState.memberRoleDataByGuild[guildSlug] && !force) {
+      return guildState.memberRoleDataByGuild[guildSlug]
+    }
+
+    guildState.error = null
+    try {
+      return setMemberRoleDataForGuild(
+        guildSlug,
+        await listMembersApi(guildSlug),
+      )
+    } catch (err) {
+      guildState.error =
+        err instanceof Error ? err.message : 'Failed to load members'
       throw err
     }
   },
@@ -263,6 +313,59 @@ export const guildState = $state({
     ...(guildState.rolesByGuild[guildSlug] ?? []),
   ],
 
+  updateMemberRoles: async (
+    guildSlug: string,
+    memberUserId: string,
+    input: UpdateGuildMemberRolesInput,
+  ): Promise<GuildMember> => {
+    guildState.saving = true
+    guildState.error = null
+    try {
+      const updated = await updateMemberRolesApi(guildSlug, memberUserId, input)
+      const existingData = guildState.memberRoleDataByGuild[guildSlug]
+      if (!existingData) {
+        await guildState.loadMembers(guildSlug, true)
+        return updated
+      }
+      guildState.memberRoleDataByGuild[guildSlug] = {
+        ...existingData,
+        members: existingData.members.map((member) =>
+          member.userId === updated.userId ? updated : member,
+        ),
+      }
+      return updated
+    } catch (err) {
+      guildState.error =
+        err instanceof Error ? err.message : 'Failed to update member roles'
+      throw err
+    } finally {
+      guildState.saving = false
+    }
+  },
+
+  memberRoleDataForGuild: (guildSlug: string): GuildMemberRoleData => {
+    const existing = guildState.memberRoleDataByGuild[guildSlug]
+    if (existing) {
+      return {
+        members: [...existing.members],
+        roles: [...existing.roles],
+        assignableRoleIds: [...existing.assignableRoleIds],
+        canManageRoles: existing.canManageRoles,
+      }
+    }
+    return {
+      members: [],
+      roles: [],
+      assignableRoleIds: [],
+      canManageRoles: false,
+    }
+  },
+
+  memberByUserId: (guildSlug: string, userId: string): GuildMember | null =>
+    guildState.memberRoleDataByGuild[guildSlug]?.members.find(
+      (member) => member.userId === userId,
+    ) ?? null,
+
   bySlug: (guildSlug: string): Guild | null =>
     guildState.guilds.find((guild) => guild.slug === guildSlug) ?? null,
 
@@ -278,6 +381,7 @@ export const guildState = $state({
     guildState.saving = false
     guildState.loaded = false
     guildState.rolesByGuild = {}
+    guildState.memberRoleDataByGuild = {}
     guildState.error = null
   },
 })
