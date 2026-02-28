@@ -119,6 +119,39 @@ describe('ShellRoute', () => {
     expect(getByRole('heading', { name: 'Members' })).toBeInTheDocument()
   })
 
+  it('shows invite action only in channel mode', async () => {
+    const props = buildProps()
+    const view = render(ShellRoute, props)
+    expect(
+      view.getByRole('button', { name: 'Invite people' }),
+    ).toBeInTheDocument()
+
+    await view.rerender(
+      buildProps({
+        mode: 'settings',
+        route: {
+          result: {
+            path: {
+              condition: 'exact-match',
+              original: '/settings',
+              params: {},
+            },
+            querystring: {
+              condition: 'exact-match',
+              original: {},
+              params: {},
+            },
+            status: 200,
+          },
+        },
+      }),
+    )
+
+    expect(
+      view.queryByRole('button', { name: 'Invite people' }),
+    ).not.toBeInTheDocument()
+  })
+
   it('emits route path changes for persistence integration', async () => {
     const onRouteResolved = vi.fn()
     const props = buildProps({ onRouteResolved })

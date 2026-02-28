@@ -14,6 +14,8 @@ import GuildRail from '$lib/features/guild/GuildRail.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import GuildSettings from '$lib/features/guild/GuildSettings.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
+import InviteModal from '$lib/features/guild/InviteModal.svelte'
+// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import MemberList from '$lib/features/members/MemberList.svelte'
 
 type ShellMode = 'home' | 'channel' | 'settings' | 'admin'
@@ -59,6 +61,8 @@ let tabletMembersVisible = $state(false)
 let mobilePanel = $state<MobilePanel>('messages')
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let guildSettingsOpen = $state(false)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let inviteModalOpen = $state(false)
 let mainContent = $state<HTMLElement | null>(null)
 let lastFocusedPath = $state<string | null>(null)
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
@@ -97,6 +101,8 @@ let activeGuild = $derived(params.guild ?? 'lobby')
 let activeChannel = $derived(params.channel ?? 'general')
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let canOpenGuildSettings = $derived(shellMode === 'channel')
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let canOpenInvites = $derived(shellMode === 'channel')
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 function openMobilePanel(panel: MobilePanel) {
@@ -129,8 +135,18 @@ function openGuildSettings() {
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function openInviteModal() {
+  inviteModalOpen = true
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 async function handleCloseGuildSettings() {
   guildSettingsOpen = false
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+async function handleCloseInviteModal() {
+  inviteModalOpen = false
 }
 
 $effect(() => {
@@ -187,6 +203,15 @@ $effect(() => {
           >
             Settings
           </a>
+          {#if canOpenInvites}
+            <button
+              type="button"
+              class="rounded-md bg-muted px-2 py-1 text-xs text-foreground"
+              onclick={openInviteModal}
+            >
+              Invite people
+            </button>
+          {/if}
           {#if canOpenGuildSettings}
             <button
               type="button"
@@ -322,6 +347,15 @@ $effect(() => {
           >
             Settings
           </a>
+          {#if canOpenInvites}
+            <button
+              type="button"
+              class="rounded-md bg-muted px-3 py-2 text-xs font-medium text-foreground"
+              onclick={openInviteModal}
+            >
+              Invite people
+            </button>
+          {/if}
           {#if canOpenGuildSettings}
             <button
               type="button"
@@ -374,4 +408,9 @@ $effect(() => {
   open={guildSettingsOpen}
   guildSlug={activeGuild}
   onClose={handleCloseGuildSettings}
+/>
+<InviteModal
+  open={inviteModalOpen}
+  guildSlug={activeGuild}
+  onClose={handleCloseInviteModal}
 />

@@ -2493,6 +2493,139 @@ async fn categories_mutations_reject_non_owner() {
 }
 
 #[tokio::test]
+async fn invites_mutations_require_authentication() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let create_body = json!({ "type": "reusable" }).to_string();
+    let res = http_post(&addr, "/api/v1/guilds/lobby/invites", &create_body).await;
+    assert_eq!(response_status(&res), 401);
+
+    let res = http_response(&addr, "/api/v1/guilds/lobby/invites").await;
+    assert_eq!(response_status(&res), 401);
+
+    let res =
+        http_delete_with_bearer(&addr, "/api/v1/guilds/lobby/invites/test", "bad-token").await;
+    assert_eq!(response_status(&res), 401);
+}
+
+#[tokio::test]
+async fn invites_owner_can_create_list_and_revoke_with_single_use_metadata() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "owner-invites", [56u8; 32]).await;
+    let guild_body = json!({ "name": "Invite Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap();
+
+    let invites_path = format!("/api/v1/guilds/{guild_slug}/invites");
+
+    let create_reusable = json!({ "type": "reusable" }).to_string();
+    let res = http_post_with_bearer(&addr, &invites_path, &create_reusable, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let reusable: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let reusable_code = reusable["data"]["code"].as_str().unwrap().to_string();
+    assert_eq!(reusable["data"]["type"], json!("reusable"));
+    assert_eq!(reusable["data"]["uses_remaining"], json!(0));
+    assert_eq!(reusable["data"]["creator_username"], json!("owner-invites"));
+    assert_eq!(
+        reusable["data"]["invite_url"],
+        json!(format!("/invite/{reusable_code}"))
+    );
+
+    let create_single_use = json!({ "type": "single_use" }).to_string();
+    let res = http_post_with_bearer(&addr, &invites_path, &create_single_use, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let single_use: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let single_use_code = single_use["data"]["code"].as_str().unwrap().to_string();
+    assert_eq!(single_use["data"]["type"], json!("single_use"));
+    assert_eq!(single_use["data"]["uses_remaining"], json!(1));
+
+    let res = http_response_with_bearer(&addr, &invites_path, &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+    let listed: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let invites = listed["data"].as_array().unwrap();
+    assert_eq!(invites.len(), 2);
+    let listed_single_use = invites
+        .iter()
+        .find(|item| item["code"] == json!(single_use_code))
+        .unwrap();
+    assert_eq!(listed_single_use["type"], json!("single_use"));
+    assert_eq!(listed_single_use["uses_remaining"], json!(1));
+    assert_eq!(listed_single_use["revoked"], json!(false));
+
+    let revoke_path = format!("{invites_path}/{single_use_code}");
+    let res = http_delete_with_bearer(&addr, &revoke_path, &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+    let revoked: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(revoked["data"]["code"], json!(single_use_code));
+    assert_eq!(revoked["data"]["revoked"], json!(true));
+
+    let res = http_response_with_bearer(&addr, &invites_path, &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+    let listed_after_revoke: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let invites_after_revoke = listed_after_revoke["data"].as_array().unwrap();
+    assert_eq!(invites_after_revoke.len(), 1);
+    assert_eq!(invites_after_revoke[0]["code"], json!(reusable_code));
+}
+
+#[tokio::test]
+async fn invites_mutations_reject_non_owner() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "owner-invites", [57u8; 32]).await;
+    let other_token = register_and_authenticate(&addr, "other-invites", [58u8; 32]).await;
+    let guild_body = json!({ "name": "Invite Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap();
+
+    let invites_path = format!("/api/v1/guilds/{guild_slug}/invites");
+    let create_reusable = json!({ "type": "reusable" }).to_string();
+    let res = http_post_with_bearer(&addr, &invites_path, &create_reusable, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let created: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let invite_code = created["data"]["code"].as_str().unwrap();
+
+    let create_other = json!({ "type": "single_use" }).to_string();
+    let res = http_post_with_bearer(&addr, &invites_path, &create_other, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let res = http_response_with_bearer(&addr, &invites_path, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let delete_path = format!("{invites_path}/{invite_code}");
+    let res = http_delete_with_bearer(&addr, &delete_path, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+}
+
+#[tokio::test]
 async fn users_profile_requires_authentication() {
     use serde_json::json;
 

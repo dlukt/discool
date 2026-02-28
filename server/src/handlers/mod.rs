@@ -20,6 +20,7 @@ mod channels;
 mod guilds;
 mod health;
 mod instance;
+mod invites;
 mod users;
 
 // Keep `connect-src` strict until we have a safe, non-Host-header-derived allow-list for WebSockets.
@@ -51,8 +52,16 @@ pub fn router(state: AppState) -> Router {
             get(channels::list_channels).post(channels::create_channel),
         )
         .route(
+            "/guilds/{guild_slug}/invites",
+            get(invites::list_invites).post(invites::create_invite),
+        )
+        .route(
             "/guilds/{guild_slug}/categories",
             get(categories::list_categories).post(categories::create_category),
+        )
+        .route(
+            "/guilds/{guild_slug}/invites/{invite_code}",
+            delete(invites::revoke_invite),
         )
         .route(
             "/guilds/{guild_slug}/categories/reorder",

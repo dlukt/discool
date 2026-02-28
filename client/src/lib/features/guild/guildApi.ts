@@ -2,10 +2,18 @@ import { apiFetch } from '$lib/api'
 
 import {
   type CreateGuildInput,
+  type CreateGuildInviteInput,
   type Guild,
+  type GuildInvite,
+  type GuildInviteWire,
   type GuildWire,
+  type RevokeGuildInviteResult,
+  type RevokeGuildInviteResultWire,
   toCreateGuildInputWire,
+  toCreateGuildInviteInputWire,
   toGuild,
+  toGuildInvite,
+  toRevokeGuildInviteResult,
   toUpdateGuildInputWire,
   type UpdateGuildInput,
 } from './types'
@@ -46,4 +54,35 @@ export function uploadGuildIcon(guildSlug: string, file: File): Promise<Guild> {
       body: formData,
     },
   ).then(toGuild)
+}
+
+export function listInvites(guildSlug: string): Promise<GuildInvite[]> {
+  return apiFetch<GuildInviteWire[]>(
+    `/api/v1/guilds/${encodeURIComponent(guildSlug)}/invites`,
+  ).then((invites) => invites.map(toGuildInvite))
+}
+
+export function createInvite(
+  guildSlug: string,
+  input: CreateGuildInviteInput,
+): Promise<GuildInvite> {
+  return apiFetch<GuildInviteWire>(
+    `/api/v1/guilds/${encodeURIComponent(guildSlug)}/invites`,
+    {
+      method: 'POST',
+      body: JSON.stringify(toCreateGuildInviteInputWire(input)),
+    },
+  ).then(toGuildInvite)
+}
+
+export function revokeInvite(
+  guildSlug: string,
+  inviteCode: string,
+): Promise<RevokeGuildInviteResult> {
+  return apiFetch<RevokeGuildInviteResultWire>(
+    `/api/v1/guilds/${encodeURIComponent(guildSlug)}/invites/${encodeURIComponent(inviteCode)}`,
+    {
+      method: 'DELETE',
+    },
+  ).then(toRevokeGuildInviteResult)
 }

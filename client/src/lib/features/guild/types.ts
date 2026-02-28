@@ -19,6 +19,28 @@ export type UpdateGuildInput = {
   description?: string | null
 }
 
+export type InviteType = 'reusable' | 'single_use'
+
+export type GuildInvite = {
+  code: string
+  type: InviteType
+  usesRemaining: number
+  createdBy: string
+  creatorUsername: string
+  createdAt: string
+  revoked: boolean
+  inviteUrl: string
+}
+
+export type CreateGuildInviteInput = {
+  type: InviteType
+}
+
+export type RevokeGuildInviteResult = {
+  code: string
+  revoked: boolean
+}
+
 export type GuildWire = {
   id: string
   slug: string
@@ -38,6 +60,26 @@ export type CreateGuildInputWire = {
 export type UpdateGuildInputWire = {
   name?: string
   description?: string | null
+}
+
+export type GuildInviteWire = {
+  code: string
+  type: InviteType
+  uses_remaining: number
+  created_by: string
+  creator_username: string
+  created_at: string
+  revoked: boolean
+  invite_url: string
+}
+
+export type CreateGuildInviteInputWire = {
+  type: InviteType
+}
+
+export type RevokeGuildInviteResultWire = {
+  code: string
+  revoked: boolean
 }
 
 export function toGuild(wire: GuildWire): Guild {
@@ -73,4 +115,34 @@ export function toUpdateGuildInputWire(
     wire.description = input.description
   }
   return wire
+}
+
+export function toGuildInvite(wire: GuildInviteWire): GuildInvite {
+  return {
+    code: wire.code,
+    type: wire.type,
+    usesRemaining: wire.uses_remaining,
+    createdBy: wire.created_by,
+    creatorUsername: wire.creator_username,
+    createdAt: wire.created_at,
+    revoked: wire.revoked,
+    inviteUrl: wire.invite_url,
+  }
+}
+
+export function toCreateGuildInviteInputWire(
+  input: CreateGuildInviteInput,
+): CreateGuildInviteInputWire {
+  return {
+    type: input.type,
+  }
+}
+
+export function toRevokeGuildInviteResult(
+  wire: RevokeGuildInviteResultWire,
+): RevokeGuildInviteResult {
+  return {
+    code: wire.code,
+    revoked: wire.revoked,
+  }
 }
