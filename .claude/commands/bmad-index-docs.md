@@ -1,6 +1,6 @@
 ---
 name: 'index-docs'
-description: 'Generates or updates an index.md of all documents in the specified directory'
+description: 'Generates or updates an index.md to reference all docs in the folder. Use if user requests to 'create an index of all files [here]' or 'reindex the folder [here].'
 ---
 
 # index-docs
