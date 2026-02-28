@@ -21,17 +21,69 @@ const wsMock = vi.hoisted(() => {
   return { state, wsClient }
 })
 
+const historyApiMock = vi.hoisted(() => {
+  const state = {
+    responses: [] as Array<{
+      messages: Array<{
+        id: string
+        guildSlug: string
+        channelSlug: string
+        authorUserId: string
+        authorUsername: string
+        authorDisplayName: string
+        authorAvatarColor: string | null
+        authorRoleColor: string
+        content: string
+        isSystem: boolean
+        createdAt: string
+        optimistic: boolean
+        clientNonce?: string
+      }>
+      cursor: string | null
+    }>,
+  }
+
+  const fetchChannelHistory = vi.fn(async () => {
+    return state.responses.shift() ?? { messages: [], cursor: null }
+  })
+
+  return { state, fetchChannelHistory }
+})
+
 vi.mock('$lib/ws/client', () => ({
   wsClient: wsMock.wsClient,
 }))
 
+vi.mock('./messageApi', () => ({
+  fetchChannelHistory: historyApiMock.fetchChannelHistory,
+}))
+
 import { messageState } from './messageStore.svelte'
+
+function makeMessage(id: string, createdAt: string) {
+  return {
+    id,
+    guildSlug: 'lobby',
+    channelSlug: 'general',
+    authorUserId: 'user-1',
+    authorUsername: 'alice',
+    authorDisplayName: 'Alice',
+    authorAvatarColor: '#3366ff',
+    authorRoleColor: '#3366ff',
+    content: id,
+    isSystem: false,
+    createdAt,
+    optimistic: false,
+  }
+}
 
 describe('messageState', () => {
   beforeEach(() => {
     messageState.clearAll()
     wsMock.state.sendResult = true
     wsMock.wsClient.send.mockClear()
+    historyApiMock.fetchChannelHistory.mockClear()
+    historyApiMock.state.responses = []
   })
 
   it('creates optimistic message and reconciles when message_create arrives', () => {
@@ -83,6 +135,107 @@ describe('messageState', () => {
     expect(reconciled[0]?.id).toBe('message-1')
     expect(reconciled[0]?.optimistic).toBe(false)
     expect(reconciled[0]?.content).toBe('Hello &lt;b&gt;team&lt;/b&gt;')
+  })
+
+  it('loads initial and older message history pages with cursor state', async () => {
+    historyApiMock.state.responses = [
+      {
+        messages: [
+          makeMessage('msg-003', '2026-02-28T00:00:02Z'),
+          makeMessage('msg-004', '2026-02-28T00:00:03Z'),
+        ],
+        cursor: 'cursor-1',
+      },
+      {
+        messages: [
+          makeMessage('msg-001', '2026-02-28T00:00:00Z'),
+          makeMessage('msg-002', '2026-02-28T00:00:01Z'),
+        ],
+        cursor: null,
+      },
+    ]
+
+    await messageState.ensureHistoryLoaded('lobby', 'general')
+
+    expect(historyApiMock.fetchChannelHistory).toHaveBeenCalledWith(
+      'lobby',
+      'general',
+      {
+        limit: 50,
+      },
+    )
+    expect(
+      messageState.timeline('lobby', 'general').map((message) => message.id),
+    ).toEqual(['msg-003', 'msg-004'])
+    expect(messageState.historyStateForChannel('lobby', 'general').cursor).toBe(
+      'cursor-1',
+    )
+    expect(
+      messageState.historyStateForChannel('lobby', 'general').hasMoreHistory,
+    ).toBe(true)
+
+    await messageState.loadOlderHistory('lobby', 'general')
+
+    expect(historyApiMock.fetchChannelHistory).toHaveBeenLastCalledWith(
+      'lobby',
+      'general',
+      {
+        limit: 50,
+        before: 'cursor-1',
+      },
+    )
+    expect(
+      messageState.timeline('lobby', 'general').map((message) => message.id),
+    ).toEqual(['msg-001', 'msg-002', 'msg-003', 'msg-004'])
+    expect(
+      messageState.historyStateForChannel('lobby', 'general').hasMoreHistory,
+    ).toBe(false)
+  })
+
+  it('tracks scroll restoration and pending-new counters per channel', () => {
+    messageState.setScrollTop('lobby', 'general', 187.6)
+    expect(messageState.scrollTopForChannel('lobby', 'general')).toBe(188)
+
+    messageState.addPendingNew('lobby', 'general', 2)
+    expect(messageState.pendingNewCountForChannel('lobby', 'general')).toBe(2)
+
+    messageState.clearPendingNew('lobby', 'general')
+    expect(messageState.pendingNewCountForChannel('lobby', 'general')).toBe(0)
+  })
+
+  it('keeps older pages visible when active timeline hits memory cap', async () => {
+    const channelKey = 'lobby:general'
+    messageState.setActiveChannel('lobby', 'general')
+    messageState.messagesByChannel[channelKey] = Array.from(
+      { length: 4_000 },
+      (_, index) =>
+        makeMessage(
+          `seed-${index}`,
+          `t-${String(index + 1_000).padStart(5, '0')}`,
+        ),
+    )
+    messageState.version += 1
+
+    historyApiMock.state.responses = [
+      { messages: [], cursor: 'cursor-older' },
+      {
+        messages: [makeMessage('older-1', 't-00999')],
+        cursor: 'cursor-next',
+      },
+    ]
+
+    await messageState.ensureHistoryLoaded('lobby', 'general')
+    await messageState.loadOlderHistory('lobby', 'general')
+
+    const ids = messageState
+      .timeline('lobby', 'general')
+      .map((message) => message.id)
+    expect(ids).toHaveLength(4_000)
+    expect(ids[0]).toBe('older-1')
+    expect(ids).not.toContain('seed-3999')
+    expect(messageState.historyStateForChannel('lobby', 'general').cursor).toBe(
+      'cursor-next',
+    )
   })
 
   it('removes optimistic message immediately when websocket send fails', () => {

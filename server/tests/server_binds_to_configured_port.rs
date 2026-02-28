@@ -328,6 +328,19 @@ async fn http_post(addr: &str, path: &str, json_body: &str) -> String {
     String::from_utf8_lossy(&buf).to_string()
 }
 
+async fn http_get_with_bearer(addr: &str, path: &str, token: &str) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    String::from_utf8_lossy(&buf).to_string()
+}
+
 async fn http_post_with_bearer(addr: &str, path: &str, json_body: &str, token: &str) -> String {
     let mut stream = TcpStream::connect(addr).await.unwrap();
 
@@ -4500,5 +4513,135 @@ async fn websocket_message_create_rejects_forbidden_and_invalid_payloads() {
     assert_eq!(
         invalid_payload_error["d"]["details"]["reason"],
         json!("invalid_payload_shape")
+    );
+}
+
+#[tokio::test]
+async fn rest_message_history_supports_cursor_pagination_and_permissions() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "rest-msg-owner", [121u8; 32]).await;
+    let member_token = register_and_authenticate(&addr, "rest-msg-member", [122u8; 32]).await;
+    let outsider_token = register_and_authenticate(&addr, "rest-msg-outsider", [123u8; 32]).await;
+
+    let guild_body = json!({ "name": "History Guild" }).to_string();
+    let create_guild_res =
+        http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&create_guild_res), 201);
+    let guild_payload: serde_json::Value =
+        serde_json::from_str(response_body(&create_guild_res)).unwrap();
+    let guild_slug = guild_payload["data"]["slug"].as_str().unwrap().to_string();
+    let guild_id = guild_payload["data"]["id"].as_str().unwrap().to_string();
+
+    let url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let owner_id = sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username = ?1")
+        .bind("rest-msg-owner")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let member_id = sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username = ?1")
+        .bind("rest-msg-member")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let channel_id = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM channels WHERE guild_id = ?1 AND slug = ?2",
+    )
+    .bind(&guild_id)
+    .bind("general")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO guild_members (guild_id, user_id, joined_at, joined_via_invite_code)
+         VALUES (?1, ?2, ?3, NULL)",
+    )
+    .bind(&guild_id)
+    .bind(&member_id)
+    .bind("2026-02-28T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let seed_messages = [
+        ("msg-001", "Older A", "2026-02-28T00:00:01Z"),
+        ("msg-002", "Older B", "2026-02-28T00:00:01Z"),
+        ("msg-003", "Recent A", "2026-02-28T00:00:02Z"),
+        ("msg-004", "Recent B", "2026-02-28T00:00:03Z"),
+    ];
+    for (message_id, content, created_at) in seed_messages {
+        sqlx::query(
+            "INSERT INTO messages (id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
+        )
+        .bind(message_id)
+        .bind(&guild_id)
+        .bind(&channel_id)
+        .bind(&owner_id)
+        .bind(content)
+        .bind(created_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let first_path = format!("/api/v1/guilds/{guild_slug}/channels/general/messages?limit=2");
+    let first_res = http_get_with_bearer(&addr, &first_path, &member_token).await;
+    assert_eq!(response_status(&first_res), 200);
+    let first_payload: serde_json::Value = serde_json::from_str(response_body(&first_res)).unwrap();
+    let first_data = first_payload["data"].as_array().unwrap();
+    assert_eq!(first_data.len(), 2);
+    assert_eq!(first_data[0]["id"], json!("msg-003"));
+    assert_eq!(first_data[1]["id"], json!("msg-004"));
+    let cursor = first_payload["cursor"]
+        .as_str()
+        .expect("expected history cursor on first page")
+        .to_string();
+
+    let second_path =
+        format!("/api/v1/guilds/{guild_slug}/channels/general/messages?limit=2&before={cursor}");
+    let second_res = http_get_with_bearer(&addr, &second_path, &member_token).await;
+    assert_eq!(response_status(&second_res), 200);
+    let second_payload: serde_json::Value =
+        serde_json::from_str(response_body(&second_res)).unwrap();
+    let second_data = second_payload["data"].as_array().unwrap();
+    assert_eq!(second_data.len(), 2);
+    assert_eq!(second_data[0]["id"], json!("msg-001"));
+    assert_eq!(second_data[1]["id"], json!("msg-002"));
+    assert!(second_payload["cursor"].is_null());
+
+    let forbidden_res = http_get_with_bearer(&addr, &first_path, &outsider_token).await;
+    assert_eq!(response_status(&forbidden_res), 403);
+    let forbidden_payload: serde_json::Value =
+        serde_json::from_str(response_body(&forbidden_res)).unwrap();
+    assert_eq!(forbidden_payload["error"]["code"], json!("FORBIDDEN"));
+
+    let invalid_cursor_path =
+        format!("/api/v1/guilds/{guild_slug}/channels/general/messages?before=bad-cursor");
+    let invalid_cursor_res = http_get_with_bearer(&addr, &invalid_cursor_path, &member_token).await;
+    assert_eq!(response_status(&invalid_cursor_res), 422);
+    let invalid_cursor_payload: serde_json::Value =
+        serde_json::from_str(response_body(&invalid_cursor_res)).unwrap();
+    assert_eq!(
+        invalid_cursor_payload["error"]["code"],
+        json!("VALIDATION_ERROR")
     );
 }

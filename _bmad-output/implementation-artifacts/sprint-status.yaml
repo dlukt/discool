@@ -99,7 +99,7 @@ development_status:
   epic-6: in-progress
   6-1-websocket-gateway-and-connection-management: done
   6-2-send-and-display-text-messages: done
-  6-3-message-history-and-virtual-scrolling: backlog
+  6-3-message-history-and-virtual-scrolling: done
   6-4-edit-and-delete-own-messages: backlog
   6-5-emoji-reactions: backlog
   6-6-file-upload-and-sharing: backlog

@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use serde::Serialize;
 use uuid::Uuid;
@@ -20,6 +21,7 @@ const MAX_MESSAGE_CHARS: usize = 2_000;
 const MAX_CLIENT_NONCE_CHARS: usize = 120;
 const DEFAULT_ROLE_COLOR: &str = "#99aab5";
 const OWNER_ROLE_COLOR: &str = "#f59e0b";
+const MAX_LIST_MESSAGES_LIMIT: i64 = 200;
 
 #[derive(Debug, Clone)]
 pub struct CreateMessageInput {
@@ -45,6 +47,18 @@ pub struct MessageResponse {
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_nonce: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListChannelMessagesInput {
+    pub limit: i64,
+    pub before: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListChannelMessagesResult {
+    pub messages: Vec<MessageResponse>,
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,18 +122,77 @@ pub async fn list_channel_messages(
     user_id: &str,
     guild_slug: &str,
     channel_slug: &str,
-    limit: i64,
-) -> Result<Vec<MessageResponse>, AppError> {
-    let normalized_limit = limit.clamp(1, 200);
+    input: ListChannelMessagesInput,
+) -> Result<ListChannelMessagesResult, AppError> {
+    let normalized_limit = input.limit.clamp(1, MAX_LIST_MESSAGES_LIMIT);
     let access = load_channel_with_view_access(pool, user_id, guild_slug, channel_slug).await?;
-    let messages =
-        message::list_messages_by_channel_id(pool, &access.channel.id, normalized_limit).await?;
-    let mut responses = Vec::with_capacity(messages.len());
-    for item in messages {
+    let before_cursor = decode_before_cursor(input.before.as_deref())?;
+    let page = message::list_messages_page_by_channel_id(
+        pool,
+        &access.channel.id,
+        before_cursor.as_ref(),
+        normalized_limit,
+    )
+    .await?;
+
+    let next_cursor = if page.has_more {
+        page.messages.first().map(|message| {
+            encode_cursor(&message::MessageCursor {
+                created_at: message.created_at.clone(),
+                id: message.id.clone(),
+            })
+        })
+    } else {
+        None
+    };
+
+    let mut responses = Vec::with_capacity(page.messages.len());
+    for item in page.messages {
         responses
             .push(build_message_response(pool, &access.guild, &access.channel, item, None).await?);
     }
-    Ok(responses)
+    Ok(ListChannelMessagesResult {
+        messages: responses,
+        cursor: next_cursor,
+    })
+}
+
+fn decode_before_cursor(value: Option<&str>) -> Result<Option<message::MessageCursor>, AppError> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    decode_cursor(trimmed).map(Some)
+}
+
+fn decode_cursor(encoded: &str) -> Result<message::MessageCursor, AppError> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| AppError::ValidationError("before cursor is invalid".to_string()))?;
+    let decoded_str = std::str::from_utf8(&decoded)
+        .map_err(|_| AppError::ValidationError("before cursor is invalid".to_string()))?;
+    let (created_at, id) = decoded_str
+        .split_once('|')
+        .ok_or_else(|| AppError::ValidationError("before cursor is invalid".to_string()))?;
+    if id.trim().is_empty() {
+        return Err(AppError::ValidationError(
+            "before cursor is invalid".to_string(),
+        ));
+    }
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .map_err(|_| AppError::ValidationError("before cursor is invalid".to_string()))?;
+
+    Ok(message::MessageCursor {
+        created_at: created_at.to_string(),
+        id: id.to_string(),
+    })
+}
+
+fn encode_cursor(cursor: &message::MessageCursor) -> String {
+    URL_SAFE_NO_PAD.encode(format!("{}|{}", cursor.created_at, cursor.id))
 }
 
 async fn build_message_response(
@@ -402,5 +475,30 @@ mod tests {
         assert!(!has_required_channel_permissions(
             permissions::SEND_MESSAGES
         ));
+    }
+
+    #[test]
+    fn decode_cursor_rejects_invalid_values() {
+        assert!(decode_cursor("not-a-valid-cursor").is_err());
+        let malformed = URL_SAFE_NO_PAD.encode("bad-format");
+        assert!(decode_cursor(&malformed).is_err());
+    }
+
+    #[test]
+    fn encode_and_decode_cursor_round_trip() {
+        let cursor = message::MessageCursor {
+            created_at: "2026-02-28T00:00:00Z".to_string(),
+            id: "message-123".to_string(),
+        };
+        let encoded = encode_cursor(&cursor);
+        let decoded = decode_cursor(&encoded).unwrap();
+        assert_eq!(decoded.created_at, cursor.created_at);
+        assert_eq!(decoded.id, cursor.id);
+    }
+
+    #[test]
+    fn decode_before_cursor_handles_defaults() {
+        assert!(decode_before_cursor(None).unwrap().is_none());
+        assert!(decode_before_cursor(Some("   ")).unwrap().is_none());
     }
 }

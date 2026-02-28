@@ -1,6 +1,6 @@
 <script lang="ts">
 // biome-ignore-all lint/correctness/noUnusedVariables: Svelte template usage isn't detected reliably.
-import type { ChatMessage } from './messageStore.svelte'
+import type { ChatMessage } from './types'
 
 type Props = {
   message: ChatMessage

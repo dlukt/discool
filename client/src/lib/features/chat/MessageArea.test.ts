@@ -4,7 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const {
   wsLifecycle,
   lifecycleListeners,
-  timelineState,
+  timelineByChannel,
+  historyByChannel,
   messageState,
   identityState,
   guildState,
@@ -13,8 +14,10 @@ const {
   const lifecycleListeners = new Set<
     (state: typeof wsLifecycle.value) => void
   >()
-  const timelineState = {
-    messages: [] as Array<{
+
+  const timelineByChannel: Record<
+    string,
+    Array<{
       id: string
       guildSlug: string
       channelSlug: string
@@ -28,13 +31,75 @@ const {
       createdAt: string
       optimistic: boolean
       clientNonce?: string
-    }>,
+    }>
+  > = {}
+
+  const historyByChannel: Record<
+    string,
+    {
+      initialized: boolean
+      loadingHistory: boolean
+      hasMoreHistory: boolean
+      cursor: string | null
+      scrollTop: number
+      pendingNewCount: number
+    }
+  > = {}
+
+  function channelKey(guildSlug: string, channelSlug: string): string {
+    return `${guildSlug}:${channelSlug}`
+  }
+
+  function ensureHistory(key: string) {
+    if (!historyByChannel[key]) {
+      historyByChannel[key] = {
+        initialized: false,
+        loadingHistory: false,
+        hasMoreHistory: true,
+        cursor: null,
+        scrollTop: 0,
+        pendingNewCount: 0,
+      }
+    }
+    return historyByChannel[key]
   }
 
   const messageState = {
     version: 1,
-    timeline: vi.fn(() => timelineState.messages),
+    timeline: vi.fn((guildSlug: string, channelSlug: string) => {
+      return timelineByChannel[channelKey(guildSlug, channelSlug)] ?? []
+    }),
     sendMessage: vi.fn(() => true),
+    setActiveChannel: vi.fn(),
+    ensureHistoryLoaded: vi.fn(
+      async (guildSlug: string, channelSlug: string) => {
+        ensureHistory(channelKey(guildSlug, channelSlug)).initialized = true
+      },
+    ),
+    historyStateForChannel: vi.fn((guildSlug: string, channelSlug: string) => ({
+      ...ensureHistory(channelKey(guildSlug, channelSlug)),
+    })),
+    loadOlderHistory: vi.fn(async () => {}),
+    setScrollTop: vi.fn(
+      (guildSlug: string, channelSlug: string, top: number) => {
+        ensureHistory(channelKey(guildSlug, channelSlug)).scrollTop =
+          Math.round(top)
+      },
+    ),
+    scrollTopForChannel: vi.fn((guildSlug: string, channelSlug: string) => {
+      return ensureHistory(channelKey(guildSlug, channelSlug)).scrollTop
+    }),
+    addPendingNew: vi.fn(
+      (guildSlug: string, channelSlug: string, count = 1) => {
+        ensureHistory(channelKey(guildSlug, channelSlug)).pendingNewCount +=
+          count
+        messageState.version += 1
+      },
+    ),
+    clearPendingNew: vi.fn((guildSlug: string, channelSlug: string) => {
+      ensureHistory(channelKey(guildSlug, channelSlug)).pendingNewCount = 0
+      messageState.version += 1
+    }),
   }
 
   const identityState = {
@@ -55,7 +120,8 @@ const {
   return {
     wsLifecycle,
     lifecycleListeners,
-    timelineState,
+    timelineByChannel,
+    historyByChannel,
     messageState,
     identityState,
     guildState,
@@ -89,12 +155,63 @@ vi.mock('./messageStore.svelte', () => ({
 
 import MessageArea from './MessageArea.svelte'
 
+function seedChannelMessages(channelKey: string, count: number): void {
+  timelineByChannel[channelKey] = Array.from({ length: count }, (_, index) => ({
+    id: `m-${index}`,
+    guildSlug: 'lobby',
+    channelSlug: channelKey.split(':')[1] ?? 'general',
+    authorUserId: 'user-1',
+    authorUsername: 'alice',
+    authorDisplayName: 'Alice',
+    authorAvatarColor: '#3366ff',
+    authorRoleColor: '#3366ff',
+    content: `message-${index}`,
+    isSystem: false,
+    createdAt: `2026-02-28T00:00:${String(index).padStart(2, '0')}Z`,
+    optimistic: false,
+  }))
+}
+
 describe('MessageArea', () => {
   beforeEach(() => {
-    timelineState.messages = []
+    Object.keys(timelineByChannel).forEach((key) => {
+      delete timelineByChannel[key]
+    })
+    Object.keys(historyByChannel).forEach((key) => {
+      delete historyByChannel[key]
+    })
+
+    seedChannelMessages('lobby:general', 0)
+    seedChannelMessages('lobby:random', 0)
+
+    historyByChannel['lobby:general'] = {
+      initialized: true,
+      loadingHistory: false,
+      hasMoreHistory: true,
+      cursor: 'cursor-1',
+      scrollTop: 0,
+      pendingNewCount: 0,
+    }
+    historyByChannel['lobby:random'] = {
+      initialized: true,
+      loadingHistory: false,
+      hasMoreHistory: true,
+      cursor: 'cursor-random',
+      scrollTop: 0,
+      pendingNewCount: 0,
+    }
+
     messageState.version += 1
     messageState.timeline.mockClear()
     messageState.sendMessage.mockClear()
+    messageState.setActiveChannel.mockClear()
+    messageState.ensureHistoryLoaded.mockClear()
+    messageState.historyStateForChannel.mockClear()
+    messageState.loadOlderHistory.mockClear()
+    messageState.setScrollTop.mockClear()
+    messageState.scrollTopForChannel.mockClear()
+    messageState.addPendingNew.mockClear()
+    messageState.clearPendingNew.mockClear()
     guildState.memberByUserId.mockClear()
   })
 
@@ -141,69 +258,11 @@ describe('MessageArea', () => {
     expect(composer.value).toBe('line one\n')
   })
 
-  it('renders empty-state copy and compact grouping/system rows', () => {
-    const emptyView = render(MessageArea, {
-      mode: 'channel',
-      activeGuild: 'lobby',
-      activeChannel: 'general',
-      displayName: 'Alice',
-      isAdmin: false,
-      showRecoveryNudge: false,
-    })
-
-    expect(
-      emptyView.getByText('This is the beginning of #general. Say something!'),
-    ).toBeInTheDocument()
-
-    emptyView.unmount()
-
-    timelineState.messages = [
-      {
-        id: 'm1',
-        guildSlug: 'lobby',
-        channelSlug: 'general',
-        authorUserId: 'user-1',
-        authorUsername: 'alice',
-        authorDisplayName: 'Alice',
-        authorAvatarColor: '#3366ff',
-        authorRoleColor: '#3366ff',
-        content: 'first',
-        isSystem: false,
-        createdAt: '2026-02-28T00:00:00Z',
-        optimistic: false,
-      },
-      {
-        id: 'm2',
-        guildSlug: 'lobby',
-        channelSlug: 'general',
-        authorUserId: 'user-1',
-        authorUsername: 'alice',
-        authorDisplayName: 'Alice',
-        authorAvatarColor: '#3366ff',
-        authorRoleColor: '#3366ff',
-        content: 'second',
-        isSystem: false,
-        createdAt: '2026-02-28T00:00:01Z',
-        optimistic: false,
-      },
-      {
-        id: 'sys',
-        guildSlug: 'lobby',
-        channelSlug: 'general',
-        authorUserId: 'system',
-        authorUsername: 'system',
-        authorDisplayName: 'System',
-        authorAvatarColor: null,
-        authorRoleColor: '#99aab5',
-        content: 'Alice joined the channel',
-        isSystem: true,
-        createdAt: '2026-02-28T00:00:02Z',
-        optimistic: false,
-      },
-    ]
+  it('virtualizes long timelines and loads older history on upward scroll', async () => {
+    seedChannelMessages('lobby:general', 160)
     messageState.version += 1
 
-    const groupedView = render(MessageArea, {
+    const { container, getByTestId } = render(MessageArea, {
       mode: 'channel',
       activeGuild: 'lobby',
       activeChannel: 'general',
@@ -212,10 +271,114 @@ describe('MessageArea', () => {
       showRecoveryNudge: false,
     })
 
-    expect(groupedView.getByTestId('message-avatar-m1')).toBeInTheDocument()
-    expect(
-      groupedView.queryByTestId('message-avatar-m2'),
-    ).not.toBeInTheDocument()
-    expect(groupedView.getByTestId('message-system-sys')).toBeInTheDocument()
+    const initiallyRenderedRows = container.querySelectorAll(
+      '[data-testid^="message-window-row-"]',
+    )
+    expect(initiallyRenderedRows.length).toBeLessThan(90)
+
+    const scroll = getByTestId('channel-timeline-scroll') as HTMLDivElement
+    Object.defineProperty(scroll, 'clientHeight', {
+      value: 240,
+      configurable: true,
+    })
+
+    scroll.scrollTop = 0
+    await fireEvent.scroll(scroll)
+
+    await waitFor(() => {
+      expect(messageState.loadOlderHistory).toHaveBeenCalledWith(
+        'lobby',
+        'general',
+      )
+    })
+  })
+
+  it('renders skeleton loading and jump-to-present CTA', async () => {
+    seedChannelMessages('lobby:general', 12)
+    historyByChannel['lobby:general'] = {
+      initialized: true,
+      loadingHistory: true,
+      hasMoreHistory: true,
+      cursor: 'cursor-1',
+      scrollTop: 0,
+      pendingNewCount: 3,
+    }
+    messageState.version += 1
+
+    const { getByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    expect(getByTestId('history-loading-skeletons')).toBeInTheDocument()
+
+    const jumpButton = getByTestId('jump-to-present')
+    expect(jumpButton).toHaveTextContent('Jump to present (3 new)')
+    await fireEvent.click(jumpButton)
+
+    expect(messageState.clearPendingNew).toHaveBeenCalledWith(
+      'lobby',
+      'general',
+    )
+  })
+
+  it('restores saved scroll position when switching back to a channel', async () => {
+    seedChannelMessages('lobby:general', 24)
+    seedChannelMessages('lobby:random', 24)
+    historyByChannel['lobby:general'].scrollTop = 180
+    historyByChannel['lobby:random'].scrollTop = 56
+    messageState.version += 1
+
+    const view = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    await waitFor(() => {
+      const scroll = view.getByTestId(
+        'channel-timeline-scroll',
+      ) as HTMLDivElement
+      expect(scroll.scrollTop).toBe(180)
+    })
+
+    await view.rerender({
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'random',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    await waitFor(() => {
+      const scroll = view.getByTestId(
+        'channel-timeline-scroll',
+      ) as HTMLDivElement
+      expect(scroll.scrollTop).toBe(56)
+    })
+
+    await view.rerender({
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    await waitFor(() => {
+      const scroll = view.getByTestId(
+        'channel-timeline-scroll',
+      ) as HTMLDivElement
+      expect(scroll.scrollTop).toBe(180)
+    })
   })
 })

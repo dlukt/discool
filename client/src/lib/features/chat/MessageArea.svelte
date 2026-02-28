@@ -10,6 +10,7 @@ import { wsClient } from '$lib/ws/client'
 import type { WsLifecycleState } from '$lib/ws/protocol'
 import MessageBubble from './MessageBubble.svelte'
 import { type ChatAuthorInput, messageState } from './messageStore.svelte'
+import type { ChatMessage } from './types'
 
 type Props = {
   mode: 'home' | 'channel' | 'settings' | 'admin'
@@ -21,6 +22,22 @@ type Props = {
   onOpenSettings?: () => void | Promise<void>
   onDismissRecoveryNudge?: () => void | Promise<void>
 }
+
+type VirtualTimelineRow = {
+  id: string
+  top: number
+  height: number
+  compact: boolean
+  message: ChatMessage
+}
+
+const MESSAGE_ROW_HEIGHT = 74
+const COMPACT_MESSAGE_ROW_HEIGHT = 46
+const SYSTEM_ROW_HEIGHT = 36
+const VIRTUAL_OVERSCAN_PX = 320
+const HISTORY_LOAD_TRIGGER_PX = 120
+const JUMP_TO_PRESENT_THRESHOLD_PX = 320
+const HISTORY_SKELETON_COUNT = 4
 
 let {
   mode,
@@ -46,12 +63,83 @@ let wsLifecycleState = $state<WsLifecycleState>(wsClient.getLifecycleState())
 let showReconnectingBanner = $derived(wsLifecycleState === 'reconnecting')
 let composerInput = $state<HTMLTextAreaElement | null>(null)
 let composerValue = $state('')
+let timelineViewport = $state<HTMLDivElement | null>(null)
+let scrollTop = $state(0)
+let viewportHeight = $state(320)
+let distanceFromBottomPx = $state(0)
+let restoringChannelKey = $state<string | null>(null)
+let loadHistoryInFlight = $state(false)
+let lastTailMessageId = $state<string | null>(null)
+let skipNextTailChange = $state(false)
+
+let channelKey = $derived(
+  mode === 'channel' ? `${activeGuild}:${activeChannel}` : null,
+)
 
 let timelineMessages = $derived.by(() => {
   const _messageVersion = messageState.version
   if (mode !== 'channel') return []
   return messageState.timeline(activeGuild, activeChannel)
 })
+
+let channelHistory = $derived.by(() => {
+  const _messageVersion = messageState.version
+  if (mode !== 'channel') {
+    return {
+      initialized: false,
+      loadingHistory: false,
+      hasMoreHistory: false,
+      cursor: null,
+      scrollTop: 0,
+      pendingNewCount: 0,
+    }
+  }
+  return messageState.historyStateForChannel(activeGuild, activeChannel)
+})
+
+let virtualRows = $derived.by(() => {
+  let top = 0
+  const rows: VirtualTimelineRow[] = []
+
+  for (const [index, message] of timelineMessages.entries()) {
+    const previous = index > 0 ? timelineMessages[index - 1] : null
+    const compact =
+      Boolean(
+        previous &&
+          !previous.isSystem &&
+          !message.isSystem &&
+          previous.authorUserId === message.authorUserId,
+      ) && !message.isSystem
+    const height = message.isSystem
+      ? SYSTEM_ROW_HEIGHT
+      : compact
+        ? COMPACT_MESSAGE_ROW_HEIGHT
+        : MESSAGE_ROW_HEIGHT
+
+    rows.push({
+      id: message.id,
+      top,
+      height,
+      compact,
+      message,
+    })
+    top += height
+  }
+
+  return {
+    rows,
+    totalHeight: top,
+  }
+})
+
+let visibleRows = $derived.by(() => {
+  const start = Math.max(0, scrollTop - VIRTUAL_OVERSCAN_PX)
+  const end = scrollTop + viewportHeight + VIRTUAL_OVERSCAN_PX
+  return virtualRows.rows.filter(
+    (row) => row.top + row.height >= start && row.top <= end,
+  )
+})
+
 let currentSessionUser = $derived(identityState.session?.user ?? null)
 let currentMember = $derived(
   currentSessionUser
@@ -65,6 +153,12 @@ let currentRoleColor = $derived(
 )
 let emptyStateCopy = $derived(
   `This is the beginning of #${activeChannel}. Say something!`,
+)
+
+let showJumpToPresent = $derived(
+  mode === 'channel' &&
+    (distanceFromBottomPx > JUMP_TO_PRESENT_THRESHOLD_PX ||
+      channelHistory.pendingNewCount > 0),
 )
 
 async function handleOpenSettings() {
@@ -122,6 +216,85 @@ function handleComposerKeydown(event: KeyboardEvent) {
   sendComposerMessage()
 }
 
+function updateViewportMetrics(
+  target: HTMLDivElement | null,
+  guildSlug = activeGuild,
+  channelSlug = activeChannel,
+): void {
+  if (!target) {
+    scrollTop = 0
+    viewportHeight = 320
+    distanceFromBottomPx = 0
+    return
+  }
+
+  scrollTop = target.scrollTop
+  viewportHeight = target.clientHeight || 320
+  distanceFromBottomPx = Math.max(
+    0,
+    target.scrollHeight - (target.scrollTop + target.clientHeight),
+  )
+
+  if (mode === 'channel') {
+    messageState.setScrollTop(guildSlug, channelSlug, target.scrollTop)
+    if (distanceFromBottomPx <= 24) {
+      messageState.clearPendingNew(guildSlug, channelSlug)
+    }
+  }
+}
+
+function isNearBottom(threshold = 24): boolean {
+  return distanceFromBottomPx <= threshold
+}
+
+async function loadOlderHistoryIfNeeded(): Promise<void> {
+  if (mode !== 'channel' || loadHistoryInFlight) return
+  if (!channelHistory.hasMoreHistory || channelHistory.loadingHistory) return
+  if (scrollTop > HISTORY_LOAD_TRIGGER_PX) return
+
+  const viewport = timelineViewport
+  if (!viewport) return
+  const loadGuild = activeGuild
+  const loadChannel = activeChannel
+  const loadKey = `${loadGuild}:${loadChannel}`
+
+  loadHistoryInFlight = true
+  const beforeHeight = viewport.scrollHeight
+  const beforeTop = viewport.scrollTop
+
+  try {
+    await messageState.loadOlderHistory(loadGuild, loadChannel)
+  } finally {
+    await tick()
+    const nextViewport = timelineViewport
+    if (nextViewport && `${activeGuild}:${activeChannel}` === loadKey) {
+      const delta = Math.max(0, nextViewport.scrollHeight - beforeHeight)
+      nextViewport.scrollTop = beforeTop + delta
+      updateViewportMetrics(nextViewport, loadGuild, loadChannel)
+    }
+    loadHistoryInFlight = false
+  }
+}
+
+function handleTimelineScroll(event: Event): void {
+  const target = event.currentTarget as HTMLDivElement | null
+  if (!target) return
+  updateViewportMetrics(target, activeGuild, activeChannel)
+  if (target.scrollTop <= HISTORY_LOAD_TRIGGER_PX) {
+    void loadOlderHistoryIfNeeded()
+  }
+}
+
+function jumpToPresent(): void {
+  const target = timelineViewport
+  if (!target) return
+  target.scrollTop = target.scrollHeight
+  updateViewportMetrics(target, activeGuild, activeChannel)
+  if (mode === 'channel') {
+    messageState.clearPendingNew(activeGuild, activeChannel)
+  }
+}
+
 $effect(() => {
   if (mode !== 'channel') return
   activeGuild
@@ -129,6 +302,99 @@ $effect(() => {
   void tick().then(() => {
     composerInput?.focus()
   })
+})
+
+$effect(() => {
+  viewportHeight = timelineViewport?.clientHeight || 320
+})
+
+$effect(() => {
+  if (mode !== 'channel') {
+    restoringChannelKey = null
+    lastTailMessageId = null
+    skipNextTailChange = false
+    return
+  }
+
+  const currentKey = `${activeGuild}:${activeChannel}`
+  const restoreGuild = activeGuild
+  const restoreChannel = activeChannel
+  const currentHistory = messageState.historyStateForChannel(
+    activeGuild,
+    activeChannel,
+  )
+  messageState.setActiveChannel(activeGuild, activeChannel)
+  void messageState
+    .ensureHistoryLoaded(activeGuild, activeChannel)
+    .catch(() => {})
+
+  if (restoringChannelKey === currentKey) return
+
+  restoringChannelKey = currentKey
+  skipNextTailChange = !currentHistory.initialized
+  lastTailMessageId = timelineMessages.at(-1)?.id ?? null
+
+  void tick().then(() => {
+    if (
+      mode !== 'channel' ||
+      `${activeGuild}:${activeChannel}` !== currentKey
+    ) {
+      return
+    }
+    const viewport = timelineViewport
+    if (!viewport) return
+
+    const savedTop = messageState.scrollTopForChannel(
+      restoreGuild,
+      restoreChannel,
+    )
+    if (savedTop > 0) {
+      viewport.scrollTop = savedTop
+    } else {
+      viewport.scrollTop = viewport.scrollHeight
+      messageState.clearPendingNew(restoreGuild, restoreChannel)
+    }
+    updateViewportMetrics(viewport, restoreGuild, restoreChannel)
+
+    if (viewport.scrollTop <= HISTORY_LOAD_TRIGGER_PX) {
+      void loadOlderHistoryIfNeeded()
+    }
+  })
+})
+
+$effect(() => {
+  if (mode !== 'channel') return
+
+  const _messageVersion = messageState.version
+  const currentTail = timelineMessages.at(-1)?.id ?? null
+  if (!currentTail || currentTail === lastTailMessageId) return
+
+  if (skipNextTailChange) {
+    skipNextTailChange = false
+    lastTailMessageId = currentTail
+    return
+  }
+
+  lastTailMessageId = currentTail
+
+  if (isNearBottom(JUMP_TO_PRESENT_THRESHOLD_PX)) {
+    const tailGuild = activeGuild
+    const tailChannel = activeChannel
+    const tailKey = `${tailGuild}:${tailChannel}`
+    void tick().then(() => {
+      if (mode !== 'channel' || `${activeGuild}:${activeChannel}` !== tailKey) {
+        return
+      }
+      const viewport = timelineViewport
+      if (!viewport) return
+      viewport.scrollTop = viewport.scrollHeight
+      updateViewportMetrics(viewport, tailGuild, tailChannel)
+      messageState.clearPendingNew(tailGuild, tailChannel)
+    })
+    return
+  }
+
+  messageState.addPendingNew(activeGuild, activeChannel, 1)
 })
 
 onMount(() => {
@@ -195,29 +461,69 @@ onMount(() => {
 
     <section class="min-h-0 flex-1 rounded-md border border-border bg-card p-4">
       <h2 class="text-sm font-medium text-foreground">Channel Timeline</h2>
-      <div class="mt-3 space-y-2" data-testid="channel-timeline">
-        {#if timelineMessages.length === 0}
-          <p
-            class="rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground"
-            data-testid="message-empty-state"
-          >
-            {emptyStateCopy}
-          </p>
-        {:else}
-          {#each timelineMessages as message, index (message.id)}
-            {@const previous = index > 0 ? timelineMessages[index - 1] : null}
-            <MessageBubble
-              {message}
-              compact={Boolean(
-                previous &&
-                  !previous.isSystem &&
-                  !message.isSystem &&
-                  previous.authorUserId === message.authorUserId
-              )}
-            />
-          {/each}
-        {/if}
+      <div class="mt-3 min-h-0 flex-1" data-testid="channel-timeline">
+        <div
+          class="h-full overflow-y-auto rounded-md border border-border/40 bg-background/20 px-2 py-2"
+          bind:this={timelineViewport}
+          onscroll={handleTimelineScroll}
+          role="log"
+          aria-live="polite"
+          aria-relevant="additions text"
+          data-testid="channel-timeline-scroll"
+        >
+          {#if channelHistory.loadingHistory}
+            <div class="space-y-2 pb-2" data-testid="history-loading-skeletons">
+              {#each Array.from({ length: HISTORY_SKELETON_COUNT }) as _, index (`skeleton-${index}`)}
+                <div class="flex animate-pulse gap-3 rounded-md px-2 py-1">
+                  <span class="h-8 w-8 shrink-0 rounded-full bg-muted"></span>
+                  <span class="min-w-0 flex-1 space-y-1 pt-1">
+                    <span class="block h-3 w-24 rounded bg-muted"></span>
+                    <span class="block h-3 w-4/5 rounded bg-muted"></span>
+                  </span>
+                </div>
+              {/each}
+            </div>
+          {/if}
+
+          {#if timelineMessages.length === 0 && !channelHistory.loadingHistory}
+            <p
+              class="rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground"
+              data-testid="message-empty-state"
+            >
+              {emptyStateCopy}
+            </p>
+          {:else if timelineMessages.length > 0}
+            <div class="relative" style={`height: ${virtualRows.totalHeight}px;`}>
+              {#each visibleRows as row (row.id)}
+                <div
+                  class="absolute inset-x-0"
+                  style={`top: ${row.top}px; height: ${row.height}px;`}
+                  data-testid={`message-window-row-${row.message.id}`}
+                >
+                  <MessageBubble message={row.message} compact={row.compact} />
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
       </div>
+
+      {#if mode === 'channel' && showJumpToPresent}
+        <div class="mt-2 flex justify-end">
+          <button
+            type="button"
+            class="rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
+            onclick={jumpToPresent}
+            data-testid="jump-to-present"
+          >
+            {#if channelHistory.pendingNewCount > 0}
+              Jump to present ({channelHistory.pendingNewCount} new)
+            {:else}
+              Jump to present
+            {/if}
+          </button>
+        </div>
+      {/if}
     </section>
 
     {#if mode === 'channel'}

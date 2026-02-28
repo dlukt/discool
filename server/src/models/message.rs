@@ -12,6 +12,18 @@ pub struct Message {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageCursor {
+    pub created_at: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MessagePage {
+    pub messages: Vec<Message>,
+    pub has_more: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_message(
     pool: &DbPool,
@@ -106,38 +118,92 @@ pub async fn list_messages_by_channel_id(
     channel_id: &str,
     limit: i64,
 ) -> Result<Vec<Message>, AppError> {
+    let page = list_messages_page_by_channel_id(pool, channel_id, None, limit).await?;
+    Ok(page.messages)
+}
+
+pub async fn list_messages_page_by_channel_id(
+    pool: &DbPool,
+    channel_id: &str,
+    before: Option<&MessageCursor>,
+    limit: i64,
+) -> Result<MessagePage, AppError> {
     let normalized_limit = limit.clamp(1, 200);
-    let messages = match pool {
-        DbPool::Postgres(pool) => {
-            sqlx::query_as(
-                "SELECT id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at
-                 FROM messages
-                 WHERE channel_id = $1
-                 ORDER BY created_at ASC
-                 LIMIT $2",
-            )
-            .bind(channel_id)
-            .bind(normalized_limit)
-            .fetch_all(pool)
-            .await
+    let fetch_limit = normalized_limit + 1;
+    let mut messages = match pool {
+        DbPool::Postgres(pool) => match before {
+            Some(cursor) => {
+                sqlx::query_as(
+                    "SELECT id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at
+                     FROM messages
+                     WHERE channel_id = $1
+                       AND (created_at < $2 OR (created_at = $2 AND id < $3))
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT $4",
+                )
+                .bind(channel_id)
+                .bind(&cursor.created_at)
+                .bind(&cursor.id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await
+            }
+            None => {
+                sqlx::query_as(
+                    "SELECT id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at
+                     FROM messages
+                     WHERE channel_id = $1
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT $2",
+                )
+                .bind(channel_id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await
+            }
         }
-        DbPool::Sqlite(pool) => {
-            sqlx::query_as(
-                "SELECT id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at
-                 FROM messages
-                 WHERE channel_id = ?1
-                 ORDER BY created_at ASC
-                 LIMIT ?2",
-            )
-            .bind(channel_id)
-            .bind(normalized_limit)
-            .fetch_all(pool)
-            .await
+        DbPool::Sqlite(pool) => match before {
+            Some(cursor) => {
+                sqlx::query_as(
+                    "SELECT id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at
+                     FROM messages
+                     WHERE channel_id = ?1
+                       AND (created_at < ?2 OR (created_at = ?2 AND id < ?3))
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT ?4",
+                )
+                .bind(channel_id)
+                .bind(&cursor.created_at)
+                .bind(&cursor.id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await
+            }
+            None => {
+                sqlx::query_as(
+                    "SELECT id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at
+                     FROM messages
+                     WHERE channel_id = ?1
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT ?2",
+                )
+                .bind(channel_id)
+                .bind(fetch_limit)
+                .fetch_all(pool)
+                .await
+            }
         }
     }
     .map_err(|err| AppError::Internal(err.to_string()))?;
 
-    Ok(messages)
+    let page_limit = usize::try_from(normalized_limit).unwrap_or(200);
+    let has_more = messages.len() > page_limit;
+    if has_more {
+        messages.truncate(page_limit);
+    }
+    messages.reverse();
+
+    Ok(MessagePage { messages, has_more })
 }
 
 #[cfg(test)]
@@ -255,5 +321,75 @@ mod tests {
             .unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "message-1");
+    }
+
+    #[tokio::test]
+    async fn sqlite_cursor_pagination_orders_by_created_at_and_id_with_limit_clamp() {
+        let pool = init_pool(&DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 1,
+        })
+        .await
+        .unwrap();
+        run_migrations(&pool).await.unwrap();
+        seed_message_fixture(&pool).await;
+
+        let messages = [
+            ("msg-001", "older-a", "2026-02-28T00:00:01Z"),
+            ("msg-002", "older-b", "2026-02-28T00:00:01Z"),
+            ("msg-003", "recent-a", "2026-02-28T00:00:02Z"),
+            ("msg-004", "recent-b", "2026-02-28T00:00:03Z"),
+        ];
+        for (id, content, created_at) in messages {
+            insert_message(
+                &pool,
+                id,
+                "guild-id",
+                "channel-id",
+                "author-user-id",
+                content,
+                false,
+                created_at,
+                created_at,
+            )
+            .await
+            .unwrap();
+        }
+
+        let first_page = list_messages_page_by_channel_id(&pool, "channel-id", None, 2)
+            .await
+            .unwrap();
+        assert!(first_page.has_more);
+        assert_eq!(
+            first_page
+                .messages
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["msg-003", "msg-004"]
+        );
+
+        let before = MessageCursor {
+            created_at: "2026-02-28T00:00:02Z".to_string(),
+            id: "msg-003".to_string(),
+        };
+        let second_page = list_messages_page_by_channel_id(&pool, "channel-id", Some(&before), 2)
+            .await
+            .unwrap();
+        assert!(!second_page.has_more);
+        assert_eq!(
+            second_page
+                .messages
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["msg-001", "msg-002"]
+        );
+
+        let clamped_page = list_messages_page_by_channel_id(&pool, "channel-id", None, 0)
+            .await
+            .unwrap();
+        assert_eq!(clamped_page.messages.len(), 1);
+        assert_eq!(clamped_page.messages[0].id, "msg-004");
     }
 }

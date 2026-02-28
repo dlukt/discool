@@ -118,6 +118,7 @@ export class ApiError extends Error {
 }
 
 type ApiSuccess<T> = { data: T }
+type CursorApiSuccess<T> = { data: T; cursor?: unknown }
 
 let sessionToken: string | null = null
 let unauthorizedHandler: (() => void) | null = null
@@ -192,6 +193,51 @@ export async function apiFetch<T>(
     }
     if (isRecord(payload) && 'data' in payload) {
       return (payload as ApiSuccess<T>).data
+    }
+    throw new ApiError('INVALID_RESPONSE', 'Invalid server response')
+  }
+
+  const apiErr = apiErrorFromPayload(payload)
+  if (res.status === 401) {
+    handleUnauthorized()
+  }
+  if (apiErr) throw apiErr
+
+  throw new ApiError('HTTP_ERROR', res.statusText || `HTTP ${res.status}`, {
+    status: res.status,
+  })
+}
+
+export type CursorPage<T> = {
+  data: T
+  cursor: string | null
+}
+
+export async function apiFetchCursorList<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<CursorPage<T>> {
+  const headers = new Headers(init.headers)
+  if (sessionToken && !headers.has('authorization')) {
+    headers.set('authorization', `Bearer ${sessionToken}`)
+  }
+  if (typeof init.body === 'string' && !headers.has('content-type')) {
+    headers.set('content-type', 'application/json')
+  }
+
+  const res = await fetch(path, {
+    ...init,
+    headers,
+  })
+
+  const text = await res.text()
+  const payload = parseJson(text)
+
+  if (res.ok) {
+    if (isRecord(payload) && 'data' in payload) {
+      const success = payload as CursorApiSuccess<T>
+      const cursor = typeof success.cursor === 'string' ? success.cursor : null
+      return { data: success.data, cursor }
     }
     throw new ApiError('INVALID_RESPONSE', 'Invalid server response')
   }
