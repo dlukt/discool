@@ -41,6 +41,12 @@ type PermissionCache = DashMap<PermissionCacheKey, u64>;
 
 static EFFECTIVE_PERMISSION_CACHE: OnceLock<PermissionCache> = OnceLock::new();
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleAuthority {
+    Owner,
+    Position(i64),
+}
+
 fn permission_cache() -> &'static PermissionCache {
     EFFECTIVE_PERMISSION_CACHE.get_or_init(DashMap::new)
 }
@@ -104,6 +110,100 @@ pub fn mask_to_stored_permissions(mask: u64) -> Result<i64, AppError> {
     i64::try_from(mask).map_err(|_| AppError::Internal("Permission mask overflow".to_string()))
 }
 
+fn resolve_highest_member_authority(
+    owner_id: &str,
+    user_id: &str,
+    default_role_position: i64,
+    assigned_role_positions: &[i64],
+) -> RoleAuthority {
+    if owner_id == user_id {
+        return RoleAuthority::Owner;
+    }
+
+    // Lower role position means higher authority in the guild hierarchy.
+    let mut highest_position = default_role_position;
+    for position in assigned_role_positions {
+        if *position < highest_position {
+            highest_position = *position;
+        }
+    }
+    RoleAuthority::Position(highest_position)
+}
+
+pub fn actor_outranks_target(actor: RoleAuthority, target: RoleAuthority) -> bool {
+    match (actor, target) {
+        (RoleAuthority::Owner, RoleAuthority::Owner) => false,
+        (RoleAuthority::Owner, _) => true,
+        (_, RoleAuthority::Owner) => false,
+        (RoleAuthority::Position(actor_position), RoleAuthority::Position(target_position)) => {
+            actor_position < target_position
+        }
+    }
+}
+
+fn union_permission_masks(default_mask: u64, assigned_bitflags: &[i64]) -> Result<u64, AppError> {
+    let mut effective_mask = default_mask;
+    for bitflag in assigned_bitflags {
+        effective_mask |= stored_permissions_to_mask(*bitflag)?;
+    }
+    Ok(effective_mask)
+}
+
+pub async fn highest_guild_role_authority(
+    pool: &DbPool,
+    guild: &Guild,
+    user_id: &str,
+) -> Result<Option<RoleAuthority>, AppError> {
+    if guild.owner_id == user_id {
+        return Ok(Some(RoleAuthority::Owner));
+    }
+
+    if !guild_member::is_guild_member(pool, &guild.id, user_id).await? {
+        return Ok(None);
+    }
+
+    let default_position = role::find_default_role_by_guild_id(pool, &guild.id)
+        .await?
+        .map(|default_role| default_role.position)
+        .unwrap_or(i64::MAX);
+    let assigned_positions = role::list_assigned_role_positions(pool, &guild.id, user_id).await?;
+    Ok(Some(resolve_highest_member_authority(
+        &guild.owner_id,
+        user_id,
+        default_position,
+        &assigned_positions,
+    )))
+}
+
+pub async fn actor_outranks_target_member(
+    pool: &DbPool,
+    guild: &Guild,
+    actor_user_id: &str,
+    target_user_id: &str,
+) -> Result<bool, AppError> {
+    if actor_user_id == target_user_id {
+        return Ok(false);
+    }
+
+    // Keep owner behavior explicit: owner outranks every other guild member.
+    if actor_user_id == guild.owner_id {
+        return guild_member::is_guild_member(pool, &guild.id, target_user_id).await;
+    }
+    if target_user_id == guild.owner_id {
+        return Ok(false);
+    }
+
+    let Some(actor_authority) = highest_guild_role_authority(pool, guild, actor_user_id).await?
+    else {
+        return Ok(false);
+    };
+    let Some(target_authority) = highest_guild_role_authority(pool, guild, target_user_id).await?
+    else {
+        return Ok(false);
+    };
+    Ok(actor_outranks_target(actor_authority, target_authority))
+}
+
 pub async fn can_view_guild(pool: &DbPool, guild: &Guild, user_id: &str) -> Result<bool, AppError> {
     if guild.owner_id == user_id {
         return Ok(true);
@@ -129,16 +229,14 @@ pub async fn effective_guild_permissions(
         return Ok(*cached);
     }
 
-    let mut effective_mask = match role::find_default_role_by_guild_id(pool, &guild.id).await? {
+    let default_mask = match role::find_default_role_by_guild_id(pool, &guild.id).await? {
         Some(default_role) => stored_permissions_to_mask(default_role.permissions_bitflag)?,
         None => DEFAULT_EVERYONE_PERMISSIONS_MASK,
     };
 
     let assigned_bitflags =
         role::list_assigned_role_permission_bitflags(pool, &guild.id, user_id).await?;
-    for bitflag in assigned_bitflags {
-        effective_mask |= stored_permissions_to_mask(bitflag)?;
-    }
+    let effective_mask = union_permission_masks(default_mask, &assigned_bitflags)?;
 
     permission_cache().insert(cache_key, effective_mask);
     Ok(effective_mask)
@@ -201,5 +299,64 @@ mod tests {
         assert!(has_permission(mask, SEND_MESSAGES));
         assert!(has_permission(mask, MANAGE_CHANNELS));
         assert!(!has_permission(mask, BAN_MEMBERS));
+    }
+
+    #[test]
+    fn highest_role_authority_resolves_owner_and_default_only_members() {
+        assert_eq!(
+            resolve_highest_member_authority("owner-1", "owner-1", 2_147_483_647, &[0, 1]),
+            RoleAuthority::Owner
+        );
+        assert_eq!(
+            resolve_highest_member_authority("owner-1", "member-1", 2_147_483_647, &[]),
+            RoleAuthority::Position(2_147_483_647)
+        );
+    }
+
+    #[test]
+    fn highest_role_authority_uses_highest_assigned_role() {
+        assert_eq!(
+            resolve_highest_member_authority("owner-1", "member-1", 2_147_483_647, &[7, 3, 5]),
+            RoleAuthority::Position(3)
+        );
+    }
+
+    #[test]
+    fn actor_target_hierarchy_guard_requires_strict_outrank() {
+        assert!(actor_outranks_target(
+            RoleAuthority::Owner,
+            RoleAuthority::Position(0)
+        ));
+        assert!(!actor_outranks_target(
+            RoleAuthority::Position(0),
+            RoleAuthority::Owner
+        ));
+        assert!(actor_outranks_target(
+            RoleAuthority::Position(1),
+            RoleAuthority::Position(2)
+        ));
+        assert!(!actor_outranks_target(
+            RoleAuthority::Position(2),
+            RoleAuthority::Position(2)
+        ));
+        assert!(!actor_outranks_target(
+            RoleAuthority::Position(3),
+            RoleAuthority::Position(1)
+        ));
+    }
+
+    #[test]
+    fn effective_permissions_union_combines_default_and_assigned_roles() {
+        let union = union_permission_masks(
+            default_everyone_permissions_mask(),
+            &[MANAGE_CHANNELS as i64, MANAGE_GUILD as i64],
+        )
+        .unwrap();
+
+        assert!(has_permission(union, SEND_MESSAGES));
+        assert!(has_permission(union, ATTACH_FILES));
+        assert!(has_permission(union, ADD_REACTIONS));
+        assert!(has_permission(union, MANAGE_CHANNELS));
+        assert!(has_permission(union, MANAGE_GUILD));
     }
 }

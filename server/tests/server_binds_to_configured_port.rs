@@ -2525,6 +2525,16 @@ async fn roles_mutations_require_authentication() {
     )
     .await;
     assert_eq!(response_status(&res), 401);
+
+    let reorder_body = json!({ "role_ids": ["example-role"] }).to_string();
+    let res = http_patch_with_bearer(
+        &addr,
+        "/api/v1/guilds/lobby/roles/reorder",
+        &reorder_body,
+        "bad-token",
+    )
+    .await;
+    assert_eq!(response_status(&res), 401);
 }
 
 #[tokio::test]
@@ -2567,6 +2577,11 @@ async fn roles_mutations_reject_non_owner() {
 
     let delete_path = format!("/api/v1/guilds/{guild_slug}/roles/{role_id}");
     let res = http_delete_with_bearer(&addr, &delete_path, &other_token).await;
+    assert_eq!(response_status(&res), 403);
+
+    let reorder_body = json!({ "role_ids": [role_id] }).to_string();
+    let reorder_path = format!("/api/v1/guilds/{guild_slug}/roles/reorder");
+    let res = http_patch_with_bearer(&addr, &reorder_path, &reorder_body, &other_token).await;
     assert_eq!(response_status(&res), 403);
 }
 
@@ -2625,6 +2640,48 @@ async fn roles_owner_crud_hierarchy_and_delete_cleanup_work() {
     let created: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
     let custom_role_id = created["data"]["id"].as_str().unwrap().to_string();
     assert_eq!(created["data"]["name"], json!("Moderators"));
+
+    let create_second_body = json!({ "name": "Helpers", "color": "#22aa88" }).to_string();
+    let res = http_post_with_bearer(&addr, &roles_path, &create_second_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let created_second: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let second_custom_role_id = created_second["data"]["id"].as_str().unwrap().to_string();
+
+    let reorder_path = format!("/api/v1/guilds/{guild_slug}/roles/reorder");
+    let missing_role_body = json!({ "role_ids": [custom_role_id.clone()] }).to_string();
+    let res = http_patch_with_bearer(&addr, &reorder_path, &missing_role_body, &owner_token).await;
+    assert_eq!(response_status(&res), 422);
+
+    let duplicate_roles_body =
+        json!({ "role_ids": [custom_role_id.clone(), custom_role_id.clone()] }).to_string();
+    let res =
+        http_patch_with_bearer(&addr, &reorder_path, &duplicate_roles_body, &owner_token).await;
+    assert_eq!(response_status(&res), 422);
+
+    let unknown_role_body =
+        json!({ "role_ids": [custom_role_id.clone(), "unknown-role-id"] }).to_string();
+    let res = http_patch_with_bearer(&addr, &reorder_path, &unknown_role_body, &owner_token).await;
+    assert_eq!(response_status(&res), 422);
+
+    let reorder_body = json!({
+        "role_ids": [second_custom_role_id.clone(), custom_role_id.clone()],
+    })
+    .to_string();
+    let res = http_patch_with_bearer(&addr, &reorder_path, &reorder_body, &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+    let reordered: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let reordered_roles = reordered["data"].as_array().unwrap();
+    assert_eq!(reordered_roles[0]["name"], json!("Owner"));
+    assert_eq!(reordered_roles[0]["position"], json!(-1));
+    assert_eq!(reordered_roles[1]["id"], json!(second_custom_role_id));
+    assert_eq!(reordered_roles[1]["position"], json!(0));
+    assert_eq!(reordered_roles[2]["id"], json!(custom_role_id));
+    assert_eq!(reordered_roles[2]["position"], json!(1));
+    assert_eq!(reordered_roles.last().unwrap()["name"], json!("@everyone"));
+    assert_eq!(
+        reordered_roles.last().unwrap()["position"],
+        json!(2147483647)
+    );
 
     let update_owner_path = format!("/api/v1/guilds/{guild_slug}/roles/{owner_role_id}");
     let update_owner_body = json!({ "permissions_bitflag": 0 }).to_string();

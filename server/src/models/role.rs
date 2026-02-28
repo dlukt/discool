@@ -245,6 +245,75 @@ pub async fn update_custom_role(
     Ok(rows)
 }
 
+pub async fn reorder_custom_roles(
+    pool: &DbPool,
+    guild_id: &str,
+    ordered_role_ids: &[String],
+    updated_at: &str,
+) -> Result<(), AppError> {
+    match pool {
+        DbPool::Postgres(pool) => {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+            for (position, role_id) in ordered_role_ids.iter().enumerate() {
+                let rows = sqlx::query(
+                    "UPDATE roles
+                     SET position = $1, updated_at = $2
+                     WHERE guild_id = $3 AND id = $4 AND is_default = 0",
+                )
+                .bind(position as i64)
+                .bind(updated_at)
+                .bind(guild_id)
+                .bind(role_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?
+                .rows_affected();
+                if rows != 1 {
+                    return Err(AppError::ValidationError(
+                        "reorder payload contains unknown custom role id".to_string(),
+                    ));
+                }
+            }
+            tx.commit()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+        }
+        DbPool::Sqlite(pool) => {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+            for (position, role_id) in ordered_role_ids.iter().enumerate() {
+                let rows = sqlx::query(
+                    "UPDATE roles
+                     SET position = ?1, updated_at = ?2
+                     WHERE guild_id = ?3 AND id = ?4 AND is_default = 0",
+                )
+                .bind(position as i64)
+                .bind(updated_at)
+                .bind(guild_id)
+                .bind(role_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?
+                .rows_affected();
+                if rows != 1 {
+                    return Err(AppError::ValidationError(
+                        "reorder payload contains unknown custom role id".to_string(),
+                    ));
+                }
+            }
+            tx.commit()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn list_assigned_role_permission_bitflags(
     pool: &DbPool,
     guild_id: &str,
@@ -283,6 +352,48 @@ pub async fn list_assigned_role_permission_bitflags(
     .map_err(|err| AppError::Internal(err.to_string()))?;
 
     Ok(bitflags)
+}
+
+pub async fn list_assigned_role_positions(
+    pool: &DbPool,
+    guild_id: &str,
+    user_id: &str,
+) -> Result<Vec<i64>, AppError> {
+    let positions = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT r.position
+                 FROM role_assignments ra
+                 JOIN roles r ON r.id = ra.role_id
+                 WHERE ra.guild_id = $1
+                   AND ra.user_id = $2
+                   AND r.guild_id = $1
+                 ORDER BY r.position ASC",
+            )
+            .bind(guild_id)
+            .bind(user_id)
+            .fetch_all(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT r.position
+                 FROM role_assignments ra
+                 JOIN roles r ON r.id = ra.role_id
+                 WHERE ra.guild_id = ?1
+                   AND ra.user_id = ?2
+                   AND r.guild_id = ?1
+                 ORDER BY r.position ASC",
+            )
+            .bind(guild_id)
+            .bind(user_id)
+            .fetch_all(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(positions)
 }
 
 pub async fn delete_role_assignments_by_role_id(

@@ -25,6 +25,8 @@ let { open, guildSlug, onClose }: Props = $props()
 let guild = $derived(guildState.bySlug(guildSlug))
 let canEditGuild = $derived(Boolean(guild?.isOwner))
 let roles = $derived(guildState.rolesForGuild(guildSlug))
+let roleDragPreview = $state<GuildRole[] | null>(null)
+let roleList = $derived(roleDragPreview ?? roles)
 
 let initializedForSlug = $state<string | null>(null)
 let rolesInitializedForSlug = $state<string | null>(null)
@@ -39,6 +41,8 @@ let saving = $state(false)
 
 let rolesErrorMessage = $state<string | null>(null)
 let rolesStatusMessage = $state<string | null>(null)
+let draggedRoleId = $state<string | null>(null)
+let roleReorderSubmitting = $state(false)
 
 let createRoleDialogOpen = $state(false)
 let createRoleName = $state('')
@@ -109,6 +113,10 @@ function resetForm() {
 }
 
 function resetRoleDialogs() {
+  roleDragPreview = null
+  draggedRoleId = null
+  roleReorderSubmitting = false
+
   createRoleDialogOpen = false
   createRoleName = ''
   createRoleColor = '#3366ff'
@@ -417,6 +425,101 @@ async function confirmDeleteRole() {
   }
 }
 
+function isFixedRole(role: GuildRole): boolean {
+  return !role.canEdit || !role.canDelete
+}
+
+function isRoleReorderable(role: GuildRole): boolean {
+  return canEditGuild && !isFixedRole(role) && !roleReorderSubmitting
+}
+
+function resolveDraggedRoleId(event: DragEvent): string | null {
+  return draggedRoleId ?? event.dataTransfer?.getData('text/plain') ?? null
+}
+
+function reorderCustomRoles(
+  currentRoles: GuildRole[],
+  sourceRoleId: string,
+  targetRoleId: string,
+): GuildRole[] | null {
+  const customRoles = currentRoles.filter((role) => !isFixedRole(role))
+  const sourceIndex = customRoles.findIndex((role) => role.id === sourceRoleId)
+  const targetIndex = customRoles.findIndex((role) => role.id === targetRoleId)
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+    return null
+  }
+
+  const reorderedCustom = [...customRoles]
+  const [moved] = reorderedCustom.splice(sourceIndex, 1)
+  reorderedCustom.splice(targetIndex, 0, moved)
+
+  let customIndex = 0
+  return currentRoles.map((role) => {
+    if (isFixedRole(role)) return role
+    const next = reorderedCustom[customIndex]
+    customIndex += 1
+    return next
+  })
+}
+
+async function persistRoleReorder(nextRoles: GuildRole[]) {
+  if (!guild || roleReorderSubmitting) return
+  roleReorderSubmitting = true
+  rolesStatusMessage = null
+  rolesErrorMessage = null
+  roleDragPreview = nextRoles
+
+  const roleIds = nextRoles
+    .filter((role) => !isFixedRole(role))
+    .map((role) => role.id)
+
+  try {
+    await guildState.reorderRoles(guild.slug, roleIds)
+    roleDragPreview = null
+    rolesStatusMessage = 'Role order updated.'
+  } catch (err) {
+    roleDragPreview = null
+    rolesErrorMessage = messageFromError(err, 'Failed to reorder roles.')
+  } finally {
+    roleReorderSubmitting = false
+  }
+}
+
+function handleRoleDragStart(event: DragEvent, role: GuildRole) {
+  if (!isRoleReorderable(role)) return
+  draggedRoleId = role.id
+  event.dataTransfer?.setData('text/plain', role.id)
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+  }
+}
+
+function handleRoleDragOver(event: DragEvent, targetRole: GuildRole) {
+  if (!isRoleReorderable(targetRole)) return
+  const sourceRoleId = resolveDraggedRoleId(event)
+  if (!sourceRoleId || sourceRoleId === targetRole.id) return
+  event.preventDefault()
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move'
+  }
+}
+
+async function handleRoleDrop(event: DragEvent, targetRole: GuildRole) {
+  if (!isRoleReorderable(targetRole)) return
+  event.preventDefault()
+  const sourceRoleId = resolveDraggedRoleId(event)
+  draggedRoleId = null
+  if (!sourceRoleId || sourceRoleId === targetRole.id) return
+
+  const nextRoles = reorderCustomRoles(roleList, sourceRoleId, targetRole.id)
+  if (!nextRoles) return
+  await persistRoleReorder(nextRoles)
+}
+
+function handleRoleDragEnd() {
+  draggedRoleId = null
+}
+
 async function handleClose() {
   await onClose?.()
 }
@@ -547,19 +650,25 @@ async function handleClose() {
             </p>
           {/if}
 
-          {#if roles.length === 0}
+          {#if roleList.length === 0}
             <p class="rounded-md border border-border bg-background p-3 text-sm text-muted-foreground">
               No roles available.
             </p>
           {:else}
             <ul class="space-y-2">
-              {#each roles as role (role.id)}
+              {#each roleList as role (role.id)}
                 <li
                   class={`flex items-center justify-between gap-3 rounded-md border p-3 ${
                     role.isSystem
                       ? 'border-fire/40 bg-fire/5'
                       : 'border-border bg-background'
                   }`}
+                  data-testid={`guild-role-item-${role.id}`}
+                  draggable={isRoleReorderable(role)}
+                  ondragstart={(event) => handleRoleDragStart(event, role)}
+                  ondragover={(event) => handleRoleDragOver(event, role)}
+                  ondrop={(event) => void handleRoleDrop(event, role)}
+                  ondragend={handleRoleDragEnd}
                 >
                   <div class="min-w-0">
                     <div class="flex items-center gap-2">
@@ -568,13 +677,21 @@ async function handleClose() {
                         style={`background-color: ${role.color}`}
                         aria-hidden="true"
                       ></span>
-                      <p class="truncate text-sm font-medium text-foreground">
+                      <p
+                        class="truncate text-sm font-medium text-foreground"
+                        data-testid="guild-role-name"
+                      >
                         {role.name}
                       </p>
                     </div>
                     <div class="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
                       {#if role.isSystem}
                         <span class="rounded bg-muted px-2 py-0.5">System role</span>
+                      {/if}
+                      {#if isFixedRole(role)}
+                        <span class="rounded bg-muted px-2 py-0.5">Fixed position</span>
+                      {:else}
+                        <span class="rounded bg-muted px-2 py-0.5">Drag to reorder</span>
                       {/if}
                       <span>Color: {role.color}</span>
                     </div>

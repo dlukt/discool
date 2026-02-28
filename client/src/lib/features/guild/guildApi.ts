@@ -16,6 +16,7 @@ import {
   type InviteMetadataWire,
   type JoinGuildByInviteResult,
   type JoinGuildByInviteResultWire,
+  type ReorderGuildRolesInput,
   type RevokeGuildInviteResult,
   type RevokeGuildInviteResultWire,
   toCreateGuildInputWire,
@@ -27,6 +28,7 @@ import {
   toGuildRole,
   toInviteMetadata,
   toJoinGuildByInviteResult,
+  toReorderGuildRolesInputWire,
   toRevokeGuildInviteResult,
   toUpdateGuildInputWire,
   toUpdateGuildRoleInputWire,
@@ -115,6 +117,19 @@ export function deleteRole(
       method: 'DELETE',
     },
   ).then(toDeleteGuildRoleResult)
+}
+
+export function reorderRoles(
+  guildSlug: string,
+  input: ReorderGuildRolesInput,
+): Promise<GuildRole[]> {
+  return apiFetch<GuildRoleWire[]>(
+    `/api/v1/guilds/${encodeURIComponent(guildSlug)}/roles/reorder`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(toReorderGuildRolesInputWire(input)),
+    },
+  ).then((roles) => roles.map(toGuildRole))
 }
 
 export function listInvites(guildSlug: string): Promise<GuildInvite[]> {

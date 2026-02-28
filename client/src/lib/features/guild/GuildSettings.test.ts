@@ -10,6 +10,7 @@ const { guildState } = vi.hoisted(() => {
     createRole: vi.fn(),
     updateRole: vi.fn(),
     deleteRole: vi.fn(),
+    reorderRoles: vi.fn(),
   }
   return { guildState }
 })
@@ -59,6 +60,18 @@ function ownerRoles() {
       createdAt: '2026-02-28T00:00:00.000Z',
     },
     {
+      id: 'role-helpers',
+      name: 'Helpers',
+      color: '#22aa88',
+      position: 1,
+      permissionsBitflag: 0,
+      isDefault: false,
+      isSystem: false,
+      canEdit: true,
+      canDelete: true,
+      createdAt: '2026-02-28T00:00:00.000Z',
+    },
+    {
       id: 'role-everyone',
       name: '@everyone',
       color: '#99aab5',
@@ -71,6 +84,23 @@ function ownerRoles() {
       createdAt: '2026-02-28T00:00:00.000Z',
     },
   ]
+}
+
+function buildDragDataTransfer(sourceId: string) {
+  return {
+    setData: vi.fn(),
+    getData: vi.fn(() => sourceId),
+    effectAllowed: 'move',
+    dropEffect: 'move',
+  }
+}
+
+function roleOrder(container: HTMLElement): string[] {
+  return Array.from(
+    container.querySelectorAll('[data-testid="guild-role-name"]'),
+  )
+    .map((node) => node.textContent?.trim() ?? '')
+    .filter(Boolean)
 }
 
 describe('GuildSettings', () => {
@@ -94,6 +124,7 @@ describe('GuildSettings', () => {
       deletedId: 'role-moderators',
       removedAssignmentCount: 1,
     })
+    guildState.reorderRoles.mockResolvedValue(ownerRoles())
   })
 
   it('saves owner edits for guild name and description', async () => {
@@ -264,6 +295,70 @@ describe('GuildSettings', () => {
       ),
     ).toBeInTheDocument()
     expect(within(dialog).getByLabelText('Manage guild')).toBeDisabled()
+  })
+
+  it('supports drag reorder for custom roles and keeps system roles fixed', async () => {
+    const { getByTestId, getByText } = render(GuildSettings, {
+      open: true,
+      guildSlug: 'makers-hub',
+    })
+
+    expect(getByTestId('guild-role-item-owner:user-1')).toHaveAttribute(
+      'draggable',
+      'false',
+    )
+    expect(getByTestId('guild-role-item-role-everyone')).toHaveAttribute(
+      'draggable',
+      'false',
+    )
+    expect(getByTestId('guild-role-item-role-moderators')).toHaveAttribute(
+      'draggable',
+      'true',
+    )
+
+    const dataTransfer = buildDragDataTransfer('role-moderators')
+    await fireEvent.dragStart(getByTestId('guild-role-item-role-moderators'), {
+      dataTransfer,
+    })
+    await fireEvent.dragOver(getByTestId('guild-role-item-role-helpers'), {
+      dataTransfer,
+    })
+    await fireEvent.drop(getByTestId('guild-role-item-role-helpers'), {
+      dataTransfer,
+    })
+
+    await waitFor(() => {
+      expect(guildState.reorderRoles).toHaveBeenCalledWith('makers-hub', [
+        'role-helpers',
+        'role-moderators',
+      ])
+    })
+    expect(getByText('Role order updated.')).toBeInTheDocument()
+  })
+
+  it('rolls back optimistic role order when reorder fails', async () => {
+    guildState.reorderRoles.mockRejectedValueOnce(
+      new Error('Role reorder failed'),
+    )
+    const { container, getByTestId, findByText } = render(GuildSettings, {
+      open: true,
+      guildSlug: 'makers-hub',
+    })
+    const initialOrder = roleOrder(container)
+
+    const dataTransfer = buildDragDataTransfer('role-moderators')
+    await fireEvent.dragStart(getByTestId('guild-role-item-role-moderators'), {
+      dataTransfer,
+    })
+    await fireEvent.dragOver(getByTestId('guild-role-item-role-helpers'), {
+      dataTransfer,
+    })
+    await fireEvent.drop(getByTestId('guild-role-item-role-helpers'), {
+      dataTransfer,
+    })
+
+    expect(await findByText('Role reorder failed')).toBeInTheDocument()
+    expect(roleOrder(container)).toEqual(initialOrder)
   })
 
   it('shows owner-only guardrail for non-owners', () => {

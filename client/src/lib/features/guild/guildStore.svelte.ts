@@ -8,6 +8,7 @@ import {
   deleteRole as deleteRoleApi,
   listGuilds as listGuildsApi,
   listRoles as listRolesApi,
+  reorderRoles as reorderRolesApi,
   updateGuild as updateGuildApi,
   updateRole as updateRoleApi,
   uploadGuildIcon as uploadGuildIconApi,
@@ -232,6 +233,26 @@ export const guildState = $state({
     } catch (err) {
       guildState.error =
         err instanceof Error ? err.message : 'Failed to delete role'
+      throw err
+    } finally {
+      guildState.saving = false
+    }
+  },
+
+  reorderRoles: async (
+    guildSlug: string,
+    roleIds: string[],
+  ): Promise<GuildRole[]> => {
+    guildState.saving = true
+    guildState.error = null
+    try {
+      const reordered = await reorderRolesApi(guildSlug, { roleIds })
+      setRolesForGuild(guildSlug, reordered)
+      await guildState.loadRoles(guildSlug, true)
+      return guildState.rolesByGuild[guildSlug] ?? reordered
+    } catch (err) {
+      guildState.error =
+        err instanceof Error ? err.message : 'Failed to reorder roles'
       throw err
     } finally {
       guildState.saving = false

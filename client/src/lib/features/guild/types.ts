@@ -45,6 +45,10 @@ export type UpdateGuildRoleInput = {
   permissionsBitflag?: number
 }
 
+export type ReorderGuildRolesInput = {
+  roleIds: string[]
+}
+
 export type DeleteGuildRoleResult = {
   deletedId: string
   removedAssignmentCount: number
@@ -142,6 +146,10 @@ export type UpdateGuildRoleInputWire = {
   name?: string
   color?: string
   permissions_bitflag?: number
+}
+
+export type ReorderGuildRolesInputWire = {
+  role_ids: string[]
 }
 
 export type DeleteGuildRoleResultWire = {
@@ -269,6 +277,14 @@ export function toUpdateGuildRoleInputWire(
     wire.permissions_bitflag = input.permissionsBitflag
   }
   return wire
+}
+
+export function toReorderGuildRolesInputWire(
+  input: ReorderGuildRolesInput,
+): ReorderGuildRolesInputWire {
+  return {
+    role_ids: input.roleIds,
+  }
 }
 
 export function toDeleteGuildRoleResult(

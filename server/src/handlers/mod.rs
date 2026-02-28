@@ -87,6 +87,10 @@ pub fn router(state: AppState) -> Router {
             patch(channels::reorder_channels),
         )
         .route(
+            "/guilds/{guild_slug}/roles/reorder",
+            patch(roles::reorder_roles),
+        )
+        .route(
             "/guilds/{guild_slug}/channels/{channel_slug}",
             patch(channels::update_channel).delete(channels::delete_channel),
         )

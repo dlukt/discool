@@ -11,7 +11,7 @@ use serde_json::json;
 use crate::{
     AppError, AppState,
     middleware::auth::AuthenticatedUser,
-    services::role_service::{self, CreateRoleInput, UpdateRoleInput},
+    services::role_service::{self, CreateRoleInput, ReorderRolesInput, UpdateRoleInput},
 };
 
 #[derive(Debug, Deserialize)]
@@ -28,6 +28,11 @@ pub struct UpdateRoleRequest {
     pub color: Option<Option<String>>,
     #[serde(default)]
     pub permissions_bitflag: Option<Option<i64>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReorderRolesRequest {
+    pub role_ids: Option<Vec<String>>,
 }
 
 pub async fn list_roles(
@@ -114,4 +119,24 @@ pub async fn delete_role(
     let deleted =
         role_service::delete_role(&state.pool, &user.user_id, &guild_slug, &role_id).await?;
     Ok((StatusCode::OK, Json(json!({ "data": deleted }))).into_response())
+}
+
+pub async fn reorder_roles(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(guild_slug): Path<String>,
+    payload: Result<Json<ReorderRolesRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+    let roles = role_service::reorder_roles(
+        &state.pool,
+        &user.user_id,
+        &guild_slug,
+        ReorderRolesInput {
+            role_ids: req.role_ids.unwrap_or_default(),
+        },
+    )
+    .await?;
+    Ok((StatusCode::OK, Json(json!({ "data": roles }))).into_response())
 }

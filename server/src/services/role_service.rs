@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::Utc;
 use serde::Serialize;
 use uuid::Uuid;
@@ -30,6 +32,11 @@ pub struct UpdateRoleInput {
     pub name: Option<String>,
     pub color: Option<String>,
     pub permissions_bitflag: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReorderRolesInput {
+    pub role_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -216,6 +223,52 @@ pub async fn delete_role(
         deleted_id: existing.id,
         removed_assignment_count,
     })
+}
+
+pub async fn reorder_roles(
+    pool: &DbPool,
+    user_id: &str,
+    guild_slug: &str,
+    input: ReorderRolesInput,
+) -> Result<Vec<RoleResponse>, AppError> {
+    let guild = load_guild_with_role_management_access(pool, user_id, guild_slug).await?;
+    ensure_default_role(pool, &guild).await?;
+
+    let existing = role::list_roles_by_guild_id(pool, &guild.id).await?;
+    let custom_role_ids: HashSet<&str> = existing
+        .iter()
+        .filter(|role| role.is_default == 0)
+        .map(|role| role.id.as_str())
+        .collect();
+    if input.role_ids.len() != custom_role_ids.len() {
+        return Err(AppError::ValidationError(
+            "role_ids must include every custom role exactly once".to_string(),
+        ));
+    }
+
+    let mut incoming = HashSet::new();
+    for role_id in &input.role_ids {
+        if !custom_role_ids.contains(role_id.as_str()) {
+            return Err(AppError::ValidationError(
+                "role_ids contains unknown custom role".to_string(),
+            ));
+        }
+        if !incoming.insert(role_id.clone()) {
+            return Err(AppError::ValidationError(
+                "role_ids contains duplicate roles".to_string(),
+            ));
+        }
+    }
+
+    let updated_at = Utc::now().to_rfc3339();
+    role::reorder_custom_roles(pool, &guild.id, &input.role_ids, &updated_at).await?;
+    permissions::invalidate_guild_permission_cache(&guild.id);
+
+    let reordered = role::list_roles_by_guild_id(pool, &guild.id).await?;
+    let mut response = Vec::with_capacity(reordered.len() + 1);
+    response.push(owner_role_response(&guild));
+    response.extend(reordered.into_iter().map(to_role_response));
+    Ok(response)
 }
 
 async fn ensure_default_role(pool: &DbPool, guild: &Guild) -> Result<(), AppError> {
