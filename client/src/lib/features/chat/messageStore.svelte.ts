@@ -1,7 +1,12 @@
 import { wsClient } from '$lib/ws/client'
 import type { WsEnvelope } from '$lib/ws/protocol'
 import { fetchChannelHistory } from './messageApi'
-import { type ChatMessage, toChatMessage } from './types'
+import {
+  type ChatMessage,
+  type ChatMessageReaction,
+  toChatMessage,
+  toChatMessageReactions,
+} from './types'
 
 const DEFAULT_ROLE_COLOR = '#99aab5'
 const HISTORY_PAGE_LIMIT = 50
@@ -24,12 +29,21 @@ type MessageCreatePayload = {
   created_at?: string
   updated_at?: string
   client_nonce?: string
+  reactions?: unknown
 }
 
 type MessageDeletePayload = {
   id?: string
   guild_slug?: string
   channel_slug?: string
+}
+
+type MessageReactionUpdatePayload = {
+  guild_slug?: string
+  channel_slug?: string
+  message_id?: string
+  actor_user_id?: string
+  reactions?: unknown
 }
 
 export type ChatAuthorInput = {
@@ -84,6 +98,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function normalizeOutboundContent(content: string): string {
   return content.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+}
+
+function normalizeOutboundEmoji(emoji: string): string {
+  return emoji.trim()
 }
 
 function generateClientNonce(): string {
@@ -164,6 +182,13 @@ function parseMessageMutationEnvelope(
     created_at: createdAt,
     updated_at: payload.updated_at?.trim() || createdAt,
     client_nonce: payload.client_nonce?.trim() || undefined,
+    reactions: Array.isArray(payload.reactions)
+      ? (payload.reactions as Array<{
+          emoji?: string
+          count?: number
+          reacted?: boolean
+        }>)
+      : undefined,
   })
 }
 
@@ -188,6 +213,38 @@ function parseMessageDeleteEnvelope(envelope: WsEnvelope): {
   const channelSlug = payload.channel_slug?.trim()
   if (!id || !guildSlug || !channelSlug) return null
   return { id, guildSlug, channelSlug }
+}
+
+function parseMessageReactionUpdateEnvelope(envelope: WsEnvelope): {
+  guildSlug: string
+  channelSlug: string
+  messageId: string
+  actorUserId: string | null
+  reactions: ChatMessageReaction[]
+} | null {
+  if (envelope.op !== 'message_reaction_update') return null
+  if (!isRecord(envelope.d)) return null
+  const payload = envelope.d as MessageReactionUpdatePayload
+  const guildSlug = payload.guild_slug?.trim()
+  const channelSlug = payload.channel_slug?.trim()
+  const messageId = payload.message_id?.trim()
+  if (!guildSlug || !channelSlug || !messageId) return null
+
+  return {
+    guildSlug,
+    channelSlug,
+    messageId,
+    actorUserId: payload.actor_user_id?.trim() || null,
+    reactions: toChatMessageReactions(
+      Array.isArray(payload.reactions)
+        ? (payload.reactions as Array<{
+            emoji?: string
+            count?: number
+            reacted?: boolean
+          }>)
+        : undefined,
+    ),
+  }
 }
 
 function updateHistoryState(
@@ -285,6 +342,7 @@ function enforceMemoryBudget(
 export const messageState = $state({
   version: 0,
   activeChannelKey: null as string | null,
+  currentUserId: null as string | null,
   messagesByChannel: {} as Record<string, ChatMessage[]>,
   optimisticByNonce: {} as Record<string, PendingOptimisticEntry>,
   historyByChannel: {} as Record<string, ChannelHistoryState>,
@@ -312,6 +370,12 @@ export const messageState = $state({
     if (enforceMemoryBudget()) {
       messageState.version += 1
     }
+  },
+
+  setCurrentUser: (userId: string | null): void => {
+    const normalized = userId?.trim() || null
+    if (messageState.currentUserId === normalized) return
+    messageState.currentUserId = normalized
   },
 
   ensureHistoryLoaded: async (
@@ -503,6 +567,7 @@ export const messageState = $state({
       updatedAt: now,
       optimistic: true,
       clientNonce: nonce,
+      reactions: [],
     }
 
     messageState.messagesByChannel[channelKey] = sortMessages([
@@ -579,6 +644,34 @@ export const messageState = $state({
       guild_slug: normalizedGuild,
       channel_slug: normalizedChannel,
       message_id: normalizedMessageId,
+    })
+  },
+
+  sendMessageReactionToggle: (
+    guildSlug: string,
+    channelSlug: string,
+    messageId: string,
+    emoji: string,
+  ): boolean => {
+    const normalizedGuild = guildSlug.trim()
+    const normalizedChannel = channelSlug.trim()
+    const normalizedMessageId = messageId.trim()
+    const normalizedEmoji = normalizeOutboundEmoji(emoji)
+
+    if (
+      !normalizedGuild ||
+      !normalizedChannel ||
+      !normalizedMessageId ||
+      !normalizedEmoji
+    ) {
+      return false
+    }
+
+    return wsClient.send('c_message_reaction_toggle', {
+      guild_slug: normalizedGuild,
+      channel_slug: normalizedChannel,
+      message_id: normalizedMessageId,
+      emoji: normalizedEmoji,
     })
   },
 
@@ -663,8 +756,44 @@ export const messageState = $state({
     messageState.version += 1
   },
 
+  ingestReactionUpdate: (
+    guildSlug: string,
+    channelSlug: string,
+    messageId: string,
+    reactions: ChatMessageReaction[],
+    actorUserId: string | null,
+  ): void => {
+    const channelKey = toChannelKey(guildSlug, channelSlug)
+    const existing = messageState.messagesByChannel[channelKey] ?? []
+    if (!existing.some((message) => message.id === messageId)) return
+
+    const preserveReactedFromExisting = Boolean(
+      actorUserId &&
+        messageState.currentUserId &&
+        actorUserId !== messageState.currentUserId,
+    )
+
+    messageState.messagesByChannel[channelKey] = existing.map((message) => {
+      if (message.id !== messageId) return message
+      if (!preserveReactedFromExisting) {
+        return { ...message, reactions }
+      }
+
+      const existingByEmoji = new Map(
+        message.reactions.map((reaction) => [reaction.emoji, reaction]),
+      )
+      const merged = reactions.map((reaction) => ({
+        ...reaction,
+        reacted: existingByEmoji.get(reaction.emoji)?.reacted ?? false,
+      }))
+      return { ...message, reactions: merged }
+    })
+    messageState.version += 1
+  },
+
   clearAll: (): void => {
     messageState.activeChannelKey = null
+    messageState.currentUserId = null
     messageState.messagesByChannel = {}
     messageState.optimisticByNonce = {}
     messageState.historyByChannel = {}
@@ -691,6 +820,18 @@ wsClient.subscribe((envelope) => {
       deleted.guildSlug,
       deleted.channelSlug,
       deleted.id,
+    )
+    return
+  }
+
+  const reactionUpdate = parseMessageReactionUpdateEnvelope(envelope)
+  if (reactionUpdate) {
+    messageState.ingestReactionUpdate(
+      reactionUpdate.guildSlug,
+      reactionUpdate.channelSlug,
+      reactionUpdate.messageId,
+      reactionUpdate.reactions,
+      reactionUpdate.actorUserId,
     )
   }
 })

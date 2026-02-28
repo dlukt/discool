@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
@@ -12,13 +12,14 @@ use crate::{
         channel::{self, Channel},
         channel_permission_override,
         guild::{self, Guild},
-        guild_member, message, role,
+        guild_member, message, message_reaction, role,
     },
     permissions,
 };
 
 const MAX_MESSAGE_CHARS: usize = 2_000;
 const MAX_CLIENT_NONCE_CHARS: usize = 120;
+const MAX_REACTION_EMOJI_CHARS: usize = 64;
 const DEFAULT_ROLE_COLOR: &str = "#99aab5";
 const OWNER_ROLE_COLOR: &str = "#f59e0b";
 const MAX_LIST_MESSAGES_LIMIT: i64 = 200;
@@ -46,6 +47,30 @@ pub struct DeleteMessageInput {
     pub message_id: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ToggleMessageReactionInput {
+    pub guild_slug: String,
+    pub channel_slug: String,
+    pub message_id: String,
+    pub emoji: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageReactionSummaryResponse {
+    pub emoji: String,
+    pub count: i64,
+    pub reacted: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageReactionUpdateResponse {
+    pub guild_slug: String,
+    pub channel_slug: String,
+    pub message_id: String,
+    pub actor_user_id: String,
+    pub reactions: Vec<MessageReactionSummaryResponse>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MessageResponse {
     pub id: String,
@@ -63,6 +88,7 @@ pub struct MessageResponse {
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_nonce: Option<String>,
+    pub reactions: Vec<MessageReactionSummaryResponse>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,6 +114,7 @@ pub struct ListChannelMessagesResult {
 struct ChannelAccessContext {
     guild: Guild,
     channel: Channel,
+    effective_permissions: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -135,7 +162,9 @@ pub async fn create_message(
         &access.guild,
         &access.channel,
         stored,
+        user_id,
         normalized_nonce,
+        None,
     )
     .await
 }
@@ -180,7 +209,16 @@ pub async fn update_message(
     let stored = message::find_message_by_id(pool, &normalized_message_id)
         .await?
         .ok_or_else(|| AppError::Internal("Updated message not found".to_string()))?;
-    build_message_response(pool, &access.guild, &access.channel, stored, None).await
+    build_message_response(
+        pool,
+        &access.guild,
+        &access.channel,
+        stored,
+        user_id,
+        None,
+        None,
+    )
+    .await
 }
 
 pub async fn delete_message(
@@ -223,6 +261,137 @@ pub async fn delete_message(
     })
 }
 
+pub async fn toggle_message_reaction(
+    pool: &DbPool,
+    user_id: &str,
+    input: ToggleMessageReactionInput,
+) -> Result<MessageReactionUpdateResponse, AppError> {
+    let normalized_message_id = normalize_message_id(&input.message_id)?;
+    let normalized_emoji = normalize_reaction_emoji(&input.emoji)?;
+    let access =
+        load_channel_with_view_access(pool, user_id, &input.guild_slug, &input.channel_slug)
+            .await?;
+
+    let existing = message::find_message_by_id(pool, &normalized_message_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if existing.guild_id != access.guild.id || existing.channel_id != access.channel.id {
+        return Err(AppError::NotFound);
+    }
+
+    let already_reacted = message_reaction::has_message_reaction(
+        pool,
+        &normalized_message_id,
+        user_id,
+        &normalized_emoji,
+    )
+    .await?;
+    if !already_reacted
+        && !permissions::has_permission(access.effective_permissions, permissions::ADD_REACTIONS)
+    {
+        return Err(AppError::Forbidden(
+            "Missing ADD_REACTIONS permission in this channel".to_string(),
+        ));
+    }
+
+    if already_reacted {
+        message_reaction::delete_message_reaction(
+            pool,
+            &normalized_message_id,
+            user_id,
+            &normalized_emoji,
+        )
+        .await?;
+    } else {
+        message_reaction::insert_message_reaction(
+            pool,
+            &normalized_message_id,
+            user_id,
+            &normalized_emoji,
+            &Utc::now().to_rfc3339(),
+        )
+        .await?;
+    }
+
+    Ok(MessageReactionUpdateResponse {
+        guild_slug: access.guild.slug,
+        channel_slug: access.channel.slug,
+        message_id: normalized_message_id.clone(),
+        actor_user_id: user_id.to_string(),
+        reactions: build_message_reaction_summaries(pool, &normalized_message_id, user_id).await?,
+    })
+}
+
+pub async fn list_message_reaction_summaries_for_viewer(
+    pool: &DbPool,
+    message_id: &str,
+    viewer_user_id: &str,
+) -> Result<Vec<MessageReactionSummaryResponse>, AppError> {
+    let normalized_message_id = normalize_message_id(message_id)?;
+    build_message_reaction_summaries(pool, &normalized_message_id, viewer_user_id).await
+}
+
+pub async fn list_message_reaction_summaries_for_viewers(
+    pool: &DbPool,
+    message_id: &str,
+    viewer_user_ids: &[String],
+) -> Result<HashMap<String, Vec<MessageReactionSummaryResponse>>, AppError> {
+    let normalized_message_id = normalize_message_id(message_id)?;
+
+    let mut unique_viewer_user_ids = Vec::new();
+    let mut seen_viewer_user_ids = HashSet::new();
+    for viewer_user_id in viewer_user_ids {
+        let trimmed = viewer_user_id.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let normalized_viewer_user_id = trimmed.to_string();
+        if seen_viewer_user_ids.insert(normalized_viewer_user_id.clone()) {
+            unique_viewer_user_ids.push(normalized_viewer_user_id);
+        }
+    }
+    if unique_viewer_user_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let reaction_entries =
+        message_reaction::list_reaction_entries_by_message_id(pool, &normalized_message_id).await?;
+    let mut counts_by_emoji = HashMap::<String, i64>::new();
+    let mut reactors_by_emoji = HashMap::<String, HashSet<String>>::new();
+    for entry in reaction_entries {
+        *counts_by_emoji.entry(entry.emoji.clone()).or_insert(0) += 1;
+        reactors_by_emoji
+            .entry(entry.emoji)
+            .or_default()
+            .insert(entry.user_id);
+    }
+
+    let mut ordered_emoji_counts = counts_by_emoji.into_iter().collect::<Vec<_>>();
+    ordered_emoji_counts.sort_by(|(left_emoji, left_count), (right_emoji, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_emoji.cmp(right_emoji))
+    });
+
+    let mut summaries_by_viewer = HashMap::with_capacity(unique_viewer_user_ids.len());
+    for viewer_user_id in unique_viewer_user_ids {
+        let mut summaries = Vec::with_capacity(ordered_emoji_counts.len());
+        for (emoji, count) in &ordered_emoji_counts {
+            let reacted = reactors_by_emoji
+                .get(emoji)
+                .is_some_and(|reactors| reactors.contains(&viewer_user_id));
+            summaries.push(MessageReactionSummaryResponse {
+                emoji: emoji.clone(),
+                count: *count,
+                reacted,
+            });
+        }
+        summaries_by_viewer.insert(viewer_user_id, summaries);
+    }
+
+    Ok(summaries_by_viewer)
+}
+
 pub async fn list_channel_messages(
     pool: &DbPool,
     user_id: &str,
@@ -252,10 +421,30 @@ pub async fn list_channel_messages(
         None
     };
 
+    let message_ids = page
+        .messages
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    let reaction_map =
+        message_reaction::list_reaction_summaries_by_message_ids(pool, &message_ids, user_id)
+            .await?;
+
     let mut responses = Vec::with_capacity(page.messages.len());
     for item in page.messages {
-        responses
-            .push(build_message_response(pool, &access.guild, &access.channel, item, None).await?);
+        let preloaded_reactions = Some(reaction_map.get(&item.id).cloned().unwrap_or_default());
+        responses.push(
+            build_message_response(
+                pool,
+                &access.guild,
+                &access.channel,
+                item,
+                user_id,
+                None,
+                preloaded_reactions,
+            )
+            .await?,
+        );
     }
     Ok(ListChannelMessagesResult {
         messages: responses,
@@ -301,12 +490,38 @@ fn encode_cursor(cursor: &message::MessageCursor) -> String {
     URL_SAFE_NO_PAD.encode(format!("{}|{}", cursor.created_at, cursor.id))
 }
 
+fn to_message_reaction_response(
+    summary: message_reaction::MessageReactionSummary,
+) -> MessageReactionSummaryResponse {
+    MessageReactionSummaryResponse {
+        emoji: summary.emoji,
+        count: summary.count,
+        reacted: summary.reacted,
+    }
+}
+
+async fn build_message_reaction_summaries(
+    pool: &DbPool,
+    message_id: &str,
+    viewer_user_id: &str,
+) -> Result<Vec<MessageReactionSummaryResponse>, AppError> {
+    let summaries =
+        message_reaction::list_reaction_summaries_by_message_id(pool, message_id, viewer_user_id)
+            .await?;
+    Ok(summaries
+        .into_iter()
+        .map(to_message_reaction_response)
+        .collect())
+}
+
 async fn build_message_response(
     pool: &DbPool,
     guild: &Guild,
     channel: &Channel,
     message: message::Message,
+    viewer_user_id: &str,
     client_nonce: Option<String>,
+    preloaded_reactions: Option<Vec<message_reaction::MessageReactionSummary>>,
 ) -> Result<MessageResponse, AppError> {
     let profile = guild_member::find_user_profile_by_id(pool, &message.author_user_id)
         .await?
@@ -325,6 +540,13 @@ async fn build_message_response(
         .filter(|value| !value.is_empty())
         .unwrap_or(&profile.username)
         .to_string();
+    let reactions = match preloaded_reactions {
+        Some(items) => items
+            .into_iter()
+            .map(to_message_reaction_response)
+            .collect(),
+        None => build_message_reaction_summaries(pool, &message.id, viewer_user_id).await?,
+    };
 
     Ok(MessageResponse {
         id: message.id,
@@ -340,6 +562,7 @@ async fn build_message_response(
         created_at: message.created_at,
         updated_at: message.updated_at,
         client_nonce,
+        reactions,
     })
 }
 
@@ -391,7 +614,11 @@ async fn load_channel_with_view_access(
         ));
     }
 
-    Ok(ChannelAccessContext { guild, channel })
+    Ok(ChannelAccessContext {
+        guild,
+        channel,
+        effective_permissions: effective,
+    })
 }
 
 async fn load_channel_with_send_access(
@@ -401,10 +628,7 @@ async fn load_channel_with_send_access(
     channel_slug: &str,
 ) -> Result<ChannelAccessContext, AppError> {
     let access = load_channel_with_view_access(pool, user_id, guild_slug, channel_slug).await?;
-    let effective =
-        resolve_effective_channel_permissions(pool, &access.guild, &access.channel.id, user_id)
-            .await?;
-    if !has_required_channel_permissions(effective) {
+    if !has_required_channel_permissions(access.effective_permissions) {
         return Err(AppError::Forbidden(
             "Missing SEND_MESSAGES permission in this channel".to_string(),
         ));
@@ -511,6 +735,24 @@ fn normalize_message_id(value: &str) -> Result<String, AppError> {
     if trimmed.chars().any(|ch| ch.is_control()) {
         return Err(AppError::ValidationError(
             "message_id contains invalid characters".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn normalize_reaction_emoji(value: &str) -> Result<String, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::ValidationError("emoji is required".to_string()));
+    }
+    if trimmed.chars().count() > MAX_REACTION_EMOJI_CHARS {
+        return Err(AppError::ValidationError(format!(
+            "emoji must be {MAX_REACTION_EMOJI_CHARS} characters or less"
+        )));
+    }
+    if trimmed.chars().any(|ch| ch.is_control()) {
+        return Err(AppError::ValidationError(
+            "emoji contains invalid control characters".to_string(),
         ));
     }
     Ok(trimmed.to_string())
@@ -690,6 +932,69 @@ mod tests {
         .unwrap();
     }
 
+    async fn deny_add_reactions_for_default_role(pool: &DbPool) {
+        let DbPool::Sqlite(pool) = pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+
+        let existing_default_role_id = sqlx::query_scalar::<_, String>(
+            "SELECT id
+             FROM roles
+             WHERE guild_id = ?1
+               AND is_default = 1
+             LIMIT 1",
+        )
+        .bind("guild-id")
+        .fetch_optional(pool)
+        .await
+        .unwrap();
+        let default_role_id = match existing_default_role_id {
+            Some(role_id) => role_id,
+            None => {
+                let role_id = "role-everyone-guild-id".to_string();
+                sqlx::query(
+                    "INSERT INTO roles (
+                        id,
+                        guild_id,
+                        name,
+                        color,
+                        position,
+                        permissions_bitflag,
+                        is_default,
+                        created_at,
+                        updated_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )
+                .bind(&role_id)
+                .bind("guild-id")
+                .bind("@everyone")
+                .bind("#99aab5")
+                .bind(2_147_483_647_i64)
+                .bind(permissions::default_everyone_permissions_i64())
+                .bind(1_i64)
+                .bind("2026-02-28T00:00:00Z")
+                .bind("2026-02-28T00:00:00Z")
+                .execute(pool)
+                .await
+                .unwrap();
+                role_id
+            }
+        };
+
+        sqlx::query(
+            "INSERT INTO channel_permission_overrides (channel_id, role_id, allow_bitflag, deny_bitflag)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind("channel-id")
+        .bind(default_role_id)
+        .bind(0_i64)
+        .bind(permissions::ADD_REACTIONS as i64)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn normalize_message_content_rejects_empty_and_control_characters() {
         assert!(normalize_message_content("   ").is_err());
@@ -721,6 +1026,15 @@ mod tests {
         assert!(normalize_message_id("   ").is_err());
         assert!(normalize_message_id("message\u{0007}").is_err());
         assert_eq!(normalize_message_id(" message-1 ").unwrap(), "message-1");
+    }
+
+    #[test]
+    fn normalize_reaction_emoji_rejects_invalid_values() {
+        assert!(normalize_reaction_emoji("   ").is_err());
+        assert!(normalize_reaction_emoji("😀\u{0007}").is_err());
+        let too_long = "😀".repeat(MAX_REACTION_EMOJI_CHARS + 1);
+        assert!(normalize_reaction_emoji(&too_long).is_err());
+        assert_eq!(normalize_reaction_emoji(" 😀 ").unwrap(), "😀");
     }
 
     #[test]
@@ -833,5 +1147,174 @@ mod tests {
             .await
             .unwrap();
         assert!(persisted.is_none());
+    }
+
+    #[tokio::test]
+    async fn toggle_message_reaction_enforces_permission_for_add_and_allows_remove() {
+        let pool = setup_service_pool().await;
+        insert_fixture_message(&pool, "message-3", "react-me").await;
+        deny_add_reactions_for_default_role(&pool).await;
+
+        let forbidden = toggle_message_reaction(
+            &pool,
+            "member-user-id",
+            ToggleMessageReactionInput {
+                guild_slug: "test-guild".to_string(),
+                channel_slug: "general".to_string(),
+                message_id: "message-3".to_string(),
+                emoji: "😀".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(forbidden, AppError::Forbidden(_)));
+
+        let seeded = message_reaction::insert_message_reaction(
+            &pool,
+            "message-3",
+            "member-user-id",
+            "😀",
+            "2026-02-28T00:00:02Z",
+        )
+        .await
+        .unwrap();
+        assert!(seeded);
+
+        let removed = toggle_message_reaction(
+            &pool,
+            "member-user-id",
+            ToggleMessageReactionInput {
+                guild_slug: "test-guild".to_string(),
+                channel_slug: "general".to_string(),
+                message_id: "message-3".to_string(),
+                emoji: "😀".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(removed.message_id, "message-3");
+        assert!(removed.reactions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn toggle_message_reaction_aggregates_multi_user_counts() {
+        let pool = setup_service_pool().await;
+        insert_fixture_message(&pool, "message-4", "count-me").await;
+
+        let first = toggle_message_reaction(
+            &pool,
+            "author-user-id",
+            ToggleMessageReactionInput {
+                guild_slug: "test-guild".to_string(),
+                channel_slug: "general".to_string(),
+                message_id: "message-4".to_string(),
+                emoji: "👍".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.reactions.len(), 1);
+        assert_eq!(first.reactions[0].emoji, "👍");
+        assert_eq!(first.reactions[0].count, 1);
+        assert!(first.reactions[0].reacted);
+
+        let second = toggle_message_reaction(
+            &pool,
+            "member-user-id",
+            ToggleMessageReactionInput {
+                guild_slug: "test-guild".to_string(),
+                channel_slug: "general".to_string(),
+                message_id: "message-4".to_string(),
+                emoji: "👍".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.reactions.len(), 1);
+        assert_eq!(second.reactions[0].count, 2);
+        assert!(second.reactions[0].reacted);
+
+        let author_remove = toggle_message_reaction(
+            &pool,
+            "author-user-id",
+            ToggleMessageReactionInput {
+                guild_slug: "test-guild".to_string(),
+                channel_slug: "general".to_string(),
+                message_id: "message-4".to_string(),
+                emoji: "👍".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(author_remove.reactions.len(), 1);
+        assert_eq!(author_remove.reactions[0].count, 1);
+        assert!(!author_remove.reactions[0].reacted);
+    }
+
+    #[tokio::test]
+    async fn list_message_reaction_summaries_for_viewers_returns_personalized_reacted_flags() {
+        let pool = setup_service_pool().await;
+        insert_fixture_message(&pool, "message-5", "viewers").await;
+        message_reaction::insert_message_reaction(
+            &pool,
+            "message-5",
+            "author-user-id",
+            "😀",
+            "2026-02-28T00:00:02Z",
+        )
+        .await
+        .unwrap();
+        message_reaction::insert_message_reaction(
+            &pool,
+            "message-5",
+            "member-user-id",
+            "😀",
+            "2026-02-28T00:00:03Z",
+        )
+        .await
+        .unwrap();
+        message_reaction::insert_message_reaction(
+            &pool,
+            "message-5",
+            "member-user-id",
+            "🎉",
+            "2026-02-28T00:00:04Z",
+        )
+        .await
+        .unwrap();
+
+        let viewer_summaries = list_message_reaction_summaries_for_viewers(
+            &pool,
+            "message-5",
+            &[
+                "author-user-id".to_string(),
+                "member-user-id".to_string(),
+                "author-user-id".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let author_view = viewer_summaries
+            .get("author-user-id")
+            .expect("missing author view");
+        assert_eq!(author_view.len(), 2);
+        assert_eq!(author_view[0].emoji, "😀");
+        assert_eq!(author_view[0].count, 2);
+        assert!(author_view[0].reacted);
+        assert_eq!(author_view[1].emoji, "🎉");
+        assert_eq!(author_view[1].count, 1);
+        assert!(!author_view[1].reacted);
+
+        let member_view = viewer_summaries
+            .get("member-user-id")
+            .expect("missing member view");
+        assert_eq!(member_view.len(), 2);
+        assert_eq!(member_view[0].emoji, "😀");
+        assert_eq!(member_view[0].count, 2);
+        assert!(member_view[0].reacted);
+        assert_eq!(member_view[1].emoji, "🎉");
+        assert_eq!(member_view[1].count, 1);
+        assert!(member_view[1].reacted);
     }
 }

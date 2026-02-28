@@ -2,6 +2,8 @@
 // biome-ignore-all lint/correctness/noUnusedVariables: Svelte template usage isn't detected reliably.
 import type { ChatMessage } from './types'
 
+const EMOJI_PICKER_OPTIONS = ['😀', '😂', '😍', '👍', '🎉', '🔥', '👏', '😢']
+
 type Props = {
   message: ChatMessage
   compact?: boolean
@@ -9,7 +11,7 @@ type Props = {
   onEditRequest?: (message: ChatMessage) => void
   onDeleteRequest?: (message: ChatMessage) => void
   onReplyRequest?: (message: ChatMessage) => void
-  onReactRequest?: (message: ChatMessage) => void
+  onReactRequest?: (message: ChatMessage, emoji: string) => void
 }
 
 let {
@@ -28,6 +30,7 @@ let isOwnMessage = $derived(
   Boolean(currentUserId && currentUserId === message.authorUserId),
 )
 let contextMenuOpen = $state(false)
+let pickerOpen = $state(false)
 
 function formatTimestamp(value: string): string {
   const date = new Date(value)
@@ -45,12 +48,24 @@ function initials(value: string): string {
 }
 
 function openContextMenu(): void {
-  if (!isOwnMessage) return
   contextMenuOpen = true
 }
 
 function closeContextMenu(): void {
   contextMenuOpen = false
+}
+
+function openPicker(): void {
+  pickerOpen = true
+}
+
+function closePicker(): void {
+  pickerOpen = false
+}
+
+function closePopovers(): void {
+  closeContextMenu()
+  closePicker()
 }
 
 function requestEdit(): void {
@@ -70,18 +85,23 @@ function requestReply(): void {
 }
 
 function requestReact(): void {
-  onReactRequest?.(message)
+  openPicker()
+}
+
+function requestReactionToggle(emoji: string): void {
+  const normalized = emoji.trim()
+  if (!normalized) return
+  onReactRequest?.(message, normalized)
+  closePopovers()
 }
 
 function handleRowContextMenu(event: MouseEvent): void {
-  if (!isOwnMessage) return
   event.preventDefault()
   openContextMenu()
 }
 
 function handleRowKeydown(event: KeyboardEvent): void {
   if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
-    if (!isOwnMessage) return
     event.preventDefault()
     openContextMenu()
     return
@@ -95,7 +115,7 @@ function handleRowKeydown(event: KeyboardEvent): void {
   }
 
   if (event.key === 'Escape') {
-    closeContextMenu()
+    closePopovers()
   }
 }
 
@@ -103,7 +123,7 @@ function handleRowFocusOut(event: FocusEvent): void {
   const target = event.currentTarget as HTMLElement | null
   const nextFocus = event.relatedTarget as Node | null
   if (target && nextFocus && target.contains(nextFocus)) return
-  closeContextMenu()
+  closePopovers()
 }
 </script>
 
@@ -166,6 +186,29 @@ function handleRowFocusOut(event: FocusEvent): void {
       >
         {message.content}
       </p>
+      {#if message.reactions.length > 0}
+        <div
+          class="mt-2 flex flex-wrap gap-1"
+          data-testid={`message-reaction-badges-${message.id}`}
+        >
+          {#each message.reactions as reaction, index (`${reaction.emoji}-${index}`)}
+            <button
+              type="button"
+              class={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors ${
+                reaction.reacted
+                  ? 'border-fire/60 bg-fire/20 text-fire-foreground'
+                  : 'border-border bg-muted/60 text-foreground hover:bg-muted'
+              }`}
+              onclick={() => requestReactionToggle(reaction.emoji)}
+              aria-label={`Toggle reaction ${reaction.emoji}`}
+              data-testid={`message-reaction-badge-${message.id}-${index}`}
+            >
+              <span>{reaction.emoji}</span>
+              <span>{reaction.count}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
     </div>
 
     <div
@@ -198,6 +241,7 @@ function handleRowFocusOut(event: FocusEvent): void {
         onclick={requestReact}
         aria-label="React to message"
         title="React to message"
+        data-testid={`message-react-button-${message.id}`}
       >
         React
       </button>
@@ -221,7 +265,15 @@ function handleRowFocusOut(event: FocusEvent): void {
       >
         <button
           type="button"
-          class="block w-full rounded px-2 py-1 text-left text-sm text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+          class="block w-full rounded px-2 py-1 text-left text-sm text-foreground hover:bg-muted"
+          role="menuitem"
+          onclick={requestReact}
+        >
+          React
+        </button>
+        <button
+          type="button"
+          class="mt-1 block w-full rounded px-2 py-1 text-left text-sm text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
           role="menuitem"
           onclick={requestEdit}
           disabled={!isOwnMessage}
@@ -237,6 +289,29 @@ function handleRowFocusOut(event: FocusEvent): void {
         >
           Delete message
         </button>
+      </div>
+    {/if}
+
+    {#if pickerOpen}
+      <div
+        class="absolute right-2 top-10 z-20 w-44 rounded-md border border-border bg-card p-2 shadow-lg"
+        role="dialog"
+        aria-label="Emoji picker"
+        data-testid={`message-reaction-picker-${message.id}`}
+      >
+        <div class="grid grid-cols-4 gap-1">
+          {#each EMOJI_PICKER_OPTIONS as emoji, index (`${emoji}-${index}`)}
+            <button
+              type="button"
+              class="rounded px-1 py-1 text-base leading-none hover:bg-muted"
+              onclick={() => requestReactionToggle(emoji)}
+              aria-label={`React with ${emoji}`}
+              data-testid={`message-reaction-picker-option-${message.id}-${index}`}
+            >
+              {emoji}
+            </button>
+          {/each}
+        </div>
       </div>
     {/if}
   </div>

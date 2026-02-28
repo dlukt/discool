@@ -18,6 +18,7 @@ function makeMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
     createdAt: '2026-02-28T00:00:00Z',
     updatedAt: '2026-02-28T00:00:00Z',
     optimistic: false,
+    reactions: [],
     ...overrides,
   }
 }
@@ -56,6 +57,46 @@ describe('MessageBubble', () => {
       within(deleteMenu).getByRole('menuitem', { name: 'Delete message' }),
     )
     expect(onDeleteRequest).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens emoji picker and emits selected emoji reaction', async () => {
+    const onReactRequest = vi.fn()
+    const { getByTestId } = render(MessageBubble, {
+      message: makeMessage(),
+      currentUserId: 'user-1',
+      onReactRequest,
+    })
+
+    await fireEvent.click(getByTestId('message-react-button-message-1'))
+    expect(getByTestId('message-reaction-picker-message-1')).toBeInTheDocument()
+
+    await fireEvent.click(
+      getByTestId('message-reaction-picker-option-message-1-0'),
+    )
+    expect(onReactRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'message-1' }),
+      '😀',
+    )
+  })
+
+  it('clicking a reaction badge toggles that emoji', async () => {
+    const onReactRequest = vi.fn()
+    const { getByTestId } = render(MessageBubble, {
+      message: makeMessage({
+        reactions: [
+          { emoji: '🎉', count: 3, reacted: true },
+          { emoji: '👍', count: 1, reacted: false },
+        ],
+      }),
+      currentUserId: 'user-1',
+      onReactRequest,
+    })
+
+    await fireEvent.click(getByTestId('message-reaction-badge-message-1-0'))
+    expect(onReactRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'message-1' }),
+      '🎉',
+    )
   })
 
   it('keeps edit/delete disabled for non-owner messages', () => {

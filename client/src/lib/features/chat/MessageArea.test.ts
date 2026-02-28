@@ -32,6 +32,11 @@ const {
       updatedAt: string
       optimistic: boolean
       clientNonce?: string
+      reactions: Array<{
+        emoji: string
+        count: number
+        reacted: boolean
+      }>
     }>
   > = {}
 
@@ -67,13 +72,18 @@ const {
 
   const messageState = {
     version: 1,
+    currentUserId: null as string | null,
     timeline: vi.fn((guildSlug: string, channelSlug: string) => {
       return timelineByChannel[channelKey(guildSlug, channelSlug)] ?? []
     }),
     sendMessage: vi.fn(() => true),
     sendMessageUpdate: vi.fn(() => true),
     sendMessageDelete: vi.fn(() => true),
+    sendMessageReactionToggle: vi.fn(() => true),
     setActiveChannel: vi.fn(),
+    setCurrentUser: vi.fn((userId: string | null) => {
+      messageState.currentUserId = userId
+    }),
     ensureHistoryLoaded: vi.fn(
       async (guildSlug: string, channelSlug: string) => {
         ensureHistory(channelKey(guildSlug, channelSlug)).initialized = true
@@ -173,6 +183,7 @@ function seedChannelMessages(channelKey: string, count: number): void {
     createdAt: `2026-02-28T00:00:${String(index).padStart(2, '0')}Z`,
     updatedAt: `2026-02-28T00:00:${String(index).padStart(2, '0')}Z`,
     optimistic: false,
+    reactions: [],
   }))
 }
 
@@ -210,7 +221,9 @@ describe('MessageArea', () => {
     messageState.sendMessage.mockClear()
     messageState.sendMessageUpdate.mockClear()
     messageState.sendMessageDelete.mockClear()
+    messageState.sendMessageReactionToggle.mockClear()
     messageState.setActiveChannel.mockClear()
+    messageState.setCurrentUser.mockClear()
     messageState.ensureHistoryLoaded.mockClear()
     messageState.historyStateForChannel.mockClear()
     messageState.loadOlderHistory.mockClear()
@@ -464,6 +477,30 @@ describe('MessageArea', () => {
       'lobby',
       'general',
       'm-0',
+    )
+  })
+
+  it('routes emoji reaction selection to websocket toggle operation', async () => {
+    seedChannelMessages('lobby:general', 1)
+    messageState.version += 1
+
+    const { getByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    await fireEvent.click(getByTestId('message-react-button-m-0'))
+    await fireEvent.click(getByTestId('message-reaction-picker-option-m-0-3'))
+
+    expect(messageState.sendMessageReactionToggle).toHaveBeenCalledWith(
+      'lobby',
+      'general',
+      'm-0',
+      '👍',
     )
   })
 })

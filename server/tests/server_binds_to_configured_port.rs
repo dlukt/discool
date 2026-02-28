@@ -4914,6 +4914,250 @@ async fn websocket_message_update_delete_reject_non_owner_and_invalid_payloads()
 }
 
 #[tokio::test]
+async fn websocket_message_reaction_toggle_broadcasts_and_enforces_permissions() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "ws-react-owner", [151u8; 32]).await;
+    let peer_token = register_and_authenticate(&addr, "ws-react-peer", [152u8; 32]).await;
+
+    let guild_body = json!({ "name": "Reaction Guild" }).to_string();
+    let create_res =
+        http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&create_res), 201);
+    let guild_payload: serde_json::Value =
+        serde_json::from_str(response_body(&create_res)).unwrap();
+    let guild_slug = guild_payload["data"]["slug"].as_str().unwrap().to_string();
+    let guild_id = guild_payload["data"]["id"].as_str().unwrap().to_string();
+
+    let db_url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&db_url).await.unwrap();
+    let peer_id = sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username = ?1")
+        .bind("ws-react-peer")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let default_role_id = sqlx::query_scalar::<_, String>(
+        "SELECT id
+         FROM roles
+         WHERE guild_id = ?1
+           AND is_default = 1
+         LIMIT 1",
+    )
+    .bind(&guild_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let channel_id = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM channels WHERE guild_id = ?1 AND slug = ?2",
+    )
+    .bind(&guild_id)
+    .bind("general")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO guild_members (guild_id, user_id, joined_at, joined_via_invite_code)
+         VALUES (?1, ?2, ?3, NULL)",
+    )
+    .bind(&guild_id)
+    .bind(&peer_id)
+    .bind("2026-02-28T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (mut owner_stream, owner_response) =
+        websocket_connect(&addr, "/ws", Some(&owner_token)).await;
+    let (mut peer_stream, peer_response) = websocket_connect(&addr, "/ws", Some(&peer_token)).await;
+    assert_eq!(response_status(&owner_response), 101);
+    assert_eq!(response_status(&peer_response), 101);
+    let _ = websocket_read_json_with_op(&mut owner_stream, "hello", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut peer_stream, "hello", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_subscribe",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    websocket_send_text_frame(
+        &mut peer_stream,
+        &json!({
+            "op": "c_subscribe",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let _ = websocket_read_json_with_op(&mut owner_stream, "channel_update", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut peer_stream, "channel_update", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_message_create",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general",
+                "content": "Reaction target"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let owner_create = websocket_read_json_with_op(&mut owner_stream, "message_create", 1_500)
+        .await
+        .expect("owner should receive message_create");
+    let _ = websocket_read_json_with_op(&mut peer_stream, "message_create", 1_500).await;
+    let message_id = owner_create["d"]["id"].as_str().unwrap().to_string();
+
+    websocket_send_text_frame(
+        &mut peer_stream,
+        &json!({
+            "op": "c_message_reaction_toggle",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general",
+                "message_id": message_id.as_str(),
+                "emoji": "👍"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let owner_reaction =
+        websocket_read_json_with_op(&mut owner_stream, "message_reaction_update", 1_500)
+            .await
+            .expect("owner should receive reaction update");
+    let peer_reaction =
+        websocket_read_json_with_op(&mut peer_stream, "message_reaction_update", 1_500)
+            .await
+            .expect("peer should receive reaction update");
+    assert_eq!(
+        owner_reaction["d"]["message_id"],
+        json!(message_id.as_str())
+    );
+    assert_eq!(owner_reaction["d"]["reactions"][0]["emoji"], json!("👍"));
+    assert_eq!(owner_reaction["d"]["reactions"][0]["count"], json!(1));
+    assert_eq!(owner_reaction["d"]["reactions"][0]["reacted"], json!(false));
+    assert_eq!(peer_reaction["d"]["reactions"][0]["reacted"], json!(true));
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_message_reaction_toggle",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general",
+                "message_id": message_id.as_str(),
+                "emoji": "👍"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let owner_multi =
+        websocket_read_json_with_op(&mut owner_stream, "message_reaction_update", 1_500)
+            .await
+            .expect("owner should receive second reaction update");
+    let _ = websocket_read_json_with_op(&mut peer_stream, "message_reaction_update", 1_500).await;
+    assert_eq!(owner_multi["d"]["reactions"][0]["count"], json!(2));
+
+    sqlx::query(
+        "INSERT INTO channel_permission_overrides (channel_id, role_id, allow_bitflag, deny_bitflag)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&channel_id)
+    .bind(&default_role_id)
+    .bind(0_i64)
+    .bind(1024_i64)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    websocket_send_text_frame(
+        &mut peer_stream,
+        &json!({
+            "op": "c_message_reaction_toggle",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general",
+                "message_id": message_id.as_str(),
+                "emoji": "🎉"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let forbidden_add = websocket_read_json_with_op(&mut peer_stream, "error", 1_500)
+        .await
+        .expect("peer add should be forbidden when ADD_REACTIONS is denied");
+    assert_eq!(forbidden_add["d"]["code"], json!("FORBIDDEN"));
+
+    websocket_send_text_frame(
+        &mut peer_stream,
+        &json!({
+            "op": "c_message_reaction_toggle",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general",
+                "message_id": message_id.as_str(),
+                "emoji": "👍"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let peer_remove =
+        websocket_read_json_with_op(&mut peer_stream, "message_reaction_update", 1_500)
+            .await
+            .expect("peer should still be able to remove existing reaction");
+    let _ = websocket_read_json_with_op(&mut owner_stream, "message_reaction_update", 1_500).await;
+    assert_eq!(peer_remove["d"]["reactions"][0]["count"], json!(1));
+    assert_eq!(peer_remove["d"]["reactions"][0]["reacted"], json!(false));
+
+    let persisted_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)
+         FROM message_reactions
+         WHERE message_id = ?1
+           AND emoji = ?2",
+    )
+    .bind(&message_id)
+    .bind("👍")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted_count, 1);
+}
+
+#[tokio::test]
 async fn rest_message_history_supports_cursor_pagination_and_permissions() {
     use serde_json::json;
 
@@ -5000,6 +5244,40 @@ async fn rest_message_history_supports_cursor_pagination_and_permissions() {
         .unwrap();
     }
 
+    sqlx::query(
+        "INSERT INTO message_reactions (message_id, user_id, emoji, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind("msg-003")
+    .bind(&owner_id)
+    .bind("😀")
+    .bind("2026-02-28T00:00:04Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO message_reactions (message_id, user_id, emoji, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind("msg-003")
+    .bind(&member_id)
+    .bind("😀")
+    .bind("2026-02-28T00:00:05Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO message_reactions (message_id, user_id, emoji, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind("msg-004")
+    .bind(&owner_id)
+    .bind("🎉")
+    .bind("2026-02-28T00:00:06Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let first_path = format!("/api/v1/guilds/{guild_slug}/channels/general/messages?limit=2");
     let first_res = http_get_with_bearer(&addr, &first_path, &member_token).await;
     assert_eq!(response_status(&first_res), 200);
@@ -5008,6 +5286,12 @@ async fn rest_message_history_supports_cursor_pagination_and_permissions() {
     assert_eq!(first_data.len(), 2);
     assert_eq!(first_data[0]["id"], json!("msg-003"));
     assert_eq!(first_data[1]["id"], json!("msg-004"));
+    assert_eq!(first_data[0]["reactions"][0]["emoji"], json!("😀"));
+    assert_eq!(first_data[0]["reactions"][0]["count"], json!(2));
+    assert_eq!(first_data[0]["reactions"][0]["reacted"], json!(true));
+    assert_eq!(first_data[1]["reactions"][0]["emoji"], json!("🎉"));
+    assert_eq!(first_data[1]["reactions"][0]["count"], json!(1));
+    assert_eq!(first_data[1]["reactions"][0]["reacted"], json!(false));
     let cursor = first_payload["cursor"]
         .as_str()
         .expect("expected history cursor on first page")

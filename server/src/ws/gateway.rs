@@ -56,6 +56,14 @@ struct MessageDeletePayload {
 }
 
 #[derive(Debug, Deserialize)]
+struct MessageReactionTogglePayload {
+    guild_slug: String,
+    channel_slug: String,
+    message_id: String,
+    emoji: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct TypingStartPayload {
     guild_slug: String,
     channel_slug: String,
@@ -265,6 +273,57 @@ async fn handle_message_delete(
     Ok(())
 }
 
+async fn handle_message_reaction_toggle(
+    pool: &DbPool,
+    user_id: &str,
+    payload: MessageReactionTogglePayload,
+) -> Result<(), AppError> {
+    let updated = message_service::toggle_message_reaction(
+        pool,
+        user_id,
+        message_service::ToggleMessageReactionInput {
+            guild_slug: payload.guild_slug,
+            channel_slug: payload.channel_slug,
+            message_id: payload.message_id,
+            emoji: payload.emoji,
+        },
+    )
+    .await?;
+    let targets = registry::channel_connection_targets(&updated.guild_slug, &updated.channel_slug);
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let viewer_user_ids = targets
+        .iter()
+        .map(|target| target.user_id.clone())
+        .collect::<Vec<_>>();
+    let reactions_by_viewer = message_service::list_message_reaction_summaries_for_viewers(
+        pool,
+        &updated.message_id,
+        &viewer_user_ids,
+    )
+    .await?;
+    for target in targets {
+        let reactions = reactions_by_viewer
+            .get(&target.user_id)
+            .cloned()
+            .unwrap_or_default();
+        let payload = message_service::MessageReactionUpdateResponse {
+            guild_slug: updated.guild_slug.clone(),
+            channel_slug: updated.channel_slug.clone(),
+            message_id: updated.message_id.clone(),
+            actor_user_id: updated.actor_user_id.clone(),
+            reactions,
+        };
+        registry::send_event(
+            &target.connection_id,
+            ServerOp::MessageReactionUpdate,
+            &payload,
+        );
+    }
+    Ok(())
+}
+
 fn handle_typing_start(connection_id: &str, user_id: &str, payload: TypingStartPayload) {
     let event_payload = json!({
         "guild_slug": payload.guild_slug,
@@ -368,6 +427,17 @@ async fn process_client_message(
             match parse_payload::<MessageDeletePayload>(envelope.d, &envelope.op) {
                 Ok(payload) => {
                     if let Err(error) = handle_message_delete(pool, user_id, payload).await {
+                        send_app_error(connection_id, error);
+                    }
+                }
+                Err(error) => send_protocol_error(connection_id, error),
+            }
+        }
+        ClientOp::MessageReactionToggle => {
+            match parse_payload::<MessageReactionTogglePayload>(envelope.d, &envelope.op) {
+                Ok(payload) => {
+                    if let Err(error) = handle_message_reaction_toggle(pool, user_id, payload).await
+                    {
                         send_app_error(connection_id, error);
                     }
                 }

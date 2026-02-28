@@ -39,6 +39,12 @@ pub struct ConnectionSnapshot {
     pub active_channel: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ChannelConnectionTarget {
+    pub connection_id: String,
+    pub user_id: String,
+}
+
 static CONNECTION_REGISTRY: OnceLock<ConnectionRegistry> = OnceLock::new();
 
 fn registry() -> &'static ConnectionRegistry {
@@ -227,6 +233,27 @@ pub fn broadcast_to_channel<T: Serialize>(
     for connection_id in targets {
         send_event(&connection_id, op, payload);
     }
+}
+
+pub fn channel_connection_targets(
+    guild_slug: &str,
+    channel_slug: &str,
+) -> Vec<ChannelConnectionTarget> {
+    let key = channel_key(guild_slug, channel_slug);
+    registry()
+        .connections
+        .iter()
+        .filter_map(|entry| {
+            if lock_read(&entry.channel_subscriptions).contains(&key) {
+                Some(ChannelConnectionTarget {
+                    connection_id: entry.key().clone(),
+                    user_id: entry.user_id.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

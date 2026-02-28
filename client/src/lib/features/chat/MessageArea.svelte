@@ -276,6 +276,24 @@ function confirmDeleteMessage(): void {
   closeDeleteDialog()
 }
 
+function handleReactionRequest(message: ChatMessage, emoji: string): void {
+  if (mode !== 'channel') return
+  const normalizedEmoji = emoji.trim()
+  if (!normalizedEmoji) return
+  if (
+    message.guildSlug !== activeGuild ||
+    message.channelSlug !== activeChannel
+  ) {
+    return
+  }
+  messageState.sendMessageReactionToggle(
+    message.guildSlug,
+    message.channelSlug,
+    message.id,
+    normalizedEmoji,
+  )
+}
+
 function handleComposerKeydown(event: KeyboardEvent) {
   if (
     event.key === 'ArrowUp' &&
@@ -414,6 +432,10 @@ $effect(() => {
   void tick().then(() => {
     composerInput?.focus()
   })
+})
+
+$effect(() => {
+  messageState.setCurrentUser(currentSessionUser?.id ?? null)
 })
 
 $effect(() => {
@@ -642,6 +664,7 @@ onMount(() => {
                     currentUserId={currentSessionUser?.id ?? null}
                     onEditRequest={startEditingMessage}
                     onDeleteRequest={requestDeleteMessage}
+                    onReactRequest={handleReactionRequest}
                   />
                 </div>
               {/each}

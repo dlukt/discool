@@ -1,5 +1,17 @@
 const DEFAULT_ROLE_COLOR = '#99aab5'
 
+export type ChatMessageReaction = {
+  emoji: string
+  count: number
+  reacted: boolean
+}
+
+export type ChatMessageReactionWire = {
+  emoji?: string
+  count?: number
+  reacted?: boolean
+}
+
 export type ChatMessage = {
   id: string
   guildSlug: string
@@ -15,6 +27,7 @@ export type ChatMessage = {
   updatedAt: string
   optimistic: boolean
   clientNonce?: string
+  reactions: ChatMessageReaction[]
 }
 
 export type ChatMessageWire = {
@@ -31,6 +44,36 @@ export type ChatMessageWire = {
   created_at: string
   updated_at?: string
   client_nonce?: string | null
+  reactions?: ChatMessageReactionWire[]
+}
+
+export function toChatMessageReactions(
+  wireReactions: ChatMessageReactionWire[] | undefined,
+): ChatMessageReaction[] {
+  if (!Array.isArray(wireReactions)) return []
+
+  const normalized = wireReactions
+    .map((reaction) => {
+      const emoji = reaction.emoji?.trim()
+      if (!emoji) return null
+      const count =
+        typeof reaction.count === 'number' && Number.isFinite(reaction.count)
+          ? Math.max(0, Math.trunc(reaction.count))
+          : 0
+      if (count <= 0) return null
+      return {
+        emoji,
+        count,
+        reacted: reaction.reacted === true,
+      }
+    })
+    .filter((reaction): reaction is ChatMessageReaction => reaction !== null)
+
+  normalized.sort(
+    (left, right) =>
+      right.count - left.count || left.emoji.localeCompare(right.emoji),
+  )
+  return normalized
 }
 
 export function toChatMessage(wire: ChatMessageWire): ChatMessage {
@@ -52,5 +95,6 @@ export function toChatMessage(wire: ChatMessageWire): ChatMessage {
     updatedAt: wire.updated_at || wire.created_at,
     optimistic: false,
     clientNonce: wire.client_nonce || undefined,
+    reactions: toChatMessageReactions(wire.reactions),
   }
 }

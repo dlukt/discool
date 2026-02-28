@@ -39,6 +39,11 @@ const historyApiMock = vi.hoisted(() => {
         updatedAt: string
         optimistic: boolean
         clientNonce?: string
+        reactions: Array<{
+          emoji: string
+          count: number
+          reacted: boolean
+        }>
       }>
       cursor: string | null
     }>,
@@ -76,6 +81,7 @@ function makeMessage(id: string, createdAt: string) {
     createdAt,
     updatedAt: createdAt,
     optimistic: false,
+    reactions: [],
   }
 }
 
@@ -301,5 +307,76 @@ describe('messageState', () => {
 
     timeline = messageState.timeline('lobby', 'general')
     expect(timeline.map((message) => message.id)).toEqual(['msg-001'])
+  })
+
+  it('sends reaction toggle op and ingests message_reaction_update snapshots', () => {
+    messageState.setCurrentUser('user-1')
+    messageState.ingestServerMessage(
+      makeMessage('msg-010', '2026-02-28T00:00:01Z'),
+    )
+
+    const sent = messageState.sendMessageReactionToggle(
+      'lobby',
+      'general',
+      'msg-010',
+      '🎉',
+    )
+    expect(sent).toBe(true)
+    expect(wsMock.wsClient.send).toHaveBeenCalledWith(
+      'c_message_reaction_toggle',
+      expect.objectContaining({
+        guild_slug: 'lobby',
+        channel_slug: 'general',
+        message_id: 'msg-010',
+        emoji: '🎉',
+      }),
+    )
+
+    wsMock.state.listener?.({
+      op: 'message_reaction_update',
+      d: {
+        guild_slug: 'lobby',
+        channel_slug: 'general',
+        message_id: 'msg-010',
+        actor_user_id: 'user-1',
+        reactions: [{ emoji: '🎉', count: 1, reacted: true }],
+      },
+    })
+
+    let timeline = messageState.timeline('lobby', 'general')
+    expect(timeline[0]?.reactions).toEqual([
+      { emoji: '🎉', count: 1, reacted: true },
+    ])
+
+    wsMock.state.listener?.({
+      op: 'message_reaction_update',
+      d: {
+        guild_slug: 'lobby',
+        channel_slug: 'general',
+        message_id: 'msg-010',
+        actor_user_id: 'user-2',
+        reactions: [{ emoji: '🎉', count: 2, reacted: true }],
+      },
+    })
+    timeline = messageState.timeline('lobby', 'general')
+    expect(timeline[0]?.reactions).toEqual([
+      { emoji: '🎉', count: 2, reacted: true },
+    ])
+
+    messageState.setCurrentUser('user-3')
+    wsMock.state.listener?.({
+      op: 'message_reaction_update',
+      d: {
+        guild_slug: 'lobby',
+        channel_slug: 'general',
+        message_id: 'msg-010',
+        actor_user_id: 'user-4',
+        reactions: [{ emoji: '🎉', count: 3, reacted: true }],
+      },
+    })
+    timeline = messageState.timeline('lobby', 'general')
+    expect(timeline[0]?.reactions).toEqual([
+      { emoji: '🎉', count: 3, reacted: true },
+    ])
   })
 })
