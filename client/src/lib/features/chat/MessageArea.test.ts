@@ -4,16 +4,42 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const {
   wsLifecycle,
   lifecycleListeners,
+  wsEnvelopeListeners,
+  toastState,
+  voiceState,
   timelineByChannel,
   historyByChannel,
   messageState,
   identityState,
   guildState,
 } = vi.hoisted(() => {
-  const wsLifecycle = { value: 'connected' as const }
+  const wsLifecycle = {
+    value: 'connected' as
+      | 'connecting'
+      | 'connected'
+      | 'reconnecting'
+      | 'disconnected',
+  }
   const lifecycleListeners = new Set<
     (state: typeof wsLifecycle.value) => void
   >()
+  const wsEnvelopeListeners = new Set<(envelope: unknown) => void>()
+  const toastState = {
+    show: vi.fn(),
+    dismiss: vi.fn(),
+    clearAll: vi.fn(),
+  }
+  const voiceState = {
+    statusMessageForChannel: vi.fn<
+      (guildSlug: string, channelSlug: string) => string | null
+    >(() => null),
+    statusForChannel: vi.fn<
+      (
+        guildSlug: string,
+        channelSlug: string,
+      ) => 'idle' | 'connecting' | 'connected' | 'retrying' | 'failed'
+    >(() => 'idle'),
+  }
 
   const timelineByChannel: Record<
     string,
@@ -191,6 +217,9 @@ const {
   return {
     wsLifecycle,
     lifecycleListeners,
+    wsEnvelopeListeners,
+    toastState,
+    voiceState,
     timelineByChannel,
     historyByChannel,
     dmKey,
@@ -203,6 +232,10 @@ const {
 vi.mock('$lib/ws/client', () => ({
   wsClient: {
     getLifecycleState: vi.fn(() => wsLifecycle.value),
+    subscribe: vi.fn((listener: (envelope: unknown) => void) => {
+      wsEnvelopeListeners.add(listener)
+      return () => wsEnvelopeListeners.delete(listener)
+    }),
     subscribeLifecycle: vi.fn(
       (listener: (state: typeof wsLifecycle.value) => void) => {
         lifecycleListeners.add(listener)
@@ -225,6 +258,15 @@ vi.mock('./messageStore.svelte', () => ({
   messageState,
 }))
 
+vi.mock('$lib/feedback/toastStore.svelte', () => ({
+  toastState,
+}))
+
+vi.mock('$lib/features/voice/voiceStore.svelte', () => ({
+  voiceState,
+}))
+
+import { PERMISSION_DENIED_MESSAGE } from '$lib/feedback/userFacingError'
 import MessageArea from './MessageArea.svelte'
 
 function seedChannelMessages(channelKey: string, count: number): void {
@@ -275,6 +317,9 @@ function seedDmMessages(dmSlug: string, count: number): void {
 
 describe('MessageArea', () => {
   beforeEach(() => {
+    wsLifecycle.value = 'connected'
+    lifecycleListeners.clear()
+    wsEnvelopeListeners.clear()
     Object.keys(timelineByChannel).forEach((key) => {
       delete timelineByChannel[key]
     })
@@ -331,6 +376,13 @@ describe('MessageArea', () => {
     messageState.clearPendingNewForDm.mockClear()
     messageState.typingUserIdsForChannel.mockClear()
     messageState.typingUserIdsForChannel.mockReturnValue([])
+    toastState.show.mockClear()
+    toastState.dismiss.mockClear()
+    toastState.clearAll.mockClear()
+    voiceState.statusMessageForChannel.mockClear()
+    voiceState.statusMessageForChannel.mockReturnValue(null)
+    voiceState.statusForChannel.mockClear()
+    voiceState.statusForChannel.mockReturnValue('idle')
     guildState.memberByUserId.mockClear()
     guildState.memberRoleDataForGuild.mockClear()
     guildState.loadMembers.mockClear()
@@ -814,6 +866,49 @@ describe('MessageArea', () => {
     })
   })
 
+  it('shows standardized permission copy for blocked attachment sends', async () => {
+    guildState.bySlug.mockReturnValue({ isOwner: false })
+    guildState.memberRoleDataForGuild.mockReturnValue({
+      members: [
+        {
+          userId: 'user-1',
+          username: 'alice',
+          displayName: 'Alice',
+          avatarColor: '#3366ff',
+          presenceStatus: 'online',
+          highestRoleColor: '#3366ff',
+          roleIds: [],
+          isOwner: false,
+          canAssignRoles: false,
+        },
+      ],
+      roles: [{ id: 'role-default', permissionsBitflag: 0, isDefault: true }],
+      assignableRoleIds: [],
+      canManageRoles: false,
+    })
+
+    const { getByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    const attachmentInput = getByTestId(
+      'message-attachment-input',
+    ) as HTMLInputElement
+    const file = new File(['image'], 'restricted.png', { type: 'image/png' })
+    await fireEvent.change(attachmentInput, { target: { files: [file] } })
+    await fireEvent.click(getByTestId('message-composer-submit'))
+
+    expect(messageState.uploadAttachment).not.toHaveBeenCalled()
+    expect(getByTestId('attachment-error')).toHaveTextContent(
+      PERMISSION_DENIED_MESSAGE,
+    )
+  })
+
   it('requires confirmation before delete operation is sent', async () => {
     seedChannelMessages('lobby:general', 1)
     messageState.version += 1
@@ -873,5 +968,97 @@ describe('MessageArea', () => {
       'm-0',
       '👍',
     )
+  })
+
+  it('shows plain-language connection status text', () => {
+    wsLifecycle.value = 'reconnecting'
+    const { getByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    expect(getByTestId('connection-status')).toHaveTextContent(
+      'Connection lost. Reconnecting...',
+    )
+  })
+
+  it('shows required voice retry/failure copy via aria-live status', () => {
+    voiceState.statusMessageForChannel.mockReturnValue(
+      'Could not connect to voice. Retrying...',
+    )
+    voiceState.statusForChannel.mockReturnValue('retrying')
+    const { getByTestId, rerender } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+    const retryStatus = getByTestId('voice-connection-status')
+    expect(retryStatus).toHaveTextContent(
+      'Could not connect to voice. Retrying...',
+    )
+    expect(retryStatus).toHaveAttribute('aria-live', 'polite')
+
+    voiceState.statusMessageForChannel.mockReturnValue(
+      'Voice connection failed. Check your network.',
+    )
+    voiceState.statusForChannel.mockReturnValue('failed')
+    rerender({
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    const failedStatus = getByTestId('voice-connection-status')
+    expect(failedStatus).toHaveTextContent(
+      'Voice connection failed. Check your network.',
+    )
+    expect(failedStatus).toHaveAttribute('aria-live', 'assertive')
+  })
+
+  it('shows retry toast when send fails and retries via toast action', async () => {
+    messageState.sendMessage.mockReturnValue(false)
+
+    const { getByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    const composer = getByTestId(
+      'message-composer-input',
+    ) as HTMLTextAreaElement
+
+    await fireEvent.input(composer, { target: { value: 'hello retry' } })
+    await fireEvent.keyDown(composer, { key: 'Enter' })
+
+    expect(toastState.show).toHaveBeenCalledTimes(1)
+    expect(toastState.show).toHaveBeenCalledWith(
+      expect.objectContaining({
+        variant: 'error',
+        actionLabel: 'Retry?',
+      }),
+    )
+
+    const toastInput = toastState.show.mock.calls[0]?.[0] as
+      | { onAction?: () => void }
+      | undefined
+    expect(toastInput?.onAction).toBeTypeOf('function')
+
+    messageState.sendMessage.mockReturnValue(true)
+    toastInput?.onAction?.()
+    expect(messageState.sendMessage).toHaveBeenCalledTimes(2)
   })
 })

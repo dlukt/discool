@@ -11,6 +11,14 @@ import {
 import { blockState } from '$lib/features/identity/blockStore.svelte'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
 import ProfileSettingsView from '$lib/features/identity/ProfileSettingsView.svelte'
+import { voiceState } from '$lib/features/voice/voiceStore.svelte'
+import { toastState } from '$lib/feedback/toastStore.svelte'
+import {
+  connectionStatusText,
+  PERMISSION_DENIED_MESSAGE,
+  parseWsErrorEnvelope,
+  toUserFacingError,
+} from '$lib/feedback/userFacingError'
 import { wsClient } from '$lib/ws/client'
 import type { WsLifecycleState } from '$lib/ws/protocol'
 import MessageBubble from './MessageBubble.svelte'
@@ -54,6 +62,7 @@ const HISTORY_LOAD_TRIGGER_PX = 120
 const JUMP_TO_PRESENT_THRESHOLD_PX = 320
 const HISTORY_SKELETON_COUNT = 4
 const TYPING_START_THROTTLE_MS = 1_500
+const OPERATION_STATUS_AUTO_CLEAR_MS = 1_500
 
 let {
   mode,
@@ -82,7 +91,17 @@ let shouldShowRecoveryNudge = $derived(
   showRecoveryNudge && (mode === 'home' || mode === 'channel' || mode === 'dm'),
 )
 let wsLifecycleState = $state<WsLifecycleState>(wsClient.getLifecycleState())
-let showReconnectingBanner = $derived(wsLifecycleState === 'reconnecting')
+let connectionStatusMessage = $derived(connectionStatusText(wsLifecycleState))
+let voiceStatusMessage = $derived(
+  isChannelMode
+    ? voiceState.statusMessageForChannel(activeGuild, activeChannel)
+    : null,
+)
+let voiceConnectionState = $derived(
+  isChannelMode
+    ? voiceState.statusForChannel(activeGuild, activeChannel)
+    : 'idle',
+)
 let composerInput = $state<HTMLTextAreaElement | null>(null)
 let composerValue = $state('')
 let composerSelection = $state({ start: 0, end: 0 })
@@ -106,6 +125,9 @@ let attachmentContextKey = $state<string | null>(null)
 let lastTypingStartSentAt = $state(0)
 let typingStartChannelKey = $state<string | null>(null)
 let restoringTimelineKey = $state<string | null>(null)
+let operationStatusText = $state<string | null>(null)
+let operationStatusTone = $state<'default' | 'error'>('default')
+let operationStatusResetTimer: ReturnType<typeof setTimeout> | null = null
 
 let channelKey = $derived(
   mode === 'channel'
@@ -375,9 +397,31 @@ function buildCurrentAuthor(): ChatAuthorInput | null {
   }
 }
 
+function clearOperationStatusTimer(): void {
+  if (operationStatusResetTimer === null) return
+  clearTimeout(operationStatusResetTimer)
+  operationStatusResetTimer = null
+}
+
+function setOperationStatus(
+  text: string,
+  tone: 'default' | 'error' = 'default',
+  autoClearMs?: number,
+): void {
+  operationStatusText = text
+  operationStatusTone = tone
+  clearOperationStatusTimer()
+  if (typeof autoClearMs === 'number' && autoClearMs > 0) {
+    operationStatusResetTimer = setTimeout(() => {
+      operationStatusText = null
+      operationStatusTone = 'default'
+      operationStatusResetTimer = null
+    }, autoClearMs)
+  }
+}
+
 function messageFromError(error: unknown, fallback: string): string {
-  if (error instanceof Error && error.message) return error.message
-  return fallback
+  return toUserFacingError(error, fallback).message
 }
 
 function formatFileSize(sizeBytes: number): string {
@@ -531,6 +575,7 @@ async function sendComposerMessage() {
   attachmentError = null
 
   if (composerEdit && isChannelMode) {
+    setOperationStatus('Saving...')
     const sent = messageState.sendMessageUpdate(
       activeGuild,
       activeChannel,
@@ -542,15 +587,23 @@ async function sendComposerMessage() {
       composerEdit = null
       composerSelection = { start: 0, end: 0 }
       resetTypingStartThrottle()
+      setOperationStatus('Saved.', 'default', OPERATION_STATUS_AUTO_CLEAR_MS)
+    } else {
+      const message =
+        connectionStatusText(wsLifecycleState) ?? 'Could not save message.'
+      setOperationStatus(message, 'error')
+      toastState.show({ variant: 'error', message })
     }
     return
   }
 
   if (selectedAttachment && isChannelMode) {
     if (!canAttachFiles) {
-      attachmentError = 'Missing ATTACH_FILES permission in this channel'
+      attachmentError = PERMISSION_DENIED_MESSAGE
+      setOperationStatus(PERMISSION_DENIED_MESSAGE, 'error')
       return
     }
+    setOperationStatus('Uploading attachment...')
     attachmentUploadInFlight = true
     attachmentUploadProgress = 0
     try {
@@ -565,8 +618,15 @@ async function sendComposerMessage() {
       composerSelection = { start: 0, end: 0 }
       clearSelectedAttachment()
       resetTypingStartThrottle()
+      setOperationStatus(
+        'Upload complete.',
+        'default',
+        OPERATION_STATUS_AUTO_CLEAR_MS,
+      )
     } catch (error) {
       attachmentError = messageFromError(error, 'Failed to upload attachment')
+      setOperationStatus(attachmentError, 'error')
+      toastState.show({ variant: 'error', message: attachmentError })
     } finally {
       attachmentUploadInFlight = false
       attachmentUploadProgress = null
@@ -574,21 +634,60 @@ async function sendComposerMessage() {
     return
   }
 
+  setOperationStatus(composerEdit ? 'Saving...' : 'Sending...')
+  const contentToSend = composerValue
+  const sendChannel = activeGuild
+  const sendConversation = activeChannel
+  const sendDm = activeDmSlug
+
   const sent = isChannelMode
     ? messageState.sendMessage(
-        activeGuild,
-        activeChannel,
-        composerValue,
+        sendChannel,
+        sendConversation,
+        contentToSend,
         author,
       )
-    : activeDmSlug
-      ? messageState.sendDmMessage(activeDmSlug, composerValue, author)
+    : sendDm
+      ? messageState.sendDmMessage(sendDm, contentToSend, author)
       : false
+
   if (sent) {
-    composerValue = ''
+    if (composerValue === contentToSend) {
+      composerValue = ''
+    }
     composerSelection = { start: 0, end: 0 }
     resetTypingStartThrottle()
+    setOperationStatus('Sent.', 'default', OPERATION_STATUS_AUTO_CLEAR_MS)
+    return
   }
+
+  const sendFailureMessage =
+    connectionStatusText(wsLifecycleState) ?? 'Message failed to send.'
+  setOperationStatus(sendFailureMessage, 'error')
+  toastState.show({
+    variant: 'error',
+    message: sendFailureMessage,
+    actionLabel: 'Retry?',
+    onAction: () => {
+      const retried = isChannelMode
+        ? messageState.sendMessage(
+            sendChannel,
+            sendConversation,
+            contentToSend,
+            author,
+          )
+        : sendDm
+          ? messageState.sendDmMessage(sendDm, contentToSend, author)
+          : false
+      if (!retried) return
+      if (composerValue === contentToSend) {
+        composerValue = ''
+      }
+      composerSelection = { start: 0, end: 0 }
+      resetTypingStartThrottle()
+      setOperationStatus('Sent.', 'default', OPERATION_STATUS_AUTO_CLEAR_MS)
+    },
+  })
 }
 
 function findLatestOwnMessage(): ChatMessage | null {
@@ -647,12 +746,20 @@ function closeDeleteDialog(): void {
 
 function confirmDeleteMessage(): void {
   if (!pendingDeleteMessage || mode !== 'channel') return
+  setOperationStatus('Deleting...')
   const sent = messageState.sendMessageDelete(
     pendingDeleteMessage.guildSlug,
     pendingDeleteMessage.channelSlug,
     pendingDeleteMessage.id,
   )
-  if (!sent) return
+  if (!sent) {
+    const message =
+      connectionStatusText(wsLifecycleState) ?? 'Could not delete message.'
+    setOperationStatus(message, 'error')
+    toastState.show({ variant: 'error', message })
+    return
+  }
+  setOperationStatus('Deleted.', 'default', OPERATION_STATUS_AUTO_CLEAR_MS)
   closeDeleteDialog()
 }
 
@@ -1066,9 +1173,21 @@ $effect(() => {
 })
 
 onMount(() => {
-  return wsClient.subscribeLifecycle((state) => {
+  const unsubscribeLifecycle = wsClient.subscribeLifecycle((state) => {
     wsLifecycleState = state
   })
+  const unsubscribeEnvelopes = wsClient.subscribe((envelope) => {
+    const wsError = parseWsErrorEnvelope(envelope)
+    if (!wsError) return
+    const userFacing = toUserFacingError(wsError, 'Message operation failed.')
+    setOperationStatus(userFacing.message, 'error')
+    toastState.show({ variant: 'error', message: userFacing.message })
+  })
+  return () => {
+    clearOperationStatusTimer()
+    unsubscribeLifecycle()
+    unsubscribeEnvelopes()
+  }
 })
 </script>
 
@@ -1091,12 +1210,23 @@ onMount(() => {
       <p class="text-sm text-muted-foreground">{detailText}</p>
     </header>
 
-    {#if showReconnectingBanner}
+    {#if connectionStatusMessage}
       <p
         class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200"
-        data-testid="reconnecting-status"
+        data-testid="connection-status"
+        aria-live="polite"
       >
-        Reconnecting...
+        {connectionStatusMessage}
+      </p>
+    {/if}
+
+    {#if voiceStatusMessage}
+      <p
+        class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        data-testid="voice-connection-status"
+        aria-live={voiceConnectionState === 'failed' ? 'assertive' : 'polite'}
+      >
+        {voiceStatusMessage}
       </p>
     {/if}
 
@@ -1320,7 +1450,7 @@ onMount(() => {
               disabled={!canAttachFiles || attachmentUploadInFlight}
               title={canAttachFiles
                 ? 'Attach file'
-                : 'You do not have permission to attach files'}
+                : PERMISSION_DENIED_MESSAGE}
               aria-label="Attach file"
               data-testid="message-attachment-button"
             >
@@ -1359,6 +1489,15 @@ onMount(() => {
             data-testid="typing-indicator"
           >
             {typingIndicatorText}
+          </p>
+        {/if}
+        {#if operationStatusText}
+          <p
+            class={`mt-2 text-xs ${operationStatusTone === 'error' ? 'text-destructive' : 'text-muted-foreground'}`}
+            aria-live={operationStatusTone === 'error' ? 'assertive' : 'polite'}
+            data-testid="composer-operation-status"
+          >
+            {operationStatusText}
           </p>
         {/if}
         <p class="mt-2 text-xs text-muted-foreground">

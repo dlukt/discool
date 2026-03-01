@@ -107,13 +107,13 @@ development_status:
   6-8-typing-indicators-and-channel-activity: done
   6-9-direct-messages: done
   6-10-user-blocking-complete-erasure: done
-  6-11-error-handling-and-status-communication: backlog
-  6-12-quick-switcher: backlog
+  6-11-error-handling-and-status-communication: done
+  6-12-quick-switcher: review
   epic-6-retrospective: optional
 
   # Epic 7: Voice Communication
-  epic-7: backlog
-  7-1-webrtc-signaling-and-peer-connection: backlog
+  epic-7: in-progress
+  7-1-webrtc-signaling-and-peer-connection: review
   7-2-voice-bar-and-basic-controls: backlog
   7-3-voice-channel-participants-display: backlog
   7-4-individual-volume-control: backlog

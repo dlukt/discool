@@ -6,6 +6,8 @@ import { ApiError, getInstanceStatus, type InstanceStatus } from '$lib/api'
 
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import SetupPage from '$lib/components/SetupPage.svelte'
+// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
+import ToastViewport from '$lib/components/ToastViewport.svelte'
 import { channelState } from '$lib/features/channel/channelStore.svelte'
 import { dmState } from '$lib/features/dm/dmStore.svelte'
 import {
@@ -606,3 +608,5 @@ onMount(() => {
     <p class="text-center text-sm text-muted-foreground">Signing in...</p>
   </main>
 {/if}
+
+<ToastViewport />
