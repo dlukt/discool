@@ -22,6 +22,8 @@ pub struct Config {
     #[serde(default)]
     pub attachments: AttachmentConfig,
     #[serde(default)]
+    pub voice: VoiceConfig,
+    #[serde(default)]
     pub p2p: P2pConfig,
     #[serde(default)]
     pub email: EmailConfig,
@@ -133,6 +135,78 @@ impl Config {
                 "attachments.upload_dir",
                 format!("failed to create directory: {err}"),
             ));
+        }
+
+        if self.voice.stun_urls.is_empty() {
+            return Err(ConfigValidationError::new(
+                "voice.stun_urls",
+                "must include at least one STUN server URL",
+            ));
+        }
+        for url in &self.voice.stun_urls {
+            let trimmed = url.trim();
+            if trimmed.is_empty() {
+                return Err(ConfigValidationError::new(
+                    "voice.stun_urls",
+                    "must not include empty entries",
+                ));
+            }
+            if !trimmed.starts_with("stun:") && !trimmed.starts_with("stuns:") {
+                return Err(ConfigValidationError::new(
+                    "voice.stun_urls",
+                    "each URL must start with stun: or stuns:",
+                ));
+            }
+        }
+        if self.voice.join_timeout_millis == 0 {
+            return Err(ConfigValidationError::new(
+                "voice.join_timeout_millis",
+                "must be >= 1",
+            ));
+        }
+        if self.voice.retry_initial_millis == 0 {
+            return Err(ConfigValidationError::new(
+                "voice.retry_initial_millis",
+                "must be >= 1",
+            ));
+        }
+        if self.voice.retry_max_millis < self.voice.retry_initial_millis {
+            return Err(ConfigValidationError::new(
+                "voice.retry_max_millis",
+                "must be >= voice.retry_initial_millis",
+            ));
+        }
+        if self.voice.retry_max_attempts == 0 {
+            return Err(ConfigValidationError::new(
+                "voice.retry_max_attempts",
+                "must be >= 1",
+            ));
+        }
+        if let Some(turn) = self.voice.turn.as_ref() {
+            if turn.url.trim().is_empty() {
+                return Err(ConfigValidationError::new(
+                    "voice.turn.url",
+                    "must not be empty",
+                ));
+            }
+            if !turn.url.starts_with("turn:") && !turn.url.starts_with("turns:") {
+                return Err(ConfigValidationError::new(
+                    "voice.turn.url",
+                    "must start with turn: or turns:",
+                ));
+            }
+            if turn.username.trim().is_empty() {
+                return Err(ConfigValidationError::new(
+                    "voice.turn.username",
+                    "must not be empty",
+                ));
+            }
+            if turn.credential.trim().is_empty() {
+                return Err(ConfigValidationError::new(
+                    "voice.turn.credential",
+                    "must not be empty",
+                ));
+            }
         }
 
         if self.p2p.enabled {
@@ -421,6 +495,12 @@ impl Config {
             database_url = %db_url,
             attachment_upload_dir = %self.attachments.upload_dir,
             attachment_max_size_bytes = self.attachments.max_size_bytes,
+            voice_stun_server_count = self.voice.stun_urls.len(),
+            voice_turn_enabled = self.voice.turn.is_some(),
+            voice_join_timeout_millis = self.voice.join_timeout_millis,
+            voice_retry_initial_millis = self.voice.retry_initial_millis,
+            voice_retry_max_millis = self.voice.retry_max_millis,
+            voice_retry_max_attempts = self.voice.retry_max_attempts,
             p2p_enabled = self.p2p.enabled,
             p2p_discovery_enabled = self.p2p.discovery.enabled,
             p2p_listen_host = %self.p2p.listen_host,
@@ -511,6 +591,42 @@ impl Default for AttachmentConfig {
             max_size_bytes: default_attachment_max_size_bytes(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VoiceConfig {
+    #[serde(default = "default_voice_stun_urls")]
+    pub stun_urls: Vec<String>,
+    #[serde(default)]
+    pub turn: Option<VoiceTurnConfig>,
+    #[serde(default = "default_voice_join_timeout_millis")]
+    pub join_timeout_millis: u64,
+    #[serde(default = "default_voice_retry_initial_millis")]
+    pub retry_initial_millis: u64,
+    #[serde(default = "default_voice_retry_max_millis")]
+    pub retry_max_millis: u64,
+    #[serde(default = "default_voice_retry_max_attempts")]
+    pub retry_max_attempts: u32,
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            stun_urls: default_voice_stun_urls(),
+            turn: None,
+            join_timeout_millis: default_voice_join_timeout_millis(),
+            retry_initial_millis: default_voice_retry_initial_millis(),
+            retry_max_millis: default_voice_retry_max_millis(),
+            retry_max_attempts: default_voice_retry_max_attempts(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VoiceTurnConfig {
+    pub url: String,
+    pub username: String,
+    pub credential: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -691,6 +807,26 @@ fn default_attachment_upload_dir() -> String {
 
 fn default_attachment_max_size_bytes() -> usize {
     10 * 1024 * 1024
+}
+
+fn default_voice_stun_urls() -> Vec<String> {
+    vec!["stun:stun.l.google.com:19302".to_string()]
+}
+
+fn default_voice_join_timeout_millis() -> u64 {
+    2_000
+}
+
+fn default_voice_retry_initial_millis() -> u64 {
+    400
+}
+
+fn default_voice_retry_max_millis() -> u64 {
+    1_600
+}
+
+fn default_voice_retry_max_attempts() -> u32 {
+    2
 }
 
 fn default_p2p_enabled() -> bool {
@@ -995,6 +1131,12 @@ mod tests {
         assert_eq!(cfg.avatar.max_size_bytes, 2 * 1024 * 1024);
         assert_eq!(cfg.attachments.upload_dir, "./data/attachments");
         assert_eq!(cfg.attachments.max_size_bytes, 10 * 1024 * 1024);
+        assert_eq!(cfg.voice.stun_urls, vec!["stun:stun.l.google.com:19302"]);
+        assert!(cfg.voice.turn.is_none());
+        assert_eq!(cfg.voice.join_timeout_millis, 2_000);
+        assert_eq!(cfg.voice.retry_initial_millis, 400);
+        assert_eq!(cfg.voice.retry_max_millis, 1_600);
+        assert_eq!(cfg.voice.retry_max_attempts, 2);
         assert!(cfg.p2p.enabled);
         assert!(cfg.p2p.discovery.enabled);
         assert_eq!(cfg.p2p.listen_host, "0.0.0.0");
@@ -1315,6 +1457,36 @@ mod tests {
 
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("attachments.upload_dir"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_voice_stun_urls() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+        cfg.voice.stun_urls = Vec::new();
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("voice.stun_urls"));
+    }
+
+    #[test]
+    fn validate_rejects_turn_without_credentials() {
+        let mut cfg = Config::default();
+        cfg.database = Some(DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 5,
+        });
+        cfg.voice.turn = Some(VoiceTurnConfig {
+            url: "turn:turn.example.com:3478".to_string(),
+            username: " ".to_string(),
+            credential: "secret".to_string(),
+        });
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("voice.turn.username"));
     }
 
     #[test]

@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 pub const PROTOCOL_VERSION: &str = "1";
 
-pub const STORY_6_1_SERVER_EVENTS: [&str; 11] = [
+pub const STORY_6_1_SERVER_EVENTS: [&str; 14] = [
     "message_create",
     "message_update",
     "message_delete",
@@ -15,6 +15,9 @@ pub const STORY_6_1_SERVER_EVENTS: [&str; 11] = [
     "presence_update",
     "guild_update",
     "channel_update",
+    "voice_offer",
+    "voice_ice_candidate",
+    "voice_connection_state",
 ];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +56,9 @@ pub enum ServerOp {
     ChannelActivity,
     GuildUpdate,
     ChannelUpdate,
+    VoiceOffer,
+    VoiceIceCandidate,
+    VoiceConnectionState,
 }
 
 impl ServerOp {
@@ -73,6 +79,9 @@ impl ServerOp {
             ServerOp::ChannelActivity => "channel_activity",
             ServerOp::GuildUpdate => "guild_update",
             ServerOp::ChannelUpdate => "channel_update",
+            ServerOp::VoiceOffer => "voice_offer",
+            ServerOp::VoiceIceCandidate => "voice_ice_candidate",
+            ServerOp::VoiceConnectionState => "voice_connection_state",
         }
     }
 }
@@ -90,6 +99,9 @@ pub enum ClientOp {
     DmMessageCreate,
     TypingStart,
     Resume,
+    VoiceJoin,
+    VoiceAnswer,
+    VoiceIceCandidate,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +157,9 @@ pub fn parse_client_op(op: &str) -> Result<ClientOp, ProtocolError> {
         "c_dm_message_create" => Ok(ClientOp::DmMessageCreate),
         "c_typing_start" => Ok(ClientOp::TypingStart),
         "c_resume" => Ok(ClientOp::Resume),
+        "c_voice_join" => Ok(ClientOp::VoiceJoin),
+        "c_voice_answer" => Ok(ClientOp::VoiceAnswer),
+        "c_voice_ice_candidate" => Ok(ClientOp::VoiceIceCandidate),
         _ => {
             Err(ProtocolError::validation("Unknown client operation")
                 .with_details(json!({ "op": op })))
@@ -196,6 +211,18 @@ mod tests {
             ClientOp::TypingStart
         );
         assert_eq!(parse_client_op("c_resume").unwrap(), ClientOp::Resume);
+        assert_eq!(
+            parse_client_op("c_voice_join").unwrap(),
+            ClientOp::VoiceJoin
+        );
+        assert_eq!(
+            parse_client_op("c_voice_answer").unwrap(),
+            ClientOp::VoiceAnswer
+        );
+        assert_eq!(
+            parse_client_op("c_voice_ice_candidate").unwrap(),
+            ClientOp::VoiceIceCandidate
+        );
     }
 
     #[test]

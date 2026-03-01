@@ -24,6 +24,14 @@
 #   DISCOOL_LOG__LEVEL=debug
 #   DISCOOL_LOG__FORMAT=pretty
 #   DISCOOL_DATABASE__URL=sqlite::memory:
+#   DISCOOL_VOICE__STUN_URLS__0=stun:stun.l.google.com:19302
+#   DISCOOL_VOICE__TURN__URL=turn:turn.example.com:3478?transport=udp
+#   DISCOOL_VOICE__TURN__USERNAME=voice-user
+#   DISCOOL_VOICE__TURN__CREDENTIAL=voice-secret
+#   DISCOOL_VOICE__JOIN_TIMEOUT_MILLIS=2000
+#   DISCOOL_VOICE__RETRY_INITIAL_MILLIS=400
+#   DISCOOL_VOICE__RETRY_MAX_MILLIS=1600
+#   DISCOOL_VOICE__RETRY_MAX_ATTEMPTS=2
 #   DISCOOL_METRICS__ENABLED=true
 #   DISCOOL_BACKUP__OUTPUT_DIR=/var/backups/discool
 #   DISCOOL_EMAIL__SMTP_HOST=smtp.example.com
@@ -49,6 +57,24 @@
 #
 # Server bind port (default: 3000)
 # port = 3000
+#
+# ---------------------------------------------------------------------------
+# [voice]
+# ---------------------------------------------------------------------------
+# STUN servers used for NAT traversal (default shown)
+# stun_urls = ["stun:stun.l.google.com:19302"]
+#
+# Optional TURN relay fallback:
+# [voice.turn]
+# url = "turn:turn.example.com:3478?transport=udp" # turn: or turns:
+# username = "voice-user"
+# credential = "voice-secret"
+#
+# Voice join and retry knobs
+# join_timeout_millis = 2000
+# retry_initial_millis = 400
+# retry_max_millis = 1600
+# retry_max_attempts = 2
 #
 # ---------------------------------------------------------------------------
 # [p2p]

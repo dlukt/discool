@@ -4616,6 +4616,175 @@ async fn websocket_invalid_client_operation_returns_protocol_error() {
 }
 
 #[tokio::test]
+async fn websocket_voice_join_emits_offer_and_candidate_then_transitions_connected() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "voice-join-owner", [201u8; 32]).await;
+    let guild_body = json!({ "name": "Voice Join Guild" }).to_string();
+    let guild_res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_slug = guild_json["data"]["slug"].as_str().unwrap().to_string();
+
+    let create_voice_channel = json!({
+        "name": "Voice Room",
+        "channel_type": "voice",
+    })
+    .to_string();
+    let create_voice_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/channels"),
+        &create_voice_channel,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&create_voice_res), 201);
+    let voice_json: serde_json::Value =
+        serde_json::from_str(response_body(&create_voice_res)).unwrap();
+    let voice_slug = voice_json["data"]["slug"].as_str().unwrap().to_string();
+
+    let (mut stream, response) = websocket_connect(&addr, "/ws", Some(&owner_token)).await;
+    assert_eq!(response_status(&response), 101);
+    let _ = websocket_read_json_with_op(&mut stream, "hello", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut stream,
+        &json!({
+            "op": "c_voice_join",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_slug.as_str(),
+            }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let connecting = websocket_read_json_with_op(&mut stream, "voice_connection_state", 1_500)
+        .await
+        .expect("voice join should emit connecting state");
+    assert_eq!(connecting["d"]["state"], json!("connecting"));
+    assert_eq!(connecting["d"]["guild_slug"], json!(guild_slug.as_str()));
+    assert_eq!(connecting["d"]["channel_slug"], json!(voice_slug.as_str()));
+
+    let offer = websocket_read_json_with_op(&mut stream, "voice_offer", 1_500)
+        .await
+        .expect("voice join should emit server offer");
+    assert_eq!(offer["d"]["sdp_type"], json!("offer"));
+    assert!(
+        offer["d"]["sdp"]
+            .as_str()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false),
+        "voice offer sdp should not be empty"
+    );
+
+    let candidate = websocket_read_json_with_op(&mut stream, "voice_ice_candidate", 1_500)
+        .await
+        .expect("voice join should emit initial ICE candidate");
+    assert!(
+        candidate["d"]["candidate"]
+            .as_str()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false),
+        "voice candidate should not be empty"
+    );
+
+    websocket_send_text_frame(
+        &mut stream,
+        &json!({
+            "op": "c_voice_answer",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_slug.as_str(),
+                "sdp": "v=0\r\no=- 0 2 IN IP4 127.0.0.1\r\ns=Discool Answer\r\nt=0 0\r\n",
+                "sdp_type": "answer",
+            }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let connected = websocket_read_json_with_op(&mut stream, "voice_connection_state", 1_500)
+        .await
+        .expect("voice answer should emit connected state");
+    assert_eq!(connected["d"]["state"], json!("connected"));
+}
+
+#[tokio::test]
+async fn websocket_voice_join_rejects_text_channels_and_invalid_payloads() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "voice-invalid-owner", [202u8; 32]).await;
+    let guild_body = json!({ "name": "Voice Invalid Guild" }).to_string();
+    let guild_res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_slug = guild_json["data"]["slug"].as_str().unwrap().to_string();
+
+    let (mut stream, response) = websocket_connect(&addr, "/ws", Some(&owner_token)).await;
+    assert_eq!(response_status(&response), 101);
+    let _ = websocket_read_json_with_op(&mut stream, "hello", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut stream,
+        &json!({
+            "op": "c_voice_join",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general",
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let text_channel_error = websocket_read_json_with_op(&mut stream, "error", 1_500)
+        .await
+        .expect("joining a text channel should fail");
+    assert_eq!(text_channel_error["d"]["code"], json!("VALIDATION_ERROR"));
+
+    websocket_send_text_frame(
+        &mut stream,
+        &json!({
+            "op": "c_voice_join",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": 10,
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let malformed_payload_error = websocket_read_json_with_op(&mut stream, "error", 1_500)
+        .await
+        .expect("malformed voice payload should fail");
+    assert_eq!(
+        malformed_payload_error["d"]["code"],
+        json!("VALIDATION_ERROR")
+    );
+    assert_eq!(
+        malformed_payload_error["d"]["details"]["reason"],
+        json!("invalid_payload_shape")
+    );
+}
+
+#[tokio::test]
 async fn dm_open_requires_shared_guild_membership() {
     use serde_json::json;
 

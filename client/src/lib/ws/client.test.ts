@@ -162,4 +162,35 @@ describe('wsClient', () => {
     )
     expect(dmPayloads.some((payload) => payload.d?.dm_slug === null)).toBe(true)
   })
+
+  it('supports voice signaling client operations over the shared websocket', () => {
+    wsClient.ensureConnected('session-token')
+    const socket = latestSocket()
+    socket.triggerOpen()
+
+    wsClient.send('c_voice_join', {
+      guild_slug: 'lobby',
+      channel_slug: 'voice-room',
+    })
+    wsClient.send('c_voice_answer', {
+      guild_slug: 'lobby',
+      channel_slug: 'voice-room',
+      sdp: 'v=0',
+      sdp_type: 'answer',
+    })
+    wsClient.send('c_voice_ice_candidate', {
+      guild_slug: 'lobby',
+      channel_slug: 'voice-room',
+      candidate: 'candidate:1 1 udp 1 127.0.0.1 9 typ host',
+      sdp_mid: '0',
+      sdp_mline_index: 0,
+    })
+
+    const ops = socket.sentPayloads
+      .map((payload) => JSON.parse(payload) as { op: string })
+      .map((parsed) => parsed.op)
+    expect(ops).toContain('c_voice_join')
+    expect(ops).toContain('c_voice_answer')
+    expect(ops).toContain('c_voice_ice_candidate')
+  })
 })

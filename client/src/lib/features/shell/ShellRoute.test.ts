@@ -82,10 +82,10 @@ const { guildState, channelState, dmState } = vi.hoisted(() => {
         guildId: 'guild-1',
         slug: 'general',
         name: 'general',
-        topic: null,
+        topic: null as string | null,
         kind: 'text',
         position: 0,
-        categorySlug: null,
+        categorySlug: null as string | null,
         isDefault: true,
       },
       {
@@ -93,21 +93,46 @@ const { guildState, channelState, dmState } = vi.hoisted(() => {
         guildId: 'guild-1',
         slug: 'random',
         name: 'random',
-        topic: null,
+        topic: null as string | null,
         kind: 'text',
         position: 1,
-        categorySlug: null,
+        categorySlug: null as string | null,
         isDefault: false,
       },
-    ],
+    ] as Array<{
+      id: string
+      guildId: string
+      slug: string
+      name: string
+      topic: string | null
+      kind: string
+      position: number
+      categorySlug: string | null
+      isDefault: boolean
+    }>,
+    channelsByGuild: {} as Record<
+      string,
+      Array<{
+        id: string
+        guildId: string
+        slug: string
+        name: string
+        topic: string | null
+        kind: string
+        position: number
+        categorySlug: string | null
+        isDefault: boolean
+      }>
+    >,
     categories: [] as Array<{ slug: string; name: string; position: number }>,
-    orderedChannelsForGuild: vi.fn((guildSlug: string) => {
-      if (guildSlug !== 'lobby') return []
-      return channelState.channels
-    }),
+    orderedChannelsForGuild: vi.fn(
+      (guildSlug: string) => channelState.channelsByGuild[guildSlug] ?? [],
+    ),
     loadChannels: vi.fn(async (guildSlug: string) => {
       channelState.activeGuild = guildSlug
-      return channelState.channels
+      const nextChannels = channelState.channelsByGuild[guildSlug] ?? []
+      channelState.channels = nextChannels
+      return nextChannels
     }),
     noteMessageActivity: vi.fn(),
     setChannelUnreadActivity: vi.fn(),
@@ -274,6 +299,69 @@ function setViewport(width: number) {
   window.dispatchEvent(new Event('resize'))
 }
 
+function createLobbyGuild() {
+  return {
+    id: 'guild-1',
+    slug: 'lobby',
+    name: 'Lobby',
+    defaultChannelSlug: 'general',
+    lastViewedChannelSlug: 'general',
+  }
+}
+
+function createEngineeringGuild() {
+  return {
+    id: 'guild-2',
+    slug: 'engineering',
+    name: 'Engineering',
+    defaultChannelSlug: 'announcements',
+    lastViewedChannelSlug: 'announcements',
+  }
+}
+
+function createLobbyChannels() {
+  return [
+    {
+      id: 'channel-general',
+      guildId: 'guild-1',
+      slug: 'general',
+      name: 'general',
+      topic: null,
+      kind: 'text',
+      position: 0,
+      categorySlug: null,
+      isDefault: true,
+    },
+    {
+      id: 'channel-random',
+      guildId: 'guild-1',
+      slug: 'random',
+      name: 'random',
+      topic: null,
+      kind: 'text',
+      position: 1,
+      categorySlug: null,
+      isDefault: false,
+    },
+  ]
+}
+
+function createEngineeringChannels() {
+  return [
+    {
+      id: 'channel-announcements',
+      guildId: 'guild-2',
+      slug: 'announcements',
+      name: 'announcements',
+      topic: null,
+      kind: 'text',
+      position: 0,
+      categorySlug: null,
+      isDefault: true,
+    },
+  ]
+}
+
 function buildProps(overrides: Partial<RenderProps> = {}): RenderProps {
   return {
     mode: 'channel',
@@ -316,6 +404,23 @@ describe('ShellRoute', () => {
     wsLifecycleState.value = 'disconnected'
     lifecycleListeners.clear()
     routerGoto.mockClear()
+    guildState.guilds = [createLobbyGuild()]
+    channelState.activeGuild = 'lobby'
+    channelState.channelsByGuild = {
+      lobby: createLobbyChannels(),
+    }
+    channelState.channels = [...channelState.channelsByGuild.lobby]
+    channelState.orderedChannelsForGuild.mockClear()
+    channelState.orderedChannelsForGuild.mockImplementation(
+      (guildSlug: string) => channelState.channelsByGuild[guildSlug] ?? [],
+    )
+    channelState.loadChannels.mockClear()
+    channelState.loadChannels.mockImplementation(async (guildSlug: string) => {
+      channelState.activeGuild = guildSlug
+      const nextChannels = channelState.channelsByGuild[guildSlug] ?? []
+      channelState.channels = nextChannels
+      return nextChannels
+    })
     dmState.conversations = []
     dmState.ensureLoaded.mockClear()
     dmState.openOrCreateDm.mockClear()
@@ -553,7 +658,56 @@ describe('ShellRoute', () => {
     })
   })
 
-  it('includes DM conversations in Ctrl+K quick switcher results', async () => {
+  it('opens quick switcher with Ctrl+K and Cmd+K and autofocuses input', async () => {
+    const props = buildProps()
+    const view = render(ShellRoute, props)
+
+    await fireEvent.keyDown(window, { key: 'k', ctrlKey: true })
+    await waitFor(() => {
+      expect(view.getByTestId('quick-switcher')).toBeInTheDocument()
+    })
+    expect(view.getByTestId('quick-switcher-overlay').className).toContain(
+      'items-center',
+    )
+    const input = view.getByTestId('quick-switcher-input')
+    await waitFor(() => {
+      expect(input).toHaveFocus()
+    })
+
+    await fireEvent.keyDown(input, { key: 'Escape' })
+    await waitFor(() => {
+      expect(view.queryByTestId('quick-switcher')).not.toBeInTheDocument()
+    })
+
+    await fireEvent.keyDown(window, { key: 'k', metaKey: true })
+    await waitFor(() => {
+      expect(view.getByTestId('quick-switcher')).toBeInTheDocument()
+    })
+  })
+
+  it('does not navigate when Enter is pressed on the quick-switcher close button', async () => {
+    const props = buildProps()
+    const view = render(ShellRoute, props)
+
+    await fireEvent.keyDown(window, { key: 'k', ctrlKey: true })
+    await waitFor(() => {
+      expect(view.getByTestId('quick-switcher')).toBeInTheDocument()
+    })
+
+    const closeButton = view.getByRole('button', { name: 'Close' })
+    closeButton.focus()
+    await fireEvent.keyDown(closeButton, { key: 'Enter' })
+
+    expect(routerGoto).not.toHaveBeenCalled()
+  })
+
+  it('shows grouped quick switcher results with recent-first defaults and DM navigation', async () => {
+    guildState.guilds = [createLobbyGuild(), createEngineeringGuild()]
+    channelState.channelsByGuild = {
+      lobby: createLobbyChannels(),
+      engineering: createEngineeringChannels(),
+    }
+    channelState.channels = [...channelState.channelsByGuild.lobby]
     dmState.conversations = [
       {
         dmSlug: 'dm-1',
@@ -577,12 +731,181 @@ describe('ShellRoute', () => {
     await waitFor(() => {
       expect(view.getByTestId('quick-switcher')).toBeInTheDocument()
     })
-    const dmResult = view.getByTestId('quick-switcher-result-dm:dm-1')
-    expect(dmResult).toHaveTextContent('Bob')
+    const resultsList = view.getByTestId('quick-switcher-results')
+    expect(resultsList).toHaveTextContent('Channels')
+    expect(resultsList).toHaveTextContent('DMs')
+    expect(resultsList).toHaveTextContent('Guilds')
+    expect(
+      view.getByTestId('quick-switcher-result-channel:lobby:general'),
+    ).toBeInTheDocument()
+    expect(
+      view.getByTestId('quick-switcher-result-dm:dm-1'),
+    ).toBeInTheDocument()
+    expect(
+      view.getByTestId('quick-switcher-result-guild:lobby'),
+    ).toBeInTheDocument()
 
-    await fireEvent.click(dmResult)
+    const options = Array.from(
+      resultsList.querySelectorAll('button[role="option"]'),
+    )
+    expect(options[0]).toHaveAttribute(
+      'data-testid',
+      'quick-switcher-result-channel:lobby:general',
+    )
+
+    await fireEvent.click(view.getByTestId('quick-switcher-result-dm:dm-1'))
     await waitFor(() => {
       expect(routerGoto).toHaveBeenCalledWith('/dm/dm-1')
+    })
+  })
+
+  it('uses deterministic fuzzy ranking with exact/prefix priority', async () => {
+    dmState.conversations = [
+      {
+        dmSlug: 'dm-bobby',
+        participant: {
+          userId: 'user-3',
+          username: 'bobby',
+          displayName: 'Bobby',
+          avatarColor: '#22aa88',
+        },
+        createdAt: '2026-02-28T00:00:00Z',
+        updatedAt: '2026-02-28T00:00:00Z',
+        lastMessagePreview: 'Hello',
+        lastMessageAt: '2026-02-28T00:00:00Z',
+        hasUnreadActivity: false,
+      },
+      {
+        dmSlug: 'dm-bob',
+        participant: {
+          userId: 'user-2',
+          username: 'bob',
+          displayName: 'Bob',
+          avatarColor: '#22aa88',
+        },
+        createdAt: '2026-02-28T00:00:00Z',
+        updatedAt: '2026-02-28T00:00:00Z',
+        lastMessagePreview: 'Hello',
+        lastMessageAt: '2026-02-28T00:00:00Z',
+        hasUnreadActivity: false,
+      },
+    ]
+    const props = buildProps()
+    const view = render(ShellRoute, props)
+
+    await fireEvent.keyDown(window, { key: 'k', ctrlKey: true })
+    const input = view.getByTestId('quick-switcher-input')
+    await fireEvent.input(input, { target: { value: 'bob' } })
+
+    await waitFor(() => {
+      expect(
+        view.getByTestId('quick-switcher-result-dm:dm-bobby'),
+      ).toBeInTheDocument()
+      expect(
+        view.getByTestId('quick-switcher-result-dm:dm-bob'),
+      ).toBeInTheDocument()
+    })
+
+    const dmOptions = Array.from(
+      view
+        .getByTestId('quick-switcher-results')
+        .querySelectorAll('button[data-testid^="quick-switcher-result-dm:"]'),
+    )
+    expect(dmOptions[0]).toHaveAttribute(
+      'data-testid',
+      'quick-switcher-result-dm:dm-bob',
+    )
+  })
+
+  it('supports arrow-key navigation, Enter activation, and Escape close', async () => {
+    const props = buildProps()
+    const view = render(ShellRoute, props)
+
+    await fireEvent.keyDown(window, { key: 'k', ctrlKey: true })
+    const input = view.getByTestId('quick-switcher-input')
+
+    await fireEvent.keyDown(input, { key: 'ArrowDown' })
+    await fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => {
+      expect(routerGoto).toHaveBeenCalledWith('/lobby/random')
+    })
+
+    await fireEvent.keyDown(window, { key: 'k', ctrlKey: true })
+    await waitFor(() => {
+      expect(view.getByTestId('quick-switcher')).toBeInTheDocument()
+    })
+    await fireEvent.keyDown(view.getByTestId('quick-switcher-input'), {
+      key: 'Escape',
+    })
+    await waitFor(() => {
+      expect(view.queryByTestId('quick-switcher')).not.toBeInTheDocument()
+    })
+  })
+
+  it('traps focus while open and restores focus to trigger on close', async () => {
+    const trigger = document.createElement('button')
+    trigger.type = 'button'
+    trigger.textContent = 'Trigger'
+    document.body.append(trigger)
+    trigger.focus()
+    const props = buildProps()
+    const view = render(ShellRoute, props)
+
+    try {
+      await fireEvent.keyDown(window, { key: 'k', ctrlKey: true })
+      const input = view.getByTestId('quick-switcher-input')
+      await waitFor(() => {
+        expect(input).toHaveFocus()
+      })
+
+      await fireEvent.keyDown(input, { key: 'Tab', shiftKey: true })
+      await waitFor(() => {
+        const dialog = view.getByTestId('quick-switcher')
+        expect(dialog.contains(document.activeElement)).toBe(true)
+      })
+
+      await fireEvent.click(view.getByRole('button', { name: 'Close' }))
+      await waitFor(() => {
+        expect(view.queryByTestId('quick-switcher')).not.toBeInTheDocument()
+      })
+      expect(trigger).toHaveFocus()
+    } finally {
+      trigger.remove()
+    }
+  })
+
+  it('hydrates channels for non-active guilds when quick switcher opens', async () => {
+    guildState.guilds = [createLobbyGuild(), createEngineeringGuild()]
+    channelState.channelsByGuild = {
+      lobby: createLobbyChannels(),
+    }
+    channelState.channels = [...channelState.channelsByGuild.lobby]
+    channelState.activeGuild = 'lobby'
+    channelState.loadChannels.mockImplementation(async (guildSlug: string) => {
+      channelState.activeGuild = guildSlug
+      if (guildSlug === 'engineering') {
+        channelState.channelsByGuild.engineering = createEngineeringChannels()
+      }
+      const nextChannels = channelState.channelsByGuild[guildSlug] ?? []
+      channelState.channels = nextChannels
+      return nextChannels
+    })
+    const props = buildProps()
+    const view = render(ShellRoute, props)
+
+    await fireEvent.keyDown(window, { key: 'k', ctrlKey: true })
+    await waitFor(() => {
+      expect(channelState.loadChannels).toHaveBeenCalledWith('engineering')
+    })
+    await waitFor(() => {
+      expect(channelState.loadChannels).toHaveBeenCalledWith('lobby')
+    })
+    await waitFor(() => {
+      expect(
+        view.getByTestId(
+          'quick-switcher-result-channel:engineering:announcements',
+        ),
+      ).toBeInTheDocument()
     })
   })
 })

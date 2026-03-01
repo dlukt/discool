@@ -2,7 +2,7 @@ mod settings;
 
 pub use settings::{
     AttachmentConfig, AuthConfig, AvatarConfig, BackupConfig, Config, DatabaseConfig, EmailConfig,
-    LogConfig, LogFormat, MetricsConfig, P2pConfig, ServerConfig,
+    LogConfig, LogFormat, MetricsConfig, P2pConfig, ServerConfig, VoiceConfig, VoiceTurnConfig,
 };
 
 pub fn load() -> Result<Config, config::ConfigError> {

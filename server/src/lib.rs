@@ -9,6 +9,7 @@ pub mod p2p;
 pub mod permissions;
 pub mod services;
 pub mod static_files;
+pub mod webrtc;
 pub mod ws;
 
 pub use error::AppError;
@@ -30,4 +31,5 @@ pub struct AppState {
     pub start_time: Instant,
     pub challenges: Arc<DashMap<String, ChallengeRecord>>,
     pub p2p_metadata: Arc<RwLock<p2p::P2pMetadata>>,
+    pub voice_runtime: Arc<webrtc::voice_channel::VoiceRuntime>,
 }

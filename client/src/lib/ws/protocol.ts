@@ -23,6 +23,9 @@ export type WsClientOp =
   | 'c_dm_message_create'
   | 'c_typing_start'
   | 'c_resume'
+  | 'c_voice_join'
+  | 'c_voice_answer'
+  | 'c_voice_ice_candidate'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null

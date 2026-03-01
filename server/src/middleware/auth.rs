@@ -98,6 +98,9 @@ mod tests {
             start_time: Instant::now(),
             challenges: Arc::new(DashMap::new()),
             p2p_metadata: Arc::new(std::sync::RwLock::new(crate::p2p::P2pMetadata::default())),
+            voice_runtime: Arc::new(crate::webrtc::voice_channel::VoiceRuntime::new(
+                crate::config::VoiceConfig::default(),
+            )),
         }
     }
 

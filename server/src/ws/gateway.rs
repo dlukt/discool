@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::extract::ws::{Message, WebSocket};
 use serde::{Deserialize, Serialize};
@@ -9,7 +12,9 @@ use crate::{
     AppError,
     config::AttachmentConfig,
     db::DbPool,
+    models::{channel, guild},
     services::{dm_service, message_service, presence_service},
+    webrtc::voice_channel::VoiceRuntime,
 };
 
 use super::{
@@ -104,6 +109,31 @@ struct DmActivityPayload {
 struct ResumePayload {
     #[serde(default)]
     last_sequence: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VoiceJoinPayload {
+    guild_slug: String,
+    channel_slug: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct VoiceAnswerPayload {
+    guild_slug: String,
+    channel_slug: String,
+    sdp: String,
+    sdp_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct VoiceIceCandidatePayload {
+    guild_slug: String,
+    channel_slug: String,
+    candidate: String,
+    #[serde(default)]
+    sdp_mid: Option<String>,
+    #[serde(default)]
+    sdp_mline_index: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +234,78 @@ fn parse_payload<T: for<'de> Deserialize<'de>>(value: Value, op: &str) -> Result
     serde_json::from_value(value).map_err(|_| {
         ProtocolError::validation("Invalid operation payload")
             .with_details(json!({ "op": op, "reason": "invalid_payload_shape" }))
+    })
+}
+
+fn parse_required_non_empty_field(
+    value: &str,
+    op: &str,
+    field: &'static str,
+) -> Result<String, ProtocolError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(
+            ProtocolError::validation(format!("{field} is required")).with_details(json!({
+                "op": op,
+                "field": field,
+                "reason": "invalid_payload_field",
+            })),
+        );
+    }
+    Ok(trimmed.to_string())
+}
+
+fn parse_voice_join_payload(value: Value, op: &str) -> Result<VoiceJoinPayload, ProtocolError> {
+    let parsed = parse_payload::<VoiceJoinPayload>(value, op)?;
+    Ok(VoiceJoinPayload {
+        guild_slug: parse_required_non_empty_field(&parsed.guild_slug, op, "guild_slug")?,
+        channel_slug: parse_required_non_empty_field(&parsed.channel_slug, op, "channel_slug")?,
+    })
+}
+
+fn parse_voice_answer_payload(value: Value, op: &str) -> Result<VoiceAnswerPayload, ProtocolError> {
+    let parsed = parse_payload::<VoiceAnswerPayload>(value, op)?;
+    let sdp_type = parse_required_non_empty_field(&parsed.sdp_type, op, "sdp_type")?;
+    if sdp_type != "answer" {
+        return Err(
+            ProtocolError::validation("sdp_type must be `answer`").with_details(json!({
+                "op": op,
+                "field": "sdp_type",
+                "reason": "invalid_payload_field",
+            })),
+        );
+    }
+    Ok(VoiceAnswerPayload {
+        guild_slug: parse_required_non_empty_field(&parsed.guild_slug, op, "guild_slug")?,
+        channel_slug: parse_required_non_empty_field(&parsed.channel_slug, op, "channel_slug")?,
+        sdp: parse_required_non_empty_field(&parsed.sdp, op, "sdp")?,
+        sdp_type,
+    })
+}
+
+fn parse_voice_ice_candidate_payload(
+    value: Value,
+    op: &str,
+) -> Result<VoiceIceCandidatePayload, ProtocolError> {
+    let parsed = parse_payload::<VoiceIceCandidatePayload>(value, op)?;
+    let candidate = parse_required_non_empty_field(&parsed.candidate, op, "candidate")?;
+    if let Some(mid) = parsed.sdp_mid.as_ref()
+        && mid.trim().is_empty()
+    {
+        return Err(
+            ProtocolError::validation("sdp_mid must not be empty").with_details(json!({
+                "op": op,
+                "field": "sdp_mid",
+                "reason": "invalid_payload_field",
+            })),
+        );
+    }
+    Ok(VoiceIceCandidatePayload {
+        guild_slug: parse_required_non_empty_field(&parsed.guild_slug, op, "guild_slug")?,
+        channel_slug: parse_required_non_empty_field(&parsed.channel_slug, op, "channel_slug")?,
+        candidate,
+        sdp_mid: parsed.sdp_mid.map(|value| value.trim().to_string()),
+        sdp_mline_index: parsed.sdp_mline_index,
     })
 }
 
@@ -496,9 +598,99 @@ fn handle_resume(connection_id: &str, envelope: &ClientEnvelope) {
     registry::send_event(connection_id, ServerOp::ResumeAck, &resume_payload);
 }
 
+async fn handle_voice_join(
+    pool: &DbPool,
+    voice_runtime: &VoiceRuntime,
+    connection_id: &str,
+    user_id: &str,
+    payload: VoiceJoinPayload,
+) -> Result<(), AppError> {
+    let guild = guild::find_guild_by_slug(pool, &payload.guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let channel = channel::find_channel_by_slug(pool, &guild.id, &payload.channel_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if channel.channel_type != "voice" {
+        return Err(AppError::ValidationError(
+            "voice join requires a voice channel".to_string(),
+        ));
+    }
+
+    let allowed = message_service::filter_channel_viewer_user_ids(
+        pool,
+        &payload.guild_slug,
+        &payload.channel_slug,
+        &[user_id.to_string()],
+    )
+    .await?;
+    if !allowed.contains(user_id) {
+        return Err(AppError::Forbidden(
+            "Missing VIEW_CHANNEL permission in this channel".to_string(),
+        ));
+    }
+
+    let start = voice_runtime.start_signaling(
+        connection_id,
+        user_id,
+        &payload.guild_slug,
+        &payload.channel_slug,
+    );
+    registry::send_event(
+        connection_id,
+        ServerOp::VoiceConnectionState,
+        &start.connection_state,
+    );
+    registry::send_event(connection_id, ServerOp::VoiceOffer, &start.offer);
+    for candidate in start.candidates {
+        registry::send_event(connection_id, ServerOp::VoiceIceCandidate, &candidate);
+    }
+    Ok(())
+}
+
+fn handle_voice_answer(
+    voice_runtime: &VoiceRuntime,
+    connection_id: &str,
+    payload: VoiceAnswerPayload,
+) -> Result<(), AppError> {
+    if payload.sdp_type != "answer" {
+        return Err(AppError::ValidationError(
+            "sdp_type must be `answer`".to_string(),
+        ));
+    }
+    let state = voice_runtime
+        .apply_answer(
+            connection_id,
+            &payload.guild_slug,
+            &payload.channel_slug,
+            &payload.sdp,
+        )
+        .map_err(AppError::ValidationError)?;
+    registry::send_event(connection_id, ServerOp::VoiceConnectionState, &state);
+    Ok(())
+}
+
+fn handle_voice_ice_candidate(
+    voice_runtime: &VoiceRuntime,
+    connection_id: &str,
+    payload: VoiceIceCandidatePayload,
+) -> Result<(), AppError> {
+    if payload.candidate.trim().is_empty() {
+        return Err(AppError::ValidationError(
+            "candidate is required".to_string(),
+        ));
+    }
+    let _ = payload.sdp_mid.as_deref();
+    let _ = payload.sdp_mline_index;
+    voice_runtime
+        .apply_remote_candidate(connection_id, &payload.guild_slug, &payload.channel_slug)
+        .map_err(AppError::ValidationError)
+}
+
 async fn process_client_message(
     pool: &DbPool,
     attachment_config: &AttachmentConfig,
+    voice_runtime: &VoiceRuntime,
     connection_id: &str,
     user_id: &str,
     envelope: ClientEnvelope,
@@ -618,6 +810,36 @@ async fn process_client_message(
             }
         }
         ClientOp::Resume => handle_resume(connection_id, &envelope),
+        ClientOp::VoiceJoin => match parse_voice_join_payload(envelope.d, &envelope.op) {
+            Ok(payload) => {
+                if let Err(error) =
+                    handle_voice_join(pool, voice_runtime, connection_id, user_id, payload).await
+                {
+                    send_app_error(connection_id, error);
+                }
+            }
+            Err(error) => send_protocol_error(connection_id, error),
+        },
+        ClientOp::VoiceAnswer => match parse_voice_answer_payload(envelope.d, &envelope.op) {
+            Ok(payload) => {
+                if let Err(error) = handle_voice_answer(voice_runtime, connection_id, payload) {
+                    send_app_error(connection_id, error);
+                }
+            }
+            Err(error) => send_protocol_error(connection_id, error),
+        },
+        ClientOp::VoiceIceCandidate => {
+            match parse_voice_ice_candidate_payload(envelope.d, &envelope.op) {
+                Ok(payload) => {
+                    if let Err(error) =
+                        handle_voice_ice_candidate(voice_runtime, connection_id, payload)
+                    {
+                        send_app_error(connection_id, error);
+                    }
+                }
+                Err(error) => send_protocol_error(connection_id, error),
+            }
+        }
     }
 }
 
@@ -627,6 +849,7 @@ pub async fn handle_socket(
     session_id: String,
     pool: DbPool,
     attachment_config: AttachmentConfig,
+    voice_runtime: Arc<VoiceRuntime>,
 ) {
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let connection_id = presence_service::register_connection(&user_id, &session_id, sender);
@@ -665,6 +888,7 @@ pub async fn handle_socket(
                                 process_client_message(
                                     &pool,
                                     &attachment_config,
+                                    voice_runtime.as_ref(),
                                     &connection_id,
                                     &user_id,
                                     envelope,
@@ -711,6 +935,7 @@ pub async fn handle_socket(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn rate_limiter_resets_after_window() {
@@ -722,5 +947,52 @@ mod tests {
 
         limiter.window_started = Instant::now() - RATE_LIMIT_WINDOW - Duration::from_millis(1);
         assert!(limiter.allow());
+    }
+
+    #[test]
+    fn parse_voice_join_payload_requires_non_empty_slugs() {
+        let err = parse_voice_join_payload(
+            json!({
+                "guild_slug": " ",
+                "channel_slug": "voice-room",
+            }),
+            "c_voice_join",
+        )
+        .expect_err("empty guild slug should be rejected");
+        assert_eq!(err.code, "VALIDATION_ERROR");
+        assert_eq!(err.details["field"], json!("guild_slug"));
+    }
+
+    #[test]
+    fn parse_voice_answer_payload_requires_answer_type() {
+        let err = parse_voice_answer_payload(
+            json!({
+                "guild_slug": "guild",
+                "channel_slug": "voice-room",
+                "sdp": "v=0",
+                "sdp_type": "offer",
+            }),
+            "c_voice_answer",
+        )
+        .expect_err("non-answer type should be rejected");
+        assert_eq!(err.code, "VALIDATION_ERROR");
+        assert_eq!(err.details["field"], json!("sdp_type"));
+    }
+
+    #[test]
+    fn parse_voice_candidate_payload_requires_candidate() {
+        let err = parse_voice_ice_candidate_payload(
+            json!({
+                "guild_slug": "guild",
+                "channel_slug": "voice-room",
+                "candidate": "",
+                "sdp_mid": "0",
+                "sdp_mline_index": 0,
+            }),
+            "c_voice_ice_candidate",
+        )
+        .expect_err("candidate is required");
+        assert_eq!(err.code, "VALIDATION_ERROR");
+        assert_eq!(err.details["field"], json!("candidate"));
     }
 }

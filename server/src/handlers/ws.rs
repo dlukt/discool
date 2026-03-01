@@ -25,10 +25,18 @@ pub async fn connect(
     let session_id = session.id;
     let pool = state.pool.clone();
     let attachment_config = state.config.attachments.clone();
+    let voice_runtime = state.voice_runtime.clone();
 
     Ok(ws
         .on_upgrade(move |socket| {
-            gateway::handle_socket(socket, user_id, session_id, pool, attachment_config)
+            gateway::handle_socket(
+                socket,
+                user_id,
+                session_id,
+                pool,
+                attachment_config,
+                voice_runtime,
+            )
         })
         .into_response())
 }

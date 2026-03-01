@@ -30,3 +30,4 @@ regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 scraper = "0.24"
 url = "2"
+webrtc = "0.17.1"

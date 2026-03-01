@@ -102,6 +102,9 @@ async fn main() {
         start_time: std::time::Instant::now(),
         challenges: std::sync::Arc::new(DashMap::new()),
         p2p_metadata: p2p_metadata.clone(),
+        voice_runtime: std::sync::Arc::new(
+            discool_server::webrtc::voice_channel::VoiceRuntime::new(config.voice.clone()),
+        ),
     };
     let app = handlers::router(state.clone());
 
