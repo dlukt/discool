@@ -13,7 +13,7 @@ use crate::{
     AppError, AppState,
     middleware::auth::AuthenticatedUser,
     services::message_service,
-    ws::{protocol::ServerOp, registry},
+    ws::{gateway, protocol::ServerOp, registry},
 };
 
 const DEFAULT_MESSAGES_LIMIT: i64 = 50;
@@ -119,6 +119,7 @@ pub async fn create_message_attachment(
         ServerOp::MessageCreate,
         &message,
     );
+    gateway::emit_channel_activity_event(&state.pool, &message).await?;
 
     Ok((StatusCode::CREATED, Json(json!({ "data": message }))).into_response())
 }

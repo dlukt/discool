@@ -1,6 +1,10 @@
 import { fireEvent, render, waitFor } from '@testing-library/svelte'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+const { routerGoto } = vi.hoisted(() => ({
+  routerGoto: vi.fn(async () => {}),
+}))
+
 type MockLifecycle =
   | 'connecting'
   | 'connected'
@@ -10,6 +14,11 @@ type MockLifecycle =
 const { wsLifecycleState, lifecycleListeners } = vi.hoisted(() => ({
   wsLifecycleState: { value: 'disconnected' as MockLifecycle },
   lifecycleListeners: new Set<(state: MockLifecycle) => void>(),
+}))
+
+vi.mock('@mateothegreat/svelte5-router', () => ({
+  goto: routerGoto,
+  route: vi.fn(() => () => {}),
 }))
 
 vi.mock('$lib/ws/client', () => ({
@@ -28,6 +37,7 @@ vi.mock('$lib/ws/client', () => ({
   },
 }))
 
+import { messageState } from '$lib/features/chat/messageStore.svelte'
 import ShellRoute from './ShellRoute.svelte'
 
 type RenderProps = {
@@ -112,6 +122,7 @@ describe('ShellRoute', () => {
     setViewport(1280)
     wsLifecycleState.value = 'disconnected'
     lifecycleListeners.clear()
+    routerGoto.mockClear()
   })
 
   it('renders skip link as the first focusable element', async () => {
@@ -250,5 +261,62 @@ describe('ShellRoute', () => {
       expect(view.getByTestId('reconnecting-status')).toBeInTheDocument()
     })
     expect(view.getByText('Reconnecting...')).toBeInTheDocument()
+  })
+
+  it('jumps between unread channels using Alt+Shift+Arrow', async () => {
+    const unreadSpy = vi
+      .spyOn(messageState, 'unreadChannelSlugsForGuild')
+      .mockReturnValue(['random', 'announcements'])
+    const props = buildProps()
+    render(ShellRoute, props)
+
+    await fireEvent.keyDown(window, {
+      key: 'ArrowDown',
+      altKey: true,
+      shiftKey: true,
+    })
+
+    await waitFor(() => {
+      expect(routerGoto).toHaveBeenCalledWith('/lobby/random')
+    })
+
+    routerGoto.mockClear()
+    await fireEvent.keyDown(window, {
+      key: 'ArrowUp',
+      altKey: true,
+      shiftKey: true,
+    })
+
+    await waitFor(() => {
+      expect(routerGoto).toHaveBeenCalledWith('/lobby/announcements')
+    })
+
+    unreadSpy.mockRestore()
+  })
+
+  it('supports Alt+Shift+Arrow unread navigation from editable fields', async () => {
+    const unreadSpy = vi
+      .spyOn(messageState, 'unreadChannelSlugsForGuild')
+      .mockReturnValue(['random'])
+    const props = buildProps()
+    render(ShellRoute, props)
+
+    const textarea = document.createElement('textarea')
+    document.body.append(textarea)
+    textarea.focus()
+    try {
+      await fireEvent.keyDown(textarea, {
+        key: 'ArrowDown',
+        altKey: true,
+        shiftKey: true,
+      })
+
+      await waitFor(() => {
+        expect(routerGoto).toHaveBeenCalledWith('/lobby/random')
+      })
+    } finally {
+      textarea.remove()
+      unreadSpy.mockRestore()
+    }
   })
 })

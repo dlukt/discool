@@ -18,6 +18,7 @@ const { goto, guildState, channelState, identityState } = vi.hoisted(() => {
       channelType: 'text' | 'voice'
       position: number
       isDefault: boolean
+      hasUnreadActivity?: boolean
       categorySlug?: string | null
       createdAt: string
     }>,
@@ -368,6 +369,29 @@ describe('ChannelList', () => {
 
     expect(getByTestId('channel-icon-general')).toHaveTextContent('#')
     expect(getByTestId('channel-icon-team-voice')).toHaveTextContent('🔊')
+  })
+
+  it('renders unread channel emphasis and unread dot', () => {
+    channelState.channels = channelState.channels.map((channel) =>
+      channel.slug === 'team-voice'
+        ? { ...channel, hasUnreadActivity: true }
+        : channel,
+    )
+
+    const { getByTestId } = render(ChannelList, {
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+    })
+
+    expect(getByTestId('channel-link-team-voice')).toHaveAttribute(
+      'data-has-unread-activity',
+      'true',
+    )
+    expect(getByTestId('channel-link-team-voice')).toHaveAttribute(
+      'aria-label',
+      expect.stringContaining('Unread. Open channel Team Voice'),
+    )
+    expect(getByTestId('channel-unread-dot-team-voice')).toBeInTheDocument()
   })
 
   it('handles context menu rename and delete flows with warning copy', async () => {

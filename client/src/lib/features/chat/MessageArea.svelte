@@ -51,6 +51,7 @@ const VIRTUAL_OVERSCAN_PX = 320
 const HISTORY_LOAD_TRIGGER_PX = 120
 const JUMP_TO_PRESENT_THRESHOLD_PX = 320
 const HISTORY_SKELETON_COUNT = 4
+const TYPING_START_THROTTLE_MS = 1_500
 
 let {
   mode,
@@ -95,6 +96,8 @@ let attachmentError = $state<string | null>(null)
 let dragDepth = $state(0)
 let dragActive = $state(false)
 let attachmentContextKey = $state<string | null>(null)
+let lastTypingStartSentAt = $state(0)
+let typingStartChannelKey = $state<string | null>(null)
 
 let channelKey = $derived(
   mode === 'channel' ? `${activeGuild}:${activeChannel}` : null,
@@ -264,6 +267,37 @@ let emptyStateCopy = $derived(
   `This is the beginning of #${activeChannel}. Say something!`,
 )
 
+let typingUserDisplayNames = $derived.by(() => {
+  const _messageVersion = messageState.version
+  if (mode !== 'channel') return []
+  const typingUserIds = messageState.typingUserIdsForChannel(
+    activeGuild,
+    activeChannel,
+  )
+  if (typingUserIds.length === 0) return []
+  const memberNameById = new Map(
+    memberRoleData.members.map((member) => [
+      member.userId,
+      member.displayName || member.username,
+    ]),
+  )
+  return typingUserIds.map((userId) => memberNameById.get(userId) ?? 'Someone')
+})
+
+let typingIndicatorText = $derived.by(() => {
+  if (typingUserDisplayNames.length === 0) return null
+  if (typingUserDisplayNames.length === 1) {
+    return `${typingUserDisplayNames[0]} is typing...`
+  }
+  if (typingUserDisplayNames.length === 2) {
+    return `${typingUserDisplayNames[0]} and ${typingUserDisplayNames[1]} are typing...`
+  }
+  if (typingUserDisplayNames.length === 3) {
+    return `${typingUserDisplayNames[0]}, ${typingUserDisplayNames[1]}, and ${typingUserDisplayNames[2]} are typing...`
+  }
+  return 'Several people are typing...'
+})
+
 let showJumpToPresent = $derived(
   mode === 'channel' &&
     (distanceFromBottomPx > JUMP_TO_PRESENT_THRESHOLD_PX ||
@@ -324,6 +358,33 @@ function updateComposerSelection(target: HTMLTextAreaElement | null): void {
   const start = Math.max(0, target.selectionStart ?? 0)
   const end = Math.max(0, target.selectionEnd ?? start)
   composerSelection = { start, end }
+}
+
+function resetTypingStartThrottle(): void {
+  lastTypingStartSentAt = 0
+  typingStartChannelKey = null
+}
+
+function maybeEmitTypingStart(rawValue: string): void {
+  if (mode !== 'channel' || composerEdit) return
+  if (!rawValue.trim()) return
+  const nextChannelKey = `${activeGuild}:${activeChannel}`
+  if (typingStartChannelKey !== nextChannelKey) {
+    typingStartChannelKey = nextChannelKey
+    lastTypingStartSentAt = 0
+  }
+  const now = Date.now()
+  if (now - lastTypingStartSentAt < TYPING_START_THROTTLE_MS) return
+  const sent = messageState.sendTypingStart(activeGuild, activeChannel)
+  if (!sent) return
+  typingStartChannelKey = nextChannelKey
+  lastTypingStartSentAt = now
+}
+
+function handleComposerInput(event: Event): void {
+  const target = event.currentTarget as HTMLTextAreaElement | null
+  updateComposerSelection(target)
+  maybeEmitTypingStart(target?.value ?? composerValue)
 }
 
 function applyMarkdownWrap(prefix: string, suffix = prefix): void {
@@ -428,6 +489,7 @@ async function sendComposerMessage() {
       composerValue = ''
       composerEdit = null
       composerSelection = { start: 0, end: 0 }
+      resetTypingStartThrottle()
     }
     return
   }
@@ -450,6 +512,7 @@ async function sendComposerMessage() {
       composerValue = ''
       composerSelection = { start: 0, end: 0 }
       clearSelectedAttachment()
+      resetTypingStartThrottle()
     } catch (error) {
       attachmentError = messageFromError(error, 'Failed to upload attachment')
     } finally {
@@ -468,6 +531,7 @@ async function sendComposerMessage() {
   if (sent) {
     composerValue = ''
     composerSelection = { start: 0, end: 0 }
+    resetTypingStartThrottle()
   }
 }
 
@@ -510,6 +574,7 @@ function cancelComposerEdit(): void {
   composerEdit = null
   composerValue = ''
   composerSelection = { start: 0, end: 0 }
+  resetTypingStartThrottle()
   composerInput?.focus()
 }
 
@@ -736,6 +801,7 @@ $effect(() => {
     composerSelection = { start: 0, end: 0 }
     pendingDeleteMessage = null
     attachmentContextKey = null
+    resetTypingStartThrottle()
     clearSelectedAttachment()
     attachmentError = null
     attachmentUploadInFlight = false
@@ -764,6 +830,7 @@ $effect(() => {
   attachmentContextKey = key
   attachmentError = null
   attachmentUploadInFlight = false
+  resetTypingStartThrottle()
   clearSelectedAttachment()
 })
 
@@ -1124,6 +1191,7 @@ onMount(() => {
             bind:this={composerInput}
             bind:value={composerValue}
             onkeydown={handleComposerKeydown}
+            oninput={handleComposerInput}
             onfocus={handleComposerSelectionEvent}
             onclick={handleComposerSelectionEvent}
             onkeyup={handleComposerSelectionEvent}
@@ -1140,6 +1208,15 @@ onMount(() => {
             {composerEdit ? 'Save' : 'Send'}
           </button>
         </div>
+        {#if typingIndicatorText}
+          <p
+            class="mt-2 text-xs text-muted-foreground"
+            aria-live="polite"
+            data-testid="typing-indicator"
+          >
+            {typingIndicatorText}
+          </p>
+        {/if}
         <p class="mt-2 text-xs text-muted-foreground">
           {#if composerEdit}
             Editing message · Enter to save · Escape to cancel

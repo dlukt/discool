@@ -1020,12 +1020,17 @@ function handleCategoryHeaderKeydown(
                         class={`flex min-w-0 flex-1 items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
                           channel.slug === activeChannel
                             ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                            : channel.hasUnreadActivity
+                              ? 'text-foreground hover:bg-muted hover:text-foreground'
                             : 'text-muted-foreground hover:bg-muted hover:text-foreground'
                         }`}
                         href={`/${activeGuild}/${channel.slug}`}
                         use:routerLink
-                        aria-label={`Open channel ${channel.name}`}
+                        aria-label={`${channel.hasUnreadActivity ? 'Unread. ' : ''}Open channel ${channel.name}`}
                         aria-current={channel.slug === activeChannel ? 'page' : undefined}
+                        data-has-unread-activity={channel.hasUnreadActivity
+                          ? 'true'
+                          : 'false'}
                         data-channel-nav="true"
                         onkeydown={(event) => handleChannelKeydown(event, channel.slug)}
                         data-testid={`channel-link-${channel.slug}`}
@@ -1037,7 +1042,18 @@ function handleCategoryHeaderKeydown(
                         >
                           {channel.channelType === 'voice' ? '🔊' : '#'}
                         </span>
-                        <span class="truncate">{channel.name}</span>
+                        <span
+                          class={`truncate ${channel.hasUnreadActivity ? 'font-semibold text-foreground' : ''}`}
+                        >
+                          {channel.name}
+                        </span>
+                        {#if channel.hasUnreadActivity}
+                          <span
+                            class="ml-auto inline-flex h-2 w-2 shrink-0 rounded-full bg-sky-300"
+                            aria-hidden="true"
+                            data-testid={`channel-unread-dot-${channel.slug}`}
+                          ></span>
+                        {/if}
                       </a>
 
                       {#if canManageChannels}
@@ -1157,12 +1173,17 @@ function handleCategoryHeaderKeydown(
                       class={`flex min-w-0 flex-1 items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
                         channel.slug === activeChannel
                           ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                          : channel.hasUnreadActivity
+                            ? 'text-foreground hover:bg-muted hover:text-foreground'
                           : 'text-muted-foreground hover:bg-muted hover:text-foreground'
                       }`}
                       href={`/${activeGuild}/${channel.slug}`}
                       use:routerLink
-                      aria-label={`Open channel ${channel.name}`}
+                      aria-label={`${channel.hasUnreadActivity ? 'Unread. ' : ''}Open channel ${channel.name}`}
                       aria-current={channel.slug === activeChannel ? 'page' : undefined}
+                      data-has-unread-activity={channel.hasUnreadActivity
+                        ? 'true'
+                        : 'false'}
                       data-channel-nav="true"
                       onkeydown={(event) => handleChannelKeydown(event, channel.slug)}
                       data-testid={`channel-link-${channel.slug}`}
@@ -1174,7 +1195,18 @@ function handleCategoryHeaderKeydown(
                       >
                         {channel.channelType === 'voice' ? '🔊' : '#'}
                       </span>
-                      <span class="truncate">{channel.name}</span>
+                      <span
+                        class={`truncate ${channel.hasUnreadActivity ? 'font-semibold text-foreground' : ''}`}
+                      >
+                        {channel.name}
+                      </span>
+                      {#if channel.hasUnreadActivity}
+                        <span
+                          class="ml-auto inline-flex h-2 w-2 shrink-0 rounded-full bg-sky-300"
+                          aria-hidden="true"
+                          data-testid={`channel-unread-dot-${channel.slug}`}
+                        ></span>
+                      {/if}
                     </a>
 
                     {#if canManageChannels}

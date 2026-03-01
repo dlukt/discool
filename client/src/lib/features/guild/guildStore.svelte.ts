@@ -64,11 +64,28 @@ function upsertGuild(guild: Guild): void {
   let nextGuilds: Guild[]
   if (index >= 0) {
     nextGuilds = [...guildState.guilds]
-    nextGuilds[index] = guild
+    nextGuilds[index] = {
+      ...guild,
+      hasUnreadActivity:
+        guild.hasUnreadActivity ?? nextGuilds[index]?.hasUnreadActivity,
+    }
   } else {
     nextGuilds = [...guildState.guilds, guild]
   }
   guildState.guilds = applyGuildOrder(nextGuilds)
+}
+
+function setGuildUnreadActivity(
+  guildSlug: string,
+  hasUnreadActivity: boolean,
+): void {
+  const index = guildState.guilds.findIndex((guild) => guild.slug === guildSlug)
+  if (index < 0) return
+  const current = guildState.guilds[index]
+  if (Boolean(current.hasUnreadActivity) === hasUnreadActivity) return
+  const next = [...guildState.guilds]
+  next[index] = { ...current, hasUnreadActivity }
+  guildState.guilds = next
 }
 
 function setRolesForGuild(guildSlug: string, roles: GuildRole[]): GuildRole[] {
@@ -122,7 +139,17 @@ export const guildState = $state({
     guildState.loading = true
     guildState.error = null
     try {
-      guildState.guilds = applyGuildOrder(await listGuildsApi())
+      const unreadByGuildSlug = new Map(
+        guildState.guilds.map((guild) => [guild.slug, guild.hasUnreadActivity]),
+      )
+      const loadedGuilds = await listGuildsApi()
+      guildState.guilds = applyGuildOrder(
+        loadedGuilds.map((guild) => ({
+          ...guild,
+          hasUnreadActivity:
+            guild.hasUnreadActivity ?? unreadByGuildSlug.get(guild.slug),
+        })),
+      )
       guildState.loaded = true
       return guildState.guilds
     } catch (err) {
@@ -368,6 +395,15 @@ export const guildState = $state({
 
   bySlug: (guildSlug: string): Guild | null =>
     guildState.guilds.find((guild) => guild.slug === guildSlug) ?? null,
+
+  setGuildUnreadActivity: (
+    guildSlug: string,
+    hasUnreadActivity: boolean,
+  ): void => {
+    const normalizedGuild = guildSlug.trim()
+    if (!normalizedGuild) return
+    setGuildUnreadActivity(normalizedGuild, hasUnreadActivity)
+  },
 
   setGuildOrder: (order: string[]): void => {
     const normalizedOrder = normalizeGuildOrder(order)

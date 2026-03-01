@@ -3,12 +3,13 @@ use serde_json::{Value, json};
 
 pub const PROTOCOL_VERSION: &str = "1";
 
-pub const STORY_6_1_SERVER_EVENTS: [&str; 8] = [
+pub const STORY_6_1_SERVER_EVENTS: [&str; 9] = [
     "message_create",
     "message_update",
     "message_delete",
     "message_reaction_update",
     "typing_start",
+    "channel_activity",
     "presence_update",
     "guild_update",
     "channel_update",
@@ -45,6 +46,7 @@ pub enum ServerOp {
     MessageDelete,
     MessageReactionUpdate,
     TypingStart,
+    ChannelActivity,
     GuildUpdate,
     ChannelUpdate,
 }
@@ -62,6 +64,7 @@ impl ServerOp {
             ServerOp::MessageDelete => "message_delete",
             ServerOp::MessageReactionUpdate => "message_reaction_update",
             ServerOp::TypingStart => "typing_start",
+            ServerOp::ChannelActivity => "channel_activity",
             ServerOp::GuildUpdate => "guild_update",
             ServerOp::ChannelUpdate => "channel_update",
         }

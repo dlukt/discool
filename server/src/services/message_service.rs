@@ -668,6 +668,49 @@ pub async fn list_message_reaction_summaries_for_viewers(
     Ok(summaries_by_viewer)
 }
 
+pub async fn filter_channel_viewer_user_ids(
+    pool: &DbPool,
+    guild_slug: &str,
+    channel_slug: &str,
+    viewer_user_ids: &[String],
+) -> Result<HashSet<String>, AppError> {
+    let normalized_guild_slug = guild_slug.trim();
+    let normalized_channel_slug = channel_slug.trim();
+    if normalized_guild_slug.is_empty() || normalized_channel_slug.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let guild = guild::find_guild_by_slug(pool, normalized_guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let channel = channel::find_channel_by_slug(pool, &guild.id, normalized_channel_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let mut allowed_viewers = HashSet::new();
+    let mut seen_viewers = HashSet::new();
+    for viewer_user_id in viewer_user_ids {
+        let normalized_user_id = viewer_user_id.trim();
+        if normalized_user_id.is_empty() {
+            continue;
+        }
+        if !seen_viewers.insert(normalized_user_id.to_string()) {
+            continue;
+        }
+        if !permissions::can_view_guild(pool, &guild, normalized_user_id).await? {
+            continue;
+        }
+        let effective_permissions =
+            resolve_effective_channel_permissions(pool, &guild, &channel.id, normalized_user_id)
+                .await?;
+        if permissions::has_permission(effective_permissions, permissions::VIEW_CHANNEL) {
+            allowed_viewers.insert(normalized_user_id.to_string());
+        }
+    }
+
+    Ok(allowed_viewers)
+}
+
 pub async fn list_channel_messages(
     pool: &DbPool,
     user_id: &str,

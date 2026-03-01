@@ -4752,6 +4752,167 @@ async fn websocket_message_create_persists_then_broadcasts_to_subscribed_peers()
 }
 
 #[tokio::test]
+async fn websocket_channel_activity_fanout_respects_channel_visibility() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "ws-activity-owner", [113u8; 32]).await;
+    let peer_token = register_and_authenticate(&addr, "ws-activity-peer", [114u8; 32]).await;
+
+    let guild_body = json!({ "name": "Activity Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap().to_string();
+    let guild_id = guild["data"]["id"].as_str().unwrap().to_string();
+    let channels_path = format!("/api/v1/guilds/{guild_slug}/channels");
+    let random_body = json!({ "name": "random", "channel_type": "text" }).to_string();
+    let res = http_post_with_bearer(&addr, &channels_path, &random_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+
+    let url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let peer_id = sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username = ?1")
+        .bind("ws-activity-peer")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO guild_members (guild_id, user_id, joined_at, joined_via_invite_code)
+         VALUES (?1, ?2, ?3, NULL)",
+    )
+    .bind(&guild_id)
+    .bind(&peer_id)
+    .bind("2026-02-28T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    let default_role_id = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM roles WHERE guild_id = ?1 AND is_default = 1 LIMIT 1",
+    )
+    .bind(&guild_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let general_channel_id = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM channels WHERE guild_id = ?1 AND slug = ?2",
+    )
+    .bind(&guild_id)
+    .bind("general")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let (mut owner_stream, owner_response) =
+        websocket_connect(&addr, "/ws", Some(&owner_token)).await;
+    let (mut peer_stream, peer_response) = websocket_connect(&addr, "/ws", Some(&peer_token)).await;
+    assert_eq!(response_status(&owner_response), 101);
+    assert_eq!(response_status(&peer_response), 101);
+    let _ = websocket_read_json_with_op(&mut owner_stream, "hello", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut peer_stream, "hello", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_subscribe",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    websocket_send_text_frame(
+        &mut peer_stream,
+        &json!({
+            "op": "c_subscribe",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "random"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let _ = websocket_read_json_with_op(&mut owner_stream, "channel_update", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut peer_stream, "channel_update", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_message_create",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general",
+                "content": "visible activity"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let _ = websocket_read_json_with_op(&mut owner_stream, "message_create", 1_500).await;
+    let activity_event = websocket_read_json_with_op(&mut peer_stream, "channel_activity", 1_500)
+        .await
+        .expect("peer should receive channel activity for visible channels");
+    assert_eq!(
+        activity_event["d"]["guild_slug"],
+        json!(guild_slug.as_str())
+    );
+    assert_eq!(activity_event["d"]["channel_slug"], json!("general"));
+
+    sqlx::query(
+        "INSERT INTO channel_permission_overrides (channel_id, role_id, allow_bitflag, deny_bitflag)
+         VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(&general_channel_id)
+    .bind(&default_role_id)
+    .bind(0_i64)
+    .bind(4096_i64)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_message_create",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general",
+                "content": "hidden activity"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let _ = websocket_read_json_with_op(&mut owner_stream, "message_create", 1_500).await;
+    let hidden_activity =
+        websocket_read_json_with_op(&mut peer_stream, "channel_activity", 700).await;
+    assert!(
+        hidden_activity.is_none(),
+        "channel_activity leaked to a member without VIEW_CHANNEL permission"
+    );
+}
+
+#[tokio::test]
 async fn websocket_message_create_rejects_forbidden_and_invalid_payloads() {
     use serde_json::json;
 

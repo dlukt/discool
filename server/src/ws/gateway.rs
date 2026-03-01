@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -68,6 +68,14 @@ struct MessageReactionTogglePayload {
 struct TypingStartPayload {
     guild_slug: String,
     channel_slug: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChannelActivityPayload {
+    guild_slug: String,
+    channel_slug: String,
+    actor_user_id: String,
+    message_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,6 +230,44 @@ async fn handle_message_create(
         ServerOp::MessageCreate,
         &created,
     );
+    emit_channel_activity_event(pool, &created).await?;
+    Ok(())
+}
+
+pub async fn emit_channel_activity_event(
+    pool: &DbPool,
+    message: &message_service::MessageResponse,
+) -> Result<(), AppError> {
+    let targets = registry::guild_connection_targets(&message.guild_slug);
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let viewer_user_ids = targets
+        .iter()
+        .map(|target| target.user_id.clone())
+        .collect::<Vec<_>>();
+    let allowed_viewers = message_service::filter_channel_viewer_user_ids(
+        pool,
+        &message.guild_slug,
+        &message.channel_slug,
+        &viewer_user_ids,
+    )
+    .await?;
+    if allowed_viewers.is_empty() {
+        return Ok(());
+    }
+
+    let payload = ChannelActivityPayload {
+        guild_slug: message.guild_slug.clone(),
+        channel_slug: message.channel_slug.clone(),
+        actor_user_id: message.author_user_id.clone(),
+        message_id: message.id.clone(),
+    };
+    for target in targets {
+        if allowed_viewers.contains(&target.user_id) {
+            registry::send_event(&target.connection_id, ServerOp::ChannelActivity, &payload);
+        }
+    }
     Ok(())
 }
 

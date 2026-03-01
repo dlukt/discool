@@ -117,6 +117,60 @@ const historyApiMock = vi.hoisted(() => {
   return { state, fetchChannelHistory, uploadMessageAttachment }
 })
 
+const channelStoreMock = vi.hoisted(() => {
+  type ChannelStub = { slug: string; hasUnreadActivity?: boolean }
+  const state = {
+    byGuild: {
+      lobby: [{ slug: 'general' }, { slug: 'random' }] as ChannelStub[],
+    } as Record<string, ChannelStub[]>,
+  }
+
+  const channelState = {
+    setChannelUnreadActivity: vi.fn(
+      (guildSlug: string, channelSlug: string, hasUnreadActivity: boolean) => {
+        const channels = state.byGuild[guildSlug] ?? []
+        const index = channels.findIndex(
+          (channel) => channel.slug === channelSlug,
+        )
+        if (index < 0) {
+          state.byGuild[guildSlug] = [
+            ...channels,
+            { slug: channelSlug, hasUnreadActivity },
+          ]
+          return
+        }
+        const next = [...channels]
+        next[index] = { ...next[index], hasUnreadActivity }
+        state.byGuild[guildSlug] = next
+      },
+    ),
+    hasGuildUnreadActivity: vi.fn((guildSlug: string) => {
+      return (state.byGuild[guildSlug] ?? []).some(
+        (channel) => channel.hasUnreadActivity === true,
+      )
+    }),
+    orderedChannelsForGuild: vi.fn((guildSlug: string) => {
+      return [...(state.byGuild[guildSlug] ?? [])]
+    }),
+  }
+
+  return { state, channelState }
+})
+
+const guildStoreMock = vi.hoisted(() => {
+  const state = {
+    unreadByGuild: {} as Record<string, boolean>,
+  }
+  const guildState = {
+    setGuildUnreadActivity: vi.fn(
+      (guildSlug: string, hasUnreadActivity: boolean) => {
+        state.unreadByGuild[guildSlug] = hasUnreadActivity
+      },
+    ),
+  }
+  return { state, guildState }
+})
+
 vi.mock('$lib/ws/client', () => ({
   wsClient: wsMock.wsClient,
 }))
@@ -124,6 +178,14 @@ vi.mock('$lib/ws/client', () => ({
 vi.mock('./messageApi', () => ({
   fetchChannelHistory: historyApiMock.fetchChannelHistory,
   uploadMessageAttachment: historyApiMock.uploadMessageAttachment,
+}))
+
+vi.mock('$lib/features/channel/channelStore.svelte', () => ({
+  channelState: channelStoreMock.channelState,
+}))
+
+vi.mock('$lib/features/guild/guildStore.svelte', () => ({
+  guildState: guildStoreMock.guildState,
 }))
 
 import { messageState } from './messageStore.svelte'
@@ -158,6 +220,14 @@ describe('messageState', () => {
     historyApiMock.uploadMessageAttachment.mockClear()
     historyApiMock.state.responses = []
     historyApiMock.state.uploadResult = null
+    channelStoreMock.state.byGuild = {
+      lobby: [{ slug: 'general' }, { slug: 'random' }],
+    }
+    channelStoreMock.channelState.setChannelUnreadActivity.mockClear()
+    channelStoreMock.channelState.hasGuildUnreadActivity.mockClear()
+    channelStoreMock.channelState.orderedChannelsForGuild.mockClear()
+    guildStoreMock.state.unreadByGuild = {}
+    guildStoreMock.guildState.setGuildUnreadActivity.mockClear()
   })
 
   it('creates optimistic message and reconciles when message_create arrives', () => {
@@ -347,6 +417,62 @@ describe('messageState', () => {
 
     expect(sent).toBe(false)
     expect(messageState.timeline('lobby', 'general')).toHaveLength(0)
+  })
+
+  it('sends typing_start websocket op for active composer state', () => {
+    const sent = messageState.sendTypingStart('lobby', 'general')
+    expect(sent).toBe(true)
+    expect(wsMock.wsClient.send).toHaveBeenCalledWith('c_typing_start', {
+      guild_slug: 'lobby',
+      channel_slug: 'general',
+    })
+  })
+
+  it('ingests typing_start events and expires indicators after timeout', () => {
+    vi.useFakeTimers()
+    try {
+      messageState.setCurrentUser('user-1')
+      wsMock.state.listener?.({
+        op: 'typing_start',
+        d: {
+          guild_slug: 'lobby',
+          channel_slug: 'general',
+          user_id: 'user-2',
+        },
+      })
+
+      expect(messageState.typingUserIdsForChannel('lobby', 'general')).toEqual([
+        'user-2',
+      ])
+
+      vi.advanceTimersByTime(5_001)
+      expect(messageState.typingUserIdsForChannel('lobby', 'general')).toEqual(
+        [],
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('tracks channel_activity unread state and clears on active channel switch', () => {
+    messageState.setActiveChannel('lobby', 'general')
+
+    wsMock.state.listener?.({
+      op: 'channel_activity',
+      d: {
+        guild_slug: 'lobby',
+        channel_slug: 'random',
+      },
+    })
+
+    expect(messageState.isChannelUnread('lobby', 'random')).toBe(true)
+    expect(messageState.unreadChannelSlugsForGuild('lobby')).toEqual(['random'])
+    expect(
+      guildStoreMock.guildState.setGuildUnreadActivity,
+    ).toHaveBeenCalledWith('lobby', true)
+
+    messageState.setActiveChannel('lobby', 'random')
+    expect(messageState.isChannelUnread('lobby', 'random')).toBe(false)
   })
 
   it('uploads attachment via REST API and appends returned message', async () => {

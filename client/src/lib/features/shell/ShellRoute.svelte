@@ -1,5 +1,6 @@
 <script lang="ts">
 import {
+  goto,
   type RouteResult,
   route as routerLink,
 } from '@mateothegreat/svelte5-router'
@@ -9,6 +10,7 @@ import { onMount, tick } from 'svelte'
 import ChannelList from '$lib/features/channel/ChannelList.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import MessageArea from '$lib/features/chat/MessageArea.svelte'
+import { messageState } from '$lib/features/chat/messageStore.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import GuildRail from '$lib/features/guild/GuildRail.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
@@ -82,11 +84,44 @@ function syncViewport() {
   viewport = viewportFromWidth(window.innerWidth)
 }
 
+async function navigateUnreadChannel(direction: 'up' | 'down'): Promise<void> {
+  const unreadSlugs = messageState.unreadChannelSlugsForGuild(activeGuild)
+  if (unreadSlugs.length === 0) return
+  const currentIndex = unreadSlugs.indexOf(activeChannel)
+  let nextIndex = 0
+  if (currentIndex >= 0) {
+    const delta = direction === 'down' ? 1 : -1
+    nextIndex = (currentIndex + delta + unreadSlugs.length) % unreadSlugs.length
+  } else {
+    nextIndex = direction === 'down' ? 0 : unreadSlugs.length - 1
+  }
+  const nextChannel = unreadSlugs[nextIndex]
+  if (!nextChannel || nextChannel === activeChannel) return
+  await goto(`/${activeGuild}/${nextChannel}`)
+}
+
 onMount(() => {
   syncViewport()
   if (typeof window === 'undefined') return undefined
+  const handleUnreadHotkey = (event: KeyboardEvent) => {
+    if (!event.altKey || !event.shiftKey || event.ctrlKey || event.metaKey)
+      return
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      void navigateUnreadChannel('down')
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      void navigateUnreadChannel('up')
+    }
+  }
   window.addEventListener('resize', syncViewport)
-  return () => window.removeEventListener('resize', syncViewport)
+  window.addEventListener('keydown', handleUnreadHotkey)
+  return () => {
+    window.removeEventListener('resize', syncViewport)
+    window.removeEventListener('keydown', handleUnreadHotkey)
+  }
 })
 
 let currentPath = $derived(

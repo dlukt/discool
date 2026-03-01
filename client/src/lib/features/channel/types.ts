@@ -7,6 +7,7 @@ export type Channel = {
   channelType: ChannelType
   position: number
   isDefault: boolean
+  hasUnreadActivity?: boolean
   categorySlug: string | null
   createdAt: string
 }

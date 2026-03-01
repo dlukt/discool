@@ -94,6 +94,7 @@ const {
       return timelineByChannel[channelKey(guildSlug, channelSlug)] ?? []
     }),
     sendMessage: vi.fn(() => true),
+    sendTypingStart: vi.fn(() => true),
     uploadAttachment: vi.fn(
       async (
         _guildSlug: string,
@@ -137,6 +138,7 @@ const {
       ensureHistory(channelKey(guildSlug, channelSlug)).pendingNewCount = 0
       messageState.version += 1
     }),
+    typingUserIdsForChannel: vi.fn(() => [] as string[]),
   }
 
   const identityState = {
@@ -154,14 +156,14 @@ const {
     bySlug: vi.fn(() => ({ isOwner: true })),
     memberByUserId: vi.fn(() => ({ highestRoleColor: '#3366ff' })),
     memberRoleDataForGuild: vi.fn(() => ({
-      members: [],
-      roles: [],
+      members: [] as Array<Record<string, unknown>>,
+      roles: [] as Array<Record<string, unknown>>,
       assignableRoleIds: [],
       canManageRoles: false,
     })),
     loadMembers: vi.fn(async () => ({
-      members: [],
-      roles: [],
+      members: [] as Array<Record<string, unknown>>,
+      roles: [] as Array<Record<string, unknown>>,
       assignableRoleIds: [],
       canManageRoles: false,
     })),
@@ -258,6 +260,7 @@ describe('MessageArea', () => {
     messageState.version += 1
     messageState.timeline.mockClear()
     messageState.sendMessage.mockClear()
+    messageState.sendTypingStart.mockClear()
     messageState.uploadAttachment.mockClear()
     messageState.sendMessageUpdate.mockClear()
     messageState.sendMessageDelete.mockClear()
@@ -271,6 +274,8 @@ describe('MessageArea', () => {
     messageState.scrollTopForChannel.mockClear()
     messageState.addPendingNew.mockClear()
     messageState.clearPendingNew.mockClear()
+    messageState.typingUserIdsForChannel.mockClear()
+    messageState.typingUserIdsForChannel.mockReturnValue([])
     guildState.memberByUserId.mockClear()
     guildState.memberRoleDataForGuild.mockClear()
     guildState.loadMembers.mockClear()
@@ -318,6 +323,149 @@ describe('MessageArea', () => {
 
     expect(messageState.sendMessage).not.toHaveBeenCalled()
     expect(composer.value).toBe('line one\n')
+  })
+
+  it('emits typing_start only for non-empty composer drafts', async () => {
+    const { getByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    const composer = getByTestId(
+      'message-composer-input',
+    ) as HTMLTextAreaElement
+
+    await fireEvent.input(composer, { target: { value: '   ' } })
+    expect(messageState.sendTypingStart).not.toHaveBeenCalled()
+
+    await fireEvent.input(composer, { target: { value: 'hello' } })
+    expect(messageState.sendTypingStart).toHaveBeenCalledWith(
+      'lobby',
+      'general',
+    )
+  })
+
+  it('renders typing indicator copy for active channel typers', () => {
+    guildState.memberRoleDataForGuild.mockReturnValue({
+      members: [
+        {
+          userId: 'user-1',
+          username: 'alice',
+          displayName: 'Alice',
+          avatarColor: '#3366ff',
+          presenceStatus: 'online',
+          highestRoleColor: '#3366ff',
+          roleIds: [],
+          isOwner: true,
+          canAssignRoles: false,
+        },
+        {
+          userId: 'user-2',
+          username: 'bob',
+          displayName: 'Bob',
+          avatarColor: '#44aa99',
+          presenceStatus: 'online',
+          highestRoleColor: '#44aa99',
+          roleIds: [],
+          isOwner: false,
+          canAssignRoles: false,
+        },
+      ],
+      roles: [],
+      assignableRoleIds: [],
+      canManageRoles: false,
+    })
+    messageState.typingUserIdsForChannel.mockReturnValue(['user-2'])
+
+    const { getByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    expect(getByTestId('typing-indicator')).toHaveTextContent(
+      'Bob is typing...',
+    )
+  })
+
+  it('renders generic typing indicator copy when more than three users are typing', () => {
+    guildState.memberRoleDataForGuild.mockReturnValue({
+      members: [
+        {
+          userId: 'user-1',
+          username: 'alice',
+          displayName: 'Alice',
+          avatarColor: '#3366ff',
+          presenceStatus: 'online',
+          highestRoleColor: '#3366ff',
+          roleIds: [],
+          isOwner: true,
+          canAssignRoles: false,
+        },
+        {
+          userId: 'user-2',
+          username: 'bob',
+          displayName: 'Bob',
+          avatarColor: '#44aa99',
+          presenceStatus: 'online',
+          highestRoleColor: '#44aa99',
+          roleIds: [],
+          isOwner: false,
+          canAssignRoles: false,
+        },
+        {
+          userId: 'user-3',
+          username: 'charlie',
+          displayName: 'Charlie',
+          avatarColor: '#aa7755',
+          presenceStatus: 'online',
+          highestRoleColor: '#aa7755',
+          roleIds: [],
+          isOwner: false,
+          canAssignRoles: false,
+        },
+        {
+          userId: 'user-4',
+          username: 'dana',
+          displayName: 'Dana',
+          avatarColor: '#9966cc',
+          presenceStatus: 'online',
+          highestRoleColor: '#9966cc',
+          roleIds: [],
+          isOwner: false,
+          canAssignRoles: false,
+        },
+      ],
+      roles: [],
+      assignableRoleIds: [],
+      canManageRoles: false,
+    })
+    messageState.typingUserIdsForChannel.mockReturnValue([
+      'user-1',
+      'user-2',
+      'user-3',
+      'user-4',
+    ])
+
+    const { getByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    expect(getByTestId('typing-indicator')).toHaveTextContent(
+      'Several people are typing...',
+    )
   })
 
   it('applies markdown toolbar and keyboard shortcuts to selected text', async () => {

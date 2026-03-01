@@ -32,6 +32,32 @@ import type {
 
 let latestLoadRequestToken = 0
 
+function unreadChannelKey(guildSlug: string, channelSlug: string): string {
+  return `${guildSlug}:${channelSlug}`
+}
+
+function withUnreadFlag(
+  guildSlug: string,
+  channel: Channel,
+  unreadByChannelKey: Record<string, boolean>,
+): Channel {
+  return {
+    ...channel,
+    hasUnreadActivity:
+      unreadByChannelKey[unreadChannelKey(guildSlug, channel.slug)] === true,
+  }
+}
+
+function applyUnreadFlags(
+  guildSlug: string,
+  channels: Channel[],
+  unreadByChannelKey: Record<string, boolean>,
+): Channel[] {
+  return channels.map((channel) =>
+    withUnreadFlag(guildSlug, channel, unreadByChannelKey),
+  )
+}
+
 function replaceChannel(updated: Channel): void {
   const index = channelState.channels.findIndex(
     (item) => item.id === updated.id,
@@ -95,6 +121,7 @@ export const channelState = $state({
   loadedByGuild: {} as Record<string, boolean>,
   cachedChannelsByGuild: {} as Record<string, Channel[]>,
   cachedCategoriesByGuild: {} as Record<string, ChannelCategory[]>,
+  unreadByChannelKey: {} as Record<string, boolean>,
   permissionOverridesByChannel: {} as Record<
     string,
     ChannelPermissionOverrides
@@ -150,7 +177,11 @@ export const channelState = $state({
       if (requestToken !== latestLoadRequestToken) {
         return channelState.channels
       }
-      channelState.channels = channels
+      channelState.channels = applyUnreadFlags(
+        guildSlug,
+        channels,
+        channelState.unreadByChannelKey,
+      )
       channelState.categories = categories
       channelState.activeGuild = guildSlug
       channelState.loadedByGuild[guildSlug] = true
@@ -178,11 +209,16 @@ export const channelState = $state({
     channelState.error = null
     try {
       const created = await createChannelApi(guildSlug, input)
+      const nextChannel = withUnreadFlag(
+        guildSlug,
+        created,
+        channelState.unreadByChannelKey,
+      )
       channelState.activeGuild = guildSlug
-      replaceChannel(created)
+      replaceChannel(nextChannel)
       channelState.loadedByGuild[guildSlug] = true
       cacheGuildData(guildSlug, channelState.channels, channelState.categories)
-      return created
+      return nextChannel
     } catch (err) {
       channelState.error =
         err instanceof Error ? err.message : 'Failed to create channel'
@@ -201,11 +237,16 @@ export const channelState = $state({
     channelState.error = null
     try {
       const updated = await updateChannelApi(guildSlug, channelSlug, input)
+      const nextChannel = withUnreadFlag(
+        guildSlug,
+        updated,
+        channelState.unreadByChannelKey,
+      )
       channelState.activeGuild = guildSlug
-      replaceChannel(updated)
+      replaceChannel(nextChannel)
       channelState.loadedByGuild[guildSlug] = true
       cacheGuildData(guildSlug, channelState.channels, channelState.categories)
-      return updated
+      return nextChannel
     } catch (err) {
       channelState.error =
         err instanceof Error ? err.message : 'Failed to update channel'
@@ -250,11 +291,15 @@ export const channelState = $state({
     channelState.error = null
     try {
       const reordered = await reorderChannelsApi(guildSlug, { channelSlugs })
-      channelState.channels = reordered
+      channelState.channels = applyUnreadFlags(
+        guildSlug,
+        reordered,
+        channelState.unreadByChannelKey,
+      )
       channelState.activeGuild = guildSlug
       channelState.loadedByGuild[guildSlug] = true
       cacheGuildData(guildSlug, channelState.channels, channelState.categories)
-      return reordered
+      return channelState.channels
     } catch (err) {
       channelState.error =
         err instanceof Error ? err.message : 'Failed to reorder channels'
@@ -274,11 +319,15 @@ export const channelState = $state({
       const reordered = await reorderChannelsApi(guildSlug, {
         channelPositions,
       })
-      channelState.channels = reordered
+      channelState.channels = applyUnreadFlags(
+        guildSlug,
+        reordered,
+        channelState.unreadByChannelKey,
+      )
       channelState.activeGuild = guildSlug
       channelState.loadedByGuild[guildSlug] = true
       cacheGuildData(guildSlug, channelState.channels, channelState.categories)
-      return reordered
+      return channelState.channels
     } catch (err) {
       channelState.error =
         err instanceof Error
@@ -431,7 +480,11 @@ export const channelState = $state({
           : channel,
       )
       const refreshed = await listChannelsApi(guildSlug)
-      channelState.channels = refreshed
+      channelState.channels = applyUnreadFlags(
+        guildSlug,
+        refreshed,
+        channelState.unreadByChannelKey,
+      )
       channelState.activeGuild = guildSlug
       channelState.loadedByGuild[guildSlug] = true
       cacheGuildData(guildSlug, channelState.channels, channelState.categories)
@@ -615,6 +668,97 @@ export const channelState = $state({
     channelState.channels.find((channel) => channel.slug === channelSlug) ??
     null,
 
+  setChannelUnreadActivity: (
+    guildSlug: string,
+    channelSlug: string,
+    hasUnreadActivity: boolean,
+  ): void => {
+    const normalizedGuild = guildSlug.trim()
+    const normalizedChannel = channelSlug.trim()
+    if (!normalizedGuild || !normalizedChannel) return
+    const key = unreadChannelKey(normalizedGuild, normalizedChannel)
+    const currentlyUnread = channelState.unreadByChannelKey[key] === true
+    if (currentlyUnread === hasUnreadActivity) return
+
+    if (hasUnreadActivity) {
+      channelState.unreadByChannelKey = {
+        ...channelState.unreadByChannelKey,
+        [key]: true,
+      }
+    } else {
+      const { [key]: _ignored, ...rest } = channelState.unreadByChannelKey
+      channelState.unreadByChannelKey = rest
+    }
+
+    const apply = (channels: Channel[] | undefined): Channel[] | undefined => {
+      if (!channels) return channels
+      let changed = false
+      const nextChannels = channels.map((channel) => {
+        if (channel.slug !== normalizedChannel) return channel
+        if (Boolean(channel.hasUnreadActivity) === hasUnreadActivity) {
+          return channel
+        }
+        changed = true
+        return { ...channel, hasUnreadActivity }
+      })
+      return changed ? nextChannels : channels
+    }
+
+    if (channelState.activeGuild === normalizedGuild) {
+      const nextActive = apply(channelState.channels)
+      if (nextActive && nextActive !== channelState.channels) {
+        channelState.channels = nextActive
+      }
+    }
+
+    const cached = channelState.cachedChannelsByGuild[normalizedGuild]
+    const nextCached = apply(cached)
+    if (nextCached && nextCached !== cached) {
+      channelState.cachedChannelsByGuild[normalizedGuild] = nextCached
+    }
+  },
+
+  hasGuildUnreadActivity: (guildSlug: string): boolean => {
+    const normalizedGuild = guildSlug.trim()
+    if (!normalizedGuild) return false
+    const prefix = `${normalizedGuild}:`
+    return Object.keys(channelState.unreadByChannelKey).some((key) =>
+      key.startsWith(prefix),
+    )
+  },
+
+  orderedChannelsForGuild: (guildSlug: string): Channel[] => {
+    const normalizedGuild = guildSlug.trim()
+    if (!normalizedGuild) return []
+
+    const sourceChannels =
+      channelState.activeGuild === normalizedGuild
+        ? channelState.channels
+        : (channelState.cachedChannelsByGuild[normalizedGuild] ?? [])
+    const sourceCategories =
+      channelState.activeGuild === normalizedGuild
+        ? channelState.categories
+        : (channelState.cachedCategoriesByGuild[normalizedGuild] ?? [])
+
+    const orderedCategories = [...sourceCategories].sort(
+      (left, right) => left.position - right.position,
+    )
+    const ordered: Channel[] = []
+    for (const category of orderedCategories) {
+      ordered.push(
+        ...sourceChannels
+          .filter((channel) => channel.categorySlug === category.slug)
+          .sort((left, right) => left.position - right.position),
+      )
+    }
+    ordered.push(
+      ...sourceChannels
+        .filter((channel) => channel.categorySlug === null)
+        .sort((left, right) => left.position - right.position),
+    )
+    return ordered
+  },
+
   clear: (): void => {
     latestLoadRequestToken = 0
     channelState.activeGuild = null
@@ -625,6 +769,7 @@ export const channelState = $state({
     channelState.loadedByGuild = {}
     channelState.cachedChannelsByGuild = {}
     channelState.cachedCategoriesByGuild = {}
+    channelState.unreadByChannelKey = {}
     channelState.permissionOverridesByChannel = {}
     channelState.error = null
   },

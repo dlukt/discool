@@ -1,3 +1,5 @@
+import { channelState } from '$lib/features/channel/channelStore.svelte'
+import { guildState } from '$lib/features/guild/guildStore.svelte'
 import { wsClient } from '$lib/ws/client'
 import type { WsEnvelope } from '$lib/ws/protocol'
 import { fetchChannelHistory, uploadMessageAttachment } from './messageApi'
@@ -14,6 +16,9 @@ const MAX_ACTIVE_CHANNEL_MESSAGES = 4_000
 const MAX_INACTIVE_CHANNEL_MESSAGES = 1_200
 const MAX_TOTAL_TIMELINE_MESSAGES = 10_000
 const MIN_CHANNEL_RETAINED_MESSAGES = 200
+const TYPING_EXPIRY_MS = 5_000
+
+const typingExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 type MessageCreatePayload = {
   id?: string
@@ -46,6 +51,17 @@ type MessageReactionUpdatePayload = {
   message_id?: string
   actor_user_id?: string
   reactions?: unknown
+}
+
+type TypingStartPayload = {
+  guild_slug?: string
+  channel_slug?: string
+  user_id?: string
+}
+
+type ChannelActivityPayload = {
+  guild_slug?: string
+  channel_slug?: string
 }
 
 export type ChatAuthorInput = {
@@ -98,6 +114,25 @@ function readHistoryState(
 
 function toChannelKey(guildSlug: string, channelSlug: string): string {
   return `${guildSlug}:${channelSlug}`
+}
+
+function typingTimerKey(channelKey: string, userId: string): string {
+  return `${channelKey}:${userId}`
+}
+
+function clearTypingExpiryTimer(timerKey: string): void {
+  const existing = typingExpiryTimers.get(timerKey)
+  if (!existing) return
+  clearTimeout(existing)
+  typingExpiryTimers.delete(timerKey)
+}
+
+function clearTypingExpiryTimersForChannel(channelKey: string): void {
+  const prefix = `${channelKey}:`
+  for (const timerKey of typingExpiryTimers.keys()) {
+    if (!timerKey.startsWith(prefix)) continue
+    clearTypingExpiryTimer(timerKey)
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -276,6 +311,34 @@ function parseMessageReactionUpdateEnvelope(envelope: WsEnvelope): {
   }
 }
 
+function parseTypingStartEnvelope(envelope: WsEnvelope): {
+  guildSlug: string
+  channelSlug: string
+  userId: string
+} | null {
+  if (envelope.op !== 'typing_start') return null
+  if (!isRecord(envelope.d)) return null
+  const payload = envelope.d as TypingStartPayload
+  const guildSlug = payload.guild_slug?.trim()
+  const channelSlug = payload.channel_slug?.trim()
+  const userId = payload.user_id?.trim()
+  if (!guildSlug || !channelSlug || !userId) return null
+  return { guildSlug, channelSlug, userId }
+}
+
+function parseChannelActivityEnvelope(envelope: WsEnvelope): {
+  guildSlug: string
+  channelSlug: string
+} | null {
+  if (envelope.op !== 'channel_activity') return null
+  if (!isRecord(envelope.d)) return null
+  const payload = envelope.d as ChannelActivityPayload
+  const guildSlug = payload.guild_slug?.trim()
+  const channelSlug = payload.channel_slug?.trim()
+  if (!guildSlug || !channelSlug) return null
+  return { guildSlug, channelSlug }
+}
+
 function updateHistoryState(
   channelKey: string,
   updates: Partial<ChannelHistoryState>,
@@ -375,6 +438,7 @@ export const messageState = $state({
   messagesByChannel: {} as Record<string, ChatMessage[]>,
   optimisticByNonce: {} as Record<string, PendingOptimisticEntry>,
   historyByChannel: {} as Record<string, ChannelHistoryState>,
+  typingByChannel: {} as Record<string, Record<string, number>>,
 
   timeline: (guildSlug: string, channelSlug: string): ChatMessage[] => {
     const key = toChannelKey(guildSlug, channelSlug)
@@ -389,13 +453,163 @@ export const messageState = $state({
     return { ...readHistoryState(messageState.historyByChannel, key) }
   },
 
+  typingUserIdsForChannel: (
+    guildSlug: string,
+    channelSlug: string,
+  ): string[] => {
+    const key = toChannelKey(guildSlug, channelSlug)
+    const typingByUser = messageState.typingByChannel[key]
+    if (!typingByUser) return []
+    return Object.entries(typingByUser)
+      .sort(
+        ([leftUserId, leftSeenAt], [rightUserId, rightSeenAt]) =>
+          rightSeenAt - leftSeenAt || leftUserId.localeCompare(rightUserId),
+      )
+      .map(([userId]) => userId)
+  },
+
+  clearTypingForChannel: (guildSlug: string, channelSlug: string): void => {
+    const normalizedGuild = guildSlug.trim()
+    const normalizedChannel = channelSlug.trim()
+    if (!normalizedGuild || !normalizedChannel) return
+    const key = toChannelKey(normalizedGuild, normalizedChannel)
+    if (!messageState.typingByChannel[key]) return
+    const { [key]: _ignored, ...rest } = messageState.typingByChannel
+    messageState.typingByChannel = rest
+    clearTypingExpiryTimersForChannel(key)
+    messageState.version += 1
+  },
+
+  clearTypingState: (): void => {
+    if (Object.keys(messageState.typingByChannel).length === 0) return
+    for (const timerKey of typingExpiryTimers.keys()) {
+      clearTypingExpiryTimer(timerKey)
+    }
+    messageState.typingByChannel = {}
+    messageState.version += 1
+  },
+
+  ingestTypingStart: (
+    guildSlug: string,
+    channelSlug: string,
+    userId: string,
+  ): void => {
+    const normalizedGuild = guildSlug.trim()
+    const normalizedChannel = channelSlug.trim()
+    const normalizedUserId = userId.trim()
+    if (!normalizedGuild || !normalizedChannel || !normalizedUserId) return
+    if (normalizedUserId === messageState.currentUserId) return
+
+    const key = toChannelKey(normalizedGuild, normalizedChannel)
+    const now = Date.now()
+    const currentByUser = messageState.typingByChannel[key] ?? {}
+    messageState.typingByChannel = {
+      ...messageState.typingByChannel,
+      [key]: {
+        ...currentByUser,
+        [normalizedUserId]: now,
+      },
+    }
+
+    const timerKey = typingTimerKey(key, normalizedUserId)
+    clearTypingExpiryTimer(timerKey)
+    typingExpiryTimers.set(
+      timerKey,
+      setTimeout(() => {
+        const channelTyping = messageState.typingByChannel[key]
+        if (!channelTyping) {
+          typingExpiryTimers.delete(timerKey)
+          return
+        }
+        const lastSeenAt = channelTyping[normalizedUserId]
+        if (typeof lastSeenAt !== 'number' || lastSeenAt > now) {
+          typingExpiryTimers.delete(timerKey)
+          return
+        }
+        const { [normalizedUserId]: _removed, ...remainingUsers } =
+          channelTyping
+        if (Object.keys(remainingUsers).length === 0) {
+          const { [key]: _ignored, ...remainingChannels } =
+            messageState.typingByChannel
+          messageState.typingByChannel = remainingChannels
+        } else {
+          messageState.typingByChannel = {
+            ...messageState.typingByChannel,
+            [key]: remainingUsers,
+          }
+        }
+        typingExpiryTimers.delete(timerKey)
+        messageState.version += 1
+      }, TYPING_EXPIRY_MS),
+    )
+    messageState.version += 1
+  },
+
+  ingestChannelActivity: (guildSlug: string, channelSlug: string): void => {
+    const normalizedGuild = guildSlug.trim()
+    const normalizedChannel = channelSlug.trim()
+    if (!normalizedGuild || !normalizedChannel) return
+    const key = toChannelKey(normalizedGuild, normalizedChannel)
+    if (messageState.activeChannelKey === key) return
+    channelState.setChannelUnreadActivity(
+      normalizedGuild,
+      normalizedChannel,
+      true,
+    )
+    guildState.setGuildUnreadActivity(
+      normalizedGuild,
+      channelState.hasGuildUnreadActivity(normalizedGuild),
+    )
+  },
+
+  isChannelUnread: (guildSlug: string, channelSlug: string): boolean => {
+    const normalizedGuild = guildSlug.trim()
+    const normalizedChannel = channelSlug.trim()
+    if (!normalizedGuild || !normalizedChannel) return false
+    return channelState
+      .orderedChannelsForGuild(normalizedGuild)
+      .some(
+        (channel) =>
+          channel.slug === normalizedChannel &&
+          channel.hasUnreadActivity === true,
+      )
+  },
+
+  unreadChannelSlugsForGuild: (guildSlug: string): string[] => {
+    const normalizedGuild = guildSlug.trim()
+    if (!normalizedGuild) return []
+    return channelState
+      .orderedChannelsForGuild(normalizedGuild)
+      .filter((channel) => channel.hasUnreadActivity === true)
+      .map((channel) => channel.slug)
+  },
+
   setActiveChannel: (guildSlug: string, channelSlug: string): void => {
     const normalizedGuild = guildSlug.trim()
     const normalizedChannel = channelSlug.trim()
     if (!normalizedGuild || !normalizedChannel) return
     const nextKey = toChannelKey(normalizedGuild, normalizedChannel)
     if (messageState.activeChannelKey === nextKey) return
+
+    const previousKey = messageState.activeChannelKey
+    if (previousKey) {
+      const separatorIndex = previousKey.indexOf(':')
+      if (separatorIndex > 0) {
+        const previousGuild = previousKey.slice(0, separatorIndex)
+        const previousChannel = previousKey.slice(separatorIndex + 1)
+        messageState.clearTypingForChannel(previousGuild, previousChannel)
+      }
+    }
     messageState.activeChannelKey = nextKey
+    channelState.setChannelUnreadActivity(
+      normalizedGuild,
+      normalizedChannel,
+      false,
+    )
+    guildState.setGuildUnreadActivity(
+      normalizedGuild,
+      channelState.hasGuildUnreadActivity(normalizedGuild),
+    )
     if (enforceMemoryBudget()) {
       messageState.version += 1
     }
@@ -636,6 +850,16 @@ export const messageState = $state({
     return false
   },
 
+  sendTypingStart: (guildSlug: string, channelSlug: string): boolean => {
+    const normalizedGuild = guildSlug.trim()
+    const normalizedChannel = channelSlug.trim()
+    if (!normalizedGuild || !normalizedChannel) return false
+    return wsClient.send('c_typing_start', {
+      guild_slug: normalizedGuild,
+      channel_slug: normalizedChannel,
+    })
+  },
+
   uploadAttachment: async (
     guildSlug: string,
     channelSlug: string,
@@ -850,16 +1074,39 @@ export const messageState = $state({
   },
 
   clearAll: (): void => {
+    for (const timerKey of typingExpiryTimers.keys()) {
+      clearTypingExpiryTimer(timerKey)
+    }
     messageState.activeChannelKey = null
     messageState.currentUserId = null
     messageState.messagesByChannel = {}
     messageState.optimisticByNonce = {}
     messageState.historyByChannel = {}
+    messageState.typingByChannel = {}
     messageState.version += 1
   },
 })
 
 wsClient.subscribe((envelope) => {
+  const typingStart = parseTypingStartEnvelope(envelope)
+  if (typingStart) {
+    messageState.ingestTypingStart(
+      typingStart.guildSlug,
+      typingStart.channelSlug,
+      typingStart.userId,
+    )
+    return
+  }
+
+  const channelActivity = parseChannelActivityEnvelope(envelope)
+  if (channelActivity) {
+    messageState.ingestChannelActivity(
+      channelActivity.guildSlug,
+      channelActivity.channelSlug,
+    )
+    return
+  }
+
   const created = parseMessageCreateEnvelope(envelope)
   if (created) {
     messageState.ingestServerMessage(created)

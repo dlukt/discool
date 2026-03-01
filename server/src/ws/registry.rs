@@ -212,6 +212,23 @@ pub fn broadcast_to_guild<T: Serialize>(guild_slug: &str, op: ServerOp, payload:
     }
 }
 
+pub fn guild_connection_targets(guild_slug: &str) -> Vec<ChannelConnectionTarget> {
+    registry()
+        .connections
+        .iter()
+        .filter_map(|entry| {
+            if lock_read(&entry.guild_subscriptions).contains(guild_slug) {
+                Some(ChannelConnectionTarget {
+                    connection_id: entry.key().clone(),
+                    user_id: entry.user_id.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 pub fn broadcast_to_channel<T: Serialize>(
     guild_slug: &str,
     channel_slug: &str,
