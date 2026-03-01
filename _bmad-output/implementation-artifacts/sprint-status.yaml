@@ -106,7 +106,7 @@ development_status:
   6-7-rich-embeds-and-markdown-rendering: done
   6-8-typing-indicators-and-channel-activity: done
   6-9-direct-messages: done
-  6-10-user-blocking-complete-erasure: review
+  6-10-user-blocking-complete-erasure: done
   6-11-error-handling-and-status-communication: backlog
   6-12-quick-switcher: backlog
   epic-6-retrospective: optional

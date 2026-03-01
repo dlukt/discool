@@ -6032,7 +6032,15 @@ async fn websocket_message_reaction_toggle_broadcasts_and_enforces_permissions()
     assert_eq!(owner_reaction["d"]["reactions"][0]["emoji"], json!("👍"));
     assert_eq!(owner_reaction["d"]["reactions"][0]["count"], json!(1));
     assert_eq!(owner_reaction["d"]["reactions"][0]["reacted"], json!(false));
+    assert_eq!(
+        owner_reaction["d"]["reactions"][0]["actors"][0]["user_id"],
+        json!(peer_id.as_str())
+    );
     assert_eq!(peer_reaction["d"]["reactions"][0]["reacted"], json!(true));
+    assert_eq!(
+        peer_reaction["d"]["reactions"][0]["actors"][0]["user_id"],
+        json!(peer_id.as_str())
+    );
 
     websocket_send_text_frame(
         &mut owner_stream,
@@ -6272,6 +6280,10 @@ async fn rest_message_history_supports_cursor_pagination_and_permissions() {
     assert_eq!(first_data[0]["reactions"][0]["count"], json!(2));
     assert_eq!(first_data[0]["reactions"][0]["reacted"], json!(true));
     assert_eq!(
+        first_data[0]["reactions"][0]["actors"][0]["user_id"],
+        json!(owner_id.as_str())
+    );
+    assert_eq!(
         first_data[0]["embeds"][0]["url"],
         json!("https://example.com/article")
     );
@@ -6279,6 +6291,10 @@ async fn rest_message_history_supports_cursor_pagination_and_permissions() {
     assert_eq!(first_data[1]["reactions"][0]["emoji"], json!("🎉"));
     assert_eq!(first_data[1]["reactions"][0]["count"], json!(1));
     assert_eq!(first_data[1]["reactions"][0]["reacted"], json!(false));
+    assert_eq!(
+        first_data[1]["reactions"][0]["actors"][0]["user_id"],
+        json!(owner_id.as_str())
+    );
     let second_message_embeds = first_data[1]["embeds"]
         .as_array()
         .expect("expected embeds array for second message");

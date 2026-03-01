@@ -84,10 +84,18 @@ pub struct MessageAttachmentResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct MessageReactionActorResponse {
+    pub user_id: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct MessageReactionSummaryResponse {
     pub emoji: String,
     pub count: i64,
     pub reacted: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub actors: Vec<MessageReactionActorResponse>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -632,34 +640,43 @@ pub async fn list_message_reaction_summaries_for_viewers(
 
     let reaction_entries =
         message_reaction::list_reaction_entries_by_message_id(pool, &normalized_message_id).await?;
-    let mut counts_by_emoji = HashMap::<String, i64>::new();
+    let mut actors_by_emoji = HashMap::<String, Vec<MessageReactionActorResponse>>::new();
     let mut reactors_by_emoji = HashMap::<String, HashSet<String>>::new();
     for entry in reaction_entries {
-        *counts_by_emoji.entry(entry.emoji.clone()).or_insert(0) += 1;
+        let actor = MessageReactionActorResponse {
+            user_id: entry.user_id.clone(),
+            created_at: entry.created_at,
+        };
+        actors_by_emoji
+            .entry(entry.emoji.clone())
+            .or_default()
+            .push(actor);
         reactors_by_emoji
             .entry(entry.emoji)
             .or_default()
             .insert(entry.user_id);
     }
 
-    let mut ordered_emoji_counts = counts_by_emoji.into_iter().collect::<Vec<_>>();
-    ordered_emoji_counts.sort_by(|(left_emoji, left_count), (right_emoji, right_count)| {
-        right_count
-            .cmp(left_count)
+    let mut ordered_emoji_actors = actors_by_emoji.into_iter().collect::<Vec<_>>();
+    ordered_emoji_actors.sort_by(|(left_emoji, left_actors), (right_emoji, right_actors)| {
+        right_actors
+            .len()
+            .cmp(&left_actors.len())
             .then_with(|| left_emoji.cmp(right_emoji))
     });
 
     let mut summaries_by_viewer = HashMap::with_capacity(unique_viewer_user_ids.len());
     for viewer_user_id in unique_viewer_user_ids {
-        let mut summaries = Vec::with_capacity(ordered_emoji_counts.len());
-        for (emoji, count) in &ordered_emoji_counts {
+        let mut summaries = Vec::with_capacity(ordered_emoji_actors.len());
+        for (emoji, actors) in &ordered_emoji_actors {
             let reacted = reactors_by_emoji
                 .get(emoji)
                 .is_some_and(|reactors| reactors.contains(&viewer_user_id));
             summaries.push(MessageReactionSummaryResponse {
                 emoji: emoji.clone(),
-                count: *count,
+                count: actors.len() as i64,
                 reacted,
+                actors: actors.clone(),
             });
         }
         summaries_by_viewer.insert(viewer_user_id, summaries);
@@ -823,6 +840,14 @@ fn to_message_reaction_response(
         emoji: summary.emoji,
         count: summary.count,
         reacted: summary.reacted,
+        actors: summary
+            .actors
+            .into_iter()
+            .map(|actor| MessageReactionActorResponse {
+                user_id: actor.user_id,
+                created_at: actor.created_at,
+            })
+            .collect(),
     }
 }
 
@@ -1894,9 +1919,17 @@ mod tests {
         assert_eq!(author_view[0].emoji, "😀");
         assert_eq!(author_view[0].count, 2);
         assert!(author_view[0].reacted);
+        assert_eq!(author_view[0].actors.len(), 2);
+        assert_eq!(author_view[0].actors[0].user_id, "author-user-id");
+        assert_eq!(author_view[0].actors[0].created_at, "2026-02-28T00:00:02Z");
+        assert_eq!(author_view[0].actors[1].user_id, "member-user-id");
+        assert_eq!(author_view[0].actors[1].created_at, "2026-02-28T00:00:03Z");
         assert_eq!(author_view[1].emoji, "🎉");
         assert_eq!(author_view[1].count, 1);
         assert!(!author_view[1].reacted);
+        assert_eq!(author_view[1].actors.len(), 1);
+        assert_eq!(author_view[1].actors[0].user_id, "member-user-id");
+        assert_eq!(author_view[1].actors[0].created_at, "2026-02-28T00:00:04Z");
 
         let member_view = viewer_summaries
             .get("member-user-id")
@@ -1905,8 +1938,13 @@ mod tests {
         assert_eq!(member_view[0].emoji, "😀");
         assert_eq!(member_view[0].count, 2);
         assert!(member_view[0].reacted);
+        assert_eq!(member_view[0].actors.len(), 2);
+        assert_eq!(member_view[0].actors[0].user_id, "author-user-id");
+        assert_eq!(member_view[0].actors[1].user_id, "member-user-id");
         assert_eq!(member_view[1].emoji, "🎉");
         assert_eq!(member_view[1].count, 1);
         assert!(member_view[1].reacted);
+        assert_eq!(member_view[1].actors.len(), 1);
+        assert_eq!(member_view[1].actors[0].user_id, "member-user-id");
     }
 }

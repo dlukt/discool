@@ -9,12 +9,20 @@ pub struct MessageReactionSummary {
     pub emoji: String,
     pub count: i64,
     pub reacted: bool,
+    pub actors: Vec<MessageReactionActor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageReactionActor {
+    pub user_id: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageReactionEntry {
     pub emoji: String,
     pub user_id: String,
+    pub created_at: String,
 }
 
 pub async fn has_message_reaction(
@@ -154,22 +162,22 @@ pub async fn list_reaction_entries_by_message_id(
     pool: &DbPool,
     message_id: &str,
 ) -> Result<Vec<MessageReactionEntry>, AppError> {
-    let rows: Vec<(String, String)> = match pool {
-        DbPool::Postgres(pool) => sqlx::query_as::<_, (String, String)>(
-            "SELECT emoji, user_id
+    let rows: Vec<(String, String, String)> = match pool {
+        DbPool::Postgres(pool) => sqlx::query_as::<_, (String, String, String)>(
+            "SELECT emoji, user_id, created_at
                  FROM message_reactions
                  WHERE message_id = $1
-                 ORDER BY emoji ASC, user_id ASC",
+                 ORDER BY emoji ASC, created_at ASC, user_id ASC",
         )
         .bind(message_id)
         .fetch_all(pool)
         .await
         .map_err(|err| AppError::Internal(err.to_string()))?,
-        DbPool::Sqlite(pool) => sqlx::query_as::<_, (String, String)>(
-            "SELECT emoji, user_id
+        DbPool::Sqlite(pool) => sqlx::query_as::<_, (String, String, String)>(
+            "SELECT emoji, user_id, created_at
                  FROM message_reactions
                  WHERE message_id = ?1
-                 ORDER BY emoji ASC, user_id ASC",
+                 ORDER BY emoji ASC, created_at ASC, user_id ASC",
         )
         .bind(message_id)
         .fetch_all(pool)
@@ -179,7 +187,11 @@ pub async fn list_reaction_entries_by_message_id(
 
     Ok(rows
         .into_iter()
-        .map(|(emoji, user_id)| MessageReactionEntry { emoji, user_id })
+        .map(|(emoji, user_id, created_at)| MessageReactionEntry {
+            emoji,
+            user_id,
+            created_at,
+        })
         .collect())
 }
 
@@ -192,17 +204,13 @@ pub async fn list_reaction_summaries_by_message_ids(
         return Ok(HashMap::new());
     }
 
-    let rows: Vec<(String, String, i64, i64)> = match pool {
+    let rows: Vec<(String, String, String, String)> = match pool {
         DbPool::Postgres(pool) => {
             let mut query_builder = QueryBuilder::<sqlx::Postgres>::new(
                 "SELECT message_id,
                         emoji,
-                        COUNT(*) AS reaction_count,
-                        MAX(CASE WHEN user_id = ",
-            );
-            query_builder.push_bind(viewer_user_id);
-            query_builder.push(
-                " THEN 1 ELSE 0 END) AS reacted
+                        user_id,
+                        created_at
                  FROM message_reactions
                  WHERE message_id IN (",
             );
@@ -212,26 +220,17 @@ pub async fn list_reaction_summaries_by_message_ids(
             }
             query_builder.push(
                 ")
-                 GROUP BY message_id, emoji
-                 ORDER BY message_id ASC, reaction_count DESC, emoji ASC",
+                 ORDER BY message_id ASC, emoji ASC, created_at ASC, user_id ASC",
             );
 
-            query_builder
-                .build_query_as::<(String, String, i64, i64)>()
-                .fetch_all(pool)
-                .await
-                .map_err(|err| AppError::Internal(err.to_string()))?
+            query_builder.build_query_as().fetch_all(pool).await
         }
         DbPool::Sqlite(pool) => {
             let mut query_builder = QueryBuilder::<sqlx::Sqlite>::new(
                 "SELECT message_id,
                         emoji,
-                        COUNT(*) AS reaction_count,
-                        MAX(CASE WHEN user_id = ",
-            );
-            query_builder.push_bind(viewer_user_id);
-            query_builder.push(
-                " THEN 1 ELSE 0 END) AS reacted
+                        user_id,
+                        created_at
                  FROM message_reactions
                  WHERE message_id IN (",
             );
@@ -241,29 +240,54 @@ pub async fn list_reaction_summaries_by_message_ids(
             }
             query_builder.push(
                 ")
-                 GROUP BY message_id, emoji
-                 ORDER BY message_id ASC, reaction_count DESC, emoji ASC",
+                 ORDER BY message_id ASC, emoji ASC, created_at ASC, user_id ASC",
             );
 
-            query_builder
-                .build_query_as::<(String, String, i64, i64)>()
-                .fetch_all(pool)
-                .await
-                .map_err(|err| AppError::Internal(err.to_string()))?
+            query_builder.build_query_as().fetch_all(pool).await
         }
-    };
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
 
-    let mut grouped: HashMap<String, Vec<MessageReactionSummary>> = HashMap::new();
-    for (message_id, emoji, count, reacted) in rows {
-        grouped
+    let mut actors_by_message_and_emoji: HashMap<
+        String,
+        HashMap<String, Vec<MessageReactionActor>>,
+    > = HashMap::new();
+    for (message_id, emoji, user_id, created_at) in rows {
+        actors_by_message_and_emoji
             .entry(message_id)
             .or_default()
-            .push(MessageReactionSummary {
-                emoji,
-                count,
-                reacted: reacted != 0,
+            .entry(emoji)
+            .or_default()
+            .push(MessageReactionActor {
+                user_id,
+                created_at,
             });
     }
+
+    let mut grouped: HashMap<String, Vec<MessageReactionSummary>> = HashMap::new();
+    for (message_id, actors_by_emoji) in actors_by_message_and_emoji {
+        let mut summaries = actors_by_emoji
+            .into_iter()
+            .map(|(emoji, actors)| {
+                let reacted = actors.iter().any(|actor| actor.user_id == viewer_user_id);
+                MessageReactionSummary {
+                    emoji,
+                    count: actors.len() as i64,
+                    reacted,
+                    actors,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        summaries.sort_by(|left, right| {
+            right
+                .count
+                .cmp(&left.count)
+                .then_with(|| left.emoji.cmp(&right.emoji))
+        });
+        grouped.insert(message_id, summaries);
+    }
+
     Ok(grouped)
 }
 
@@ -410,9 +434,17 @@ mod tests {
         assert_eq!(owner_view[0].emoji, "😀");
         assert_eq!(owner_view[0].count, 2);
         assert!(owner_view[0].reacted);
+        assert_eq!(owner_view[0].actors.len(), 2);
+        assert_eq!(owner_view[0].actors[0].user_id, "owner-user-id");
+        assert_eq!(owner_view[0].actors[0].created_at, "2026-02-28T00:00:02Z");
+        assert_eq!(owner_view[0].actors[1].user_id, "peer-user-id");
+        assert_eq!(owner_view[0].actors[1].created_at, "2026-02-28T00:00:04Z");
         assert_eq!(owner_view[1].emoji, "🎉");
         assert_eq!(owner_view[1].count, 1);
         assert!(!owner_view[1].reacted);
+        assert_eq!(owner_view[1].actors.len(), 1);
+        assert_eq!(owner_view[1].actors[0].user_id, "peer-user-id");
+        assert_eq!(owner_view[1].actors[0].created_at, "2026-02-28T00:00:05Z");
 
         let removed = delete_message_reaction(&pool, "message-1", "owner-user-id", "😀")
             .await
@@ -430,5 +462,8 @@ mod tests {
             .expect("expected 😀 summary after removal");
         assert_eq!(smile.count, 1);
         assert!(!smile.reacted);
+        assert_eq!(smile.actors.len(), 1);
+        assert_eq!(smile.actors[0].user_id, "peer-user-id");
+        assert_eq!(smile.actors[0].created_at, "2026-02-28T00:00:04Z");
     }
 }
