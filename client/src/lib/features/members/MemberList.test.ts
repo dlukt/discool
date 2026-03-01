@@ -121,12 +121,35 @@ const presenceState = vi.hoisted(() => ({
   ensureConnected: vi.fn(),
 }))
 
+const { blockState, blockedUsers } = vi.hoisted(() => {
+  const blockedUsers = new Set<string>()
+  const blockState = {
+    version: 0,
+    isBlocked: vi.fn((userId: string) => blockedUsers.has(userId)),
+    blockUser: vi.fn(async (userId: string) => {
+      blockedUsers.add(userId)
+      blockState.version += 1
+      return { synced: true, syncError: null }
+    }),
+    unblockUser: vi.fn(async (userId: string) => {
+      blockedUsers.delete(userId)
+      blockState.version += 1
+      return { synced: true, syncError: null }
+    }),
+  }
+  return { blockState, blockedUsers }
+})
+
 vi.mock('$lib/features/guild/guildStore.svelte', () => ({
   guildState,
 }))
 
 vi.mock('$lib/features/identity/identityStore.svelte', () => ({
   identityState,
+}))
+
+vi.mock('$lib/features/identity/blockStore.svelte', () => ({
+  blockState,
 }))
 
 vi.mock('./presenceStore.svelte', () => ({
@@ -238,6 +261,8 @@ describe('MemberList', () => {
     vi.clearAllMocks()
     seedGuildData()
     presenceState.version = 0
+    blockedUsers.clear()
+    blockState.version = 0
     identityState.session = {
       token: 'token-123',
       user: { id: 'user-viewer' },
@@ -348,6 +373,38 @@ describe('MemberList', () => {
     })
 
     window.removeEventListener('discool:open-dm-intent', dmIntentHandler)
+  })
+
+  it('hides blocked members and supports blocking from context actions', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    blockedUsers.add('user-helper-online')
+
+    const { getByTestId, getByRole, queryByTestId } = render(MemberList, {
+      activeGuild: 'lobby',
+    })
+
+    await waitFor(() => {
+      expect(guildState.loadMembers).toHaveBeenCalledWith('lobby', true)
+    })
+
+    expect(
+      queryByTestId('member-row-user-helper-online'),
+    ).not.toBeInTheDocument()
+
+    await fireEvent.keyDown(getByTestId('member-row-user-default'), {
+      key: 'ContextMenu',
+    })
+
+    await fireEvent.click(getByRole('button', { name: 'Block user' }))
+
+    await waitFor(() => {
+      expect(blockState.blockUser).toHaveBeenCalledWith('user-default', {
+        displayName: 'General User',
+        username: 'general-user',
+        avatarColor: '#99aab5',
+      })
+    })
+    confirmSpy.mockRestore()
   })
 
   it('virtualizes long member lists and renders only a windowed subset', async () => {

@@ -149,6 +149,14 @@ pub fn router(state: AppState) -> Router {
             "/users/me/avatar",
             get(users::get_avatar).post(users::upload_avatar),
         )
+        .route(
+            "/users/me/blocks",
+            get(users::list_user_blocks).post(users::create_user_block),
+        )
+        .route(
+            "/users/me/blocks/{blocked_user_id}",
+            delete(users::delete_user_block),
+        )
         .route("/admin/health", get(admin::get_health))
         .route("/admin/backup", post(admin::create_backup))
         .route("/instance", get(instance::get_instance))

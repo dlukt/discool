@@ -16,6 +16,12 @@ const { wsLifecycleState, lifecycleListeners } = vi.hoisted(() => ({
   lifecycleListeners: new Set<(state: MockLifecycle) => void>(),
 }))
 
+const { blockState } = vi.hoisted(() => ({
+  blockState: {
+    isBlocked: vi.fn((_userId: string) => false),
+  },
+}))
+
 const { guildState, channelState, dmState } = vi.hoisted(() => {
   const guildState = {
     version: 0,
@@ -204,6 +210,10 @@ vi.mock('$lib/features/dm/dmStore.svelte', () => ({
   dmState,
 }))
 
+vi.mock('$lib/features/identity/blockStore.svelte', () => ({
+  blockState,
+}))
+
 vi.mock('$lib/features/guild/GuildRail.svelte', async () => ({
   default: (await import('./__mocks__/GuildRailMock.svelte')).default,
 }))
@@ -309,6 +319,8 @@ describe('ShellRoute', () => {
     dmState.conversations = []
     dmState.ensureLoaded.mockClear()
     dmState.openOrCreateDm.mockClear()
+    blockState.isBlocked.mockReset()
+    blockState.isBlocked.mockReturnValue(false)
   })
 
   it('renders skip link as the first focusable element', async () => {
@@ -519,6 +531,25 @@ describe('ShellRoute', () => {
     await waitFor(() => {
       expect(dmState.openOrCreateDm).toHaveBeenCalledWith('user-2')
       expect(routerGoto).toHaveBeenCalledWith('/dm/dm-1')
+    })
+  })
+
+  it('ignores member-list DM intent events for blocked users', async () => {
+    blockState.isBlocked.mockImplementation(
+      (userId: string) => userId === 'user-2',
+    )
+    const props = buildProps()
+    render(ShellRoute, props)
+
+    window.dispatchEvent(
+      new CustomEvent('discool:open-dm-intent', {
+        detail: { guildSlug: 'lobby', userId: 'user-2' },
+      }),
+    )
+
+    await waitFor(() => {
+      expect(dmState.openOrCreateDm).not.toHaveBeenCalled()
+      expect(routerGoto).not.toHaveBeenCalled()
     })
   })
 

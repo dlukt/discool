@@ -225,6 +225,21 @@ const dmStoreMock = vi.hoisted(() => {
   return { dmState }
 })
 
+const blockStoreMock = vi.hoisted(() => {
+  const state = {
+    blockedUsers: new Set<string>(),
+    hiddenByWindow: new Set<string>(),
+  }
+  const blockState = {
+    version: 0,
+    isBlocked: vi.fn((userId: string) => state.blockedUsers.has(userId)),
+    isHiddenByBlockWindow: vi.fn((userId: string, activityAt: string) =>
+      state.hiddenByWindow.has(`${userId}|${activityAt}`),
+    ),
+  }
+  return { state, blockState }
+})
+
 vi.mock('$lib/ws/client', () => ({
   wsClient: wsMock.wsClient,
 }))
@@ -250,9 +265,24 @@ vi.mock('$lib/features/dm/dmStore.svelte', () => ({
   dmState: dmStoreMock.dmState,
 }))
 
+vi.mock('$lib/features/identity/blockStore.svelte', () => ({
+  blockState: blockStoreMock.blockState,
+}))
+
 import { messageState } from './messageStore.svelte'
 
-function makeMessage(id: string, createdAt: string) {
+function makeMessage(
+  id: string,
+  createdAt: string,
+  overrides: Partial<ReturnType<typeof makeMessageBase>> = {},
+) {
+  return {
+    ...makeMessageBase(id, createdAt),
+    ...overrides,
+  }
+}
+
+function makeMessageBase(id: string, createdAt: string) {
   return {
     id,
     guildSlug: 'lobby',
@@ -304,6 +334,11 @@ describe('messageState', () => {
     dmStoreMock.dmState.setDmUnreadActivity.mockClear()
     dmStoreMock.dmState.noteMessageActivity.mockClear()
     dmStoreMock.dmState.setActiveDm.mockClear()
+    blockStoreMock.state.blockedUsers.clear()
+    blockStoreMock.state.hiddenByWindow.clear()
+    blockStoreMock.blockState.version = 0
+    blockStoreMock.blockState.isBlocked.mockClear()
+    blockStoreMock.blockState.isHiddenByBlockWindow.mockClear()
   })
 
   it('creates optimistic message and reconciles when message_create arrives', () => {
@@ -530,6 +565,23 @@ describe('messageState', () => {
     }
   })
 
+  it('ignores typing_start events from blocked users', () => {
+    messageState.setCurrentUser('user-1')
+    blockStoreMock.state.blockedUsers.add('user-2')
+    blockStoreMock.blockState.version += 1
+
+    wsMock.state.listener?.({
+      op: 'typing_start',
+      d: {
+        guild_slug: 'lobby',
+        channel_slug: 'general',
+        user_id: 'user-2',
+      },
+    })
+
+    expect(messageState.typingUserIdsForChannel('lobby', 'general')).toEqual([])
+  })
+
   it('tracks channel_activity unread state and clears on active channel switch', () => {
     messageState.setActiveChannel('lobby', 'general')
 
@@ -548,6 +600,23 @@ describe('messageState', () => {
     ).toHaveBeenCalledWith('lobby', true)
 
     messageState.setActiveChannel('lobby', 'random')
+    expect(messageState.isChannelUnread('lobby', 'random')).toBe(false)
+  })
+
+  it('ignores channel_activity from blocked actors', () => {
+    blockStoreMock.state.blockedUsers.add('user-2')
+    blockStoreMock.blockState.version += 1
+    messageState.setActiveChannel('lobby', 'general')
+
+    wsMock.state.listener?.({
+      op: 'channel_activity',
+      d: {
+        guild_slug: 'lobby',
+        channel_slug: 'random',
+        actor_user_id: 'user-2',
+      },
+    })
+
     expect(messageState.isChannelUnread('lobby', 'random')).toBe(false)
   })
 
@@ -642,6 +711,31 @@ describe('messageState', () => {
     expect(timeline.map((message) => message.id)).toEqual(['msg-001'])
   })
 
+  it('filters timeline messages for active and historical blocks', () => {
+    messageState.ingestServerMessage(
+      makeMessage('msg-blocked', '2026-02-28T00:00:01Z', {
+        authorUserId: 'user-2',
+      }),
+    )
+    messageState.ingestServerMessage(
+      makeMessage('msg-window', '2026-02-28T00:00:02Z', {
+        authorUserId: 'user-3',
+      }),
+    )
+    messageState.ingestServerMessage(
+      makeMessage('msg-visible', '2026-02-28T00:00:03Z', {
+        authorUserId: 'user-4',
+      }),
+    )
+
+    blockStoreMock.state.blockedUsers.add('user-2')
+    blockStoreMock.state.hiddenByWindow.add('user-3|2026-02-28T00:00:02Z')
+    blockStoreMock.blockState.version += 1
+
+    const timeline = messageState.timeline('lobby', 'general')
+    expect(timeline.map((message) => message.id)).toEqual(['msg-visible'])
+  })
+
   it('sends reaction toggle op and ingests message_reaction_update snapshots', () => {
     messageState.setCurrentUser('user-1')
     messageState.ingestServerMessage(
@@ -710,6 +804,46 @@ describe('messageState', () => {
     timeline = messageState.timeline('lobby', 'general')
     expect(timeline[0]?.reactions).toEqual([
       { emoji: '🎉', count: 3, reacted: true },
+    ])
+  })
+
+  it('filters blocked reaction actors from message_reaction_update snapshots', () => {
+    messageState.setCurrentUser('user-1')
+    blockStoreMock.state.blockedUsers.add('user-2')
+    blockStoreMock.blockState.version += 1
+    messageState.ingestServerMessage(
+      makeMessage('msg-020', '2026-02-28T00:00:01Z'),
+    )
+
+    wsMock.state.listener?.({
+      op: 'message_reaction_update',
+      d: {
+        guild_slug: 'lobby',
+        channel_slug: 'general',
+        message_id: 'msg-020',
+        actor_user_id: 'user-3',
+        reactions: [
+          {
+            emoji: '🎉',
+            count: 2,
+            reacted: true,
+            actors: [
+              { user_id: 'user-1', created_at: '2026-02-28T00:00:02Z' },
+              { user_id: 'user-2', created_at: '2026-02-28T00:00:03Z' },
+            ],
+          },
+        ],
+      },
+    })
+
+    const timeline = messageState.timeline('lobby', 'general')
+    expect(timeline[0]?.reactions).toEqual([
+      {
+        emoji: '🎉',
+        count: 1,
+        reacted: false,
+        actors: [{ userId: 'user-1', createdAt: '2026-02-28T00:00:02Z' }],
+      },
     ])
   })
 
@@ -816,5 +950,20 @@ describe('messageState', () => {
       'dm-2',
       true,
     )
+  })
+
+  it('ignores dm_activity from blocked actors', () => {
+    blockStoreMock.state.blockedUsers.add('user-2')
+    blockStoreMock.blockState.version += 1
+
+    wsMock.state.listener?.({
+      op: 'dm_activity',
+      d: {
+        dm_slug: 'dm-2',
+        actor_user_id: 'user-2',
+      },
+    })
+
+    expect(dmStoreMock.dmState.setDmUnreadActivity).not.toHaveBeenCalled()
   })
 })

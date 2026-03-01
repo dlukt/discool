@@ -1,6 +1,7 @@
 <script lang="ts">
 import { ApiError } from '$lib/api'
 
+import { blockState } from './blockStore.svelte'
 import { identityState } from './identityStore.svelte'
 
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024
@@ -40,6 +41,37 @@ let recoverySending = $state(false)
 let recoveryStatusMessage = $state<string | null>(null)
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let recoveryErrorMessage = $state<string | null>(null)
+let blockActionPendingUserId = $state<string | null>(null)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let blockActionStatusMessage = $state<string | null>(null)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let blockActionErrorMessage = $state<string | null>(null)
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let blockedUsers = $derived.by(() => {
+  const _blockVersion = blockState.version
+  void _blockVersion
+  return blockState
+    .blockedUsers()
+    .map((record) => {
+      const activeInterval = [...record.intervals]
+        .reverse()
+        .find((interval) => interval.unblockedAt === null)
+      return {
+        userId: record.userId,
+        displayName:
+          record.displayName?.trim() ||
+          record.username?.trim() ||
+          record.userId,
+        username: record.username?.trim() || null,
+        blockedAt:
+          activeInterval?.blockedAt ??
+          record.intervals[record.intervals.length - 1]?.blockedAt ??
+          '',
+      }
+    })
+    .sort((left, right) => left.displayName.localeCompare(right.displayName))
+})
 
 let initialized = false
 $effect(() => {
@@ -201,6 +233,37 @@ async function onRecoverySubmit(event: SubmitEvent) {
     }
   } finally {
     recoverySending = false
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function blockedAtLabel(blockedAt: string): string {
+  const parsed = new Date(blockedAt)
+  if (Number.isNaN(parsed.getTime())) return blockedAt
+  return parsed.toLocaleString()
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+async function unblockFromSettings(userId: string, displayName: string) {
+  if (blockActionPendingUserId) return
+  blockActionStatusMessage = null
+  blockActionErrorMessage = null
+  blockActionPendingUserId = userId
+  try {
+    const result = await blockState.unblockUser(userId)
+    blockActionStatusMessage = result.synced
+      ? `Unblocked ${displayName}.`
+      : `Unblocked ${displayName}. Local change saved, but sync failed: ${result.syncError}`
+  } catch (err) {
+    if (err instanceof ApiError) {
+      blockActionErrorMessage = err.message
+    } else if (err instanceof Error) {
+      blockActionErrorMessage = err.message
+    } else {
+      blockActionErrorMessage = 'Failed to unblock user.'
+    }
+  } finally {
+    blockActionPendingUserId = null
   }
 }
 </script>
@@ -400,6 +463,64 @@ async function onRecoverySubmit(event: SubmitEvent) {
             : recoveryActionLabel()}
         </button>
       </form>
+    </section>
+
+    <section class="mt-6 rounded-md border border-border bg-muted p-4">
+      <header class="mb-3 space-y-1">
+        <h3 class="text-sm font-semibold">Blocked users</h3>
+        <p class="text-sm text-muted-foreground">
+          Manage users you have blocked. Blocking only affects your own view.
+        </p>
+      </header>
+
+      {#if blockActionStatusMessage}
+        <p class="mb-3 rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-300">
+          {blockActionStatusMessage}
+        </p>
+      {/if}
+      {#if blockActionErrorMessage}
+        <p class="mb-3 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive" role="alert">
+          {blockActionErrorMessage}
+        </p>
+      {/if}
+
+      {#if blockedUsers.length === 0}
+        <p class="text-sm text-muted-foreground">You have no blocked users.</p>
+      {:else}
+        <ul class="space-y-2">
+          {#each blockedUsers as blockedUser}
+            <li class="flex flex-col gap-2 rounded-md border border-border bg-card p-3 sm:flex-row sm:items-center sm:justify-between">
+              <div class="min-w-0">
+                <p class="truncate text-sm font-medium text-foreground">
+                  {blockedUser.displayName}
+                </p>
+                <p class="truncate text-xs text-muted-foreground">
+                  {#if blockedUser.username}
+                    @{blockedUser.username} ·
+                  {/if}
+                  blocked {blockedAtLabel(blockedUser.blockedAt)}
+                </p>
+              </div>
+              <button
+                type="button"
+                class="inline-flex items-center justify-center rounded-md border border-input px-3 py-1.5 text-xs font-medium text-foreground hover:bg-background disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={blockActionPendingUserId === blockedUser.userId}
+                onclick={() =>
+                  void unblockFromSettings(
+                    blockedUser.userId,
+                    blockedUser.displayName,
+                  )}
+              >
+                {#if blockActionPendingUserId === blockedUser.userId}
+                  Unblocking...
+                {:else}
+                  Unblock
+                {/if}
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     </section>
   </div>
 {/if}

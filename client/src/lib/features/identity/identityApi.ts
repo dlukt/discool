@@ -1,4 +1,4 @@
-import { apiFetch } from '$lib/api'
+import { ApiError, apiFetch } from '$lib/api'
 
 import {
   type AuthSession,
@@ -18,7 +18,10 @@ import {
   toRegisteredUser,
   toStartRecoveryEmailInputWire,
   toUpdateProfileInputWire,
+  toUserBlockEntry,
   type UpdateProfileInput,
+  type UserBlockEntry,
+  type UserBlockEntryWire,
 } from './types'
 
 type RegisterRequestWire = {
@@ -59,6 +62,10 @@ type VerifyResponseWire = {
   token: string
   expires_at: string
   user: RegisteredUserWire
+}
+
+type AddUserBlockRequestWire = {
+  blocked_user_id: string
 }
 
 function toAuthSession(wire: VerifyResponseWire): AuthSession {
@@ -209,4 +216,37 @@ export function recoverIdentityByToken(
   return apiFetch<RecoveryIdentityPayloadWire>(
     `/api/v1/auth/recovery-email/recover?${query.toString()}`,
   ).then(toRecoveryIdentityPayload)
+}
+
+export function listUserBlocks(): Promise<UserBlockEntry[]> {
+  return apiFetch<UserBlockEntryWire[]>('/api/v1/users/me/blocks').then(
+    (items) => items.map(toUserBlockEntry),
+  )
+}
+
+export function addUserBlock(blockedUserId: string): Promise<UserBlockEntry> {
+  const normalizedBlockedUserId = blockedUserId.trim()
+  if (!normalizedBlockedUserId) {
+    throw new ApiError('VALIDATION_ERROR', 'blockedUserId is required')
+  }
+  const body: AddUserBlockRequestWire = {
+    blocked_user_id: normalizedBlockedUserId,
+  }
+  return apiFetch<UserBlockEntryWire>('/api/v1/users/me/blocks', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  }).then(toUserBlockEntry)
+}
+
+export function removeUserBlock(blockedUserId: string): Promise<void> {
+  const normalizedBlockedUserId = blockedUserId.trim()
+  if (!normalizedBlockedUserId) {
+    throw new ApiError('VALIDATION_ERROR', 'blockedUserId is required')
+  }
+  return apiFetch<void>(
+    `/api/v1/users/me/blocks/${encodeURIComponent(normalizedBlockedUserId)}`,
+    {
+      method: 'DELETE',
+    },
+  )
 }

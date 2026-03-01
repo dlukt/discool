@@ -4,6 +4,12 @@ export type ChatMessageReaction = {
   emoji: string
   count: number
   reacted: boolean
+  actors?: ChatMessageReactionActor[]
+}
+
+export type ChatMessageReactionActor = {
+  userId: string
+  createdAt: string
 }
 
 export type ChatMessageAttachment = {
@@ -29,6 +35,12 @@ export type ChatMessageReactionWire = {
   emoji?: string
   count?: number
   reacted?: boolean
+  actors?: ChatMessageReactionActorWire[]
+}
+
+export type ChatMessageReactionActorWire = {
+  user_id?: string
+  created_at?: string
 }
 
 export type ChatMessageAttachmentWire = {
@@ -96,22 +108,36 @@ export function toChatMessageReactions(
 ): ChatMessageReaction[] {
   if (!Array.isArray(wireReactions)) return []
 
-  const normalized = wireReactions
-    .map((reaction) => {
-      const emoji = reaction.emoji?.trim()
-      if (!emoji) return null
-      const count =
-        typeof reaction.count === 'number' && Number.isFinite(reaction.count)
-          ? Math.max(0, Math.trunc(reaction.count))
-          : 0
-      if (count <= 0) return null
-      return {
-        emoji,
-        count,
-        reacted: reaction.reacted === true,
-      }
+  const normalized: ChatMessageReaction[] = []
+  for (const reaction of wireReactions) {
+    const emoji = reaction.emoji?.trim()
+    if (!emoji) continue
+    const count =
+      typeof reaction.count === 'number' && Number.isFinite(reaction.count)
+        ? Math.max(0, Math.trunc(reaction.count))
+        : 0
+    const actors = Array.isArray(reaction.actors)
+      ? reaction.actors
+          .map((actor) => {
+            const userId = actor.user_id?.trim()
+            const createdAt = actor.created_at?.trim()
+            if (!userId || !createdAt) return null
+            return { userId, createdAt }
+          })
+          .filter(
+            (actor): actor is { userId: string; createdAt: string } =>
+              actor !== null,
+          )
+      : []
+    const normalizedCount = actors.length > 0 ? actors.length : count
+    if (normalizedCount <= 0) continue
+    normalized.push({
+      emoji,
+      count: normalizedCount,
+      reacted: reaction.reacted === true,
+      actors: actors.length > 0 ? actors : undefined,
     })
-    .filter((reaction): reaction is ChatMessageReaction => reaction !== null)
+  }
 
   normalized.sort(
     (left, right) =>

@@ -21,6 +21,7 @@ import GuildSettings from '$lib/features/guild/GuildSettings.svelte'
 import { guildState } from '$lib/features/guild/guildStore.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import InviteModal from '$lib/features/guild/InviteModal.svelte'
+import { blockState } from '$lib/features/identity/blockStore.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import MemberList from '$lib/features/members/MemberList.svelte'
 import { presenceState } from '$lib/features/members/presenceStore.svelte'
@@ -148,6 +149,7 @@ onMount(() => {
   ) => {
     const detail = event.detail
     if (!detail || typeof detail.userId !== 'string') return
+    if (blockState.isBlocked(detail.userId)) return
     void dmState
       .openOrCreateDm(detail.userId)
       .then((conversation) => goto(`/dm/${conversation.dmSlug}`))

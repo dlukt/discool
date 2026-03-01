@@ -14,6 +14,7 @@ import {
 } from '$lib/features/guild/guildApi'
 import { guildState } from '$lib/features/guild/guildStore.svelte'
 import type { InviteMetadata } from '$lib/features/guild/types'
+import { blockState } from '$lib/features/identity/blockStore.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import CrossInstanceJoinPrompt from '$lib/features/identity/CrossInstanceJoinPrompt.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
@@ -260,8 +261,14 @@ $effect(() => {
   guildState.clear()
   channelState.clear()
   dmState.clearAll()
+  blockState.clearAll()
   initialRouteResolved = false
   shellBootstrapping = true
+})
+
+$effect(() => {
+  const userId = identityState.session?.user.id ?? null
+  void blockState.initialize(userId)
 })
 
 $effect(() => {

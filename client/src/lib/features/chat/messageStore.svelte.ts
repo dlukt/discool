@@ -2,12 +2,14 @@ import { channelState } from '$lib/features/channel/channelStore.svelte'
 import { fetchDmHistory } from '$lib/features/dm/dmApi'
 import { dmState } from '$lib/features/dm/dmStore.svelte'
 import { guildState } from '$lib/features/guild/guildStore.svelte'
+import { blockState } from '$lib/features/identity/blockStore.svelte'
 import { wsClient } from '$lib/ws/client'
 import type { WsEnvelope } from '$lib/ws/protocol'
 import { fetchChannelHistory, uploadMessageAttachment } from './messageApi'
 import {
   type ChatMessage,
   type ChatMessageReaction,
+  type ChatMessageReactionActor,
   toChatMessage,
   toChatMessageReactions,
 } from './types'
@@ -65,10 +67,13 @@ type TypingStartPayload = {
 type ChannelActivityPayload = {
   guild_slug?: string
   channel_slug?: string
+  actor_user_id?: string
 }
 
 type DmActivityPayload = {
   dm_slug?: string
+  actor_user_id?: string
+  message_id?: string
 }
 
 export type ChatAuthorInput = {
@@ -193,6 +198,72 @@ function mergeMessages(
   return sortMessages([...byId.values()])
 }
 
+function isBlockedAuthorNow(userId: string): boolean {
+  const normalizedUserId = userId.trim()
+  if (!normalizedUserId) return false
+  return blockState.isBlocked(normalizedUserId)
+}
+
+function isHiddenByBlockWindow(userId: string, activityAt: string): boolean {
+  const normalizedUserId = userId.trim()
+  if (!normalizedUserId) return false
+  const normalizedActivityAt = activityAt.trim()
+  if (!normalizedActivityAt) return false
+  return blockState.isHiddenByBlockWindow(
+    normalizedUserId,
+    normalizedActivityAt,
+  )
+}
+
+function shouldHideMessageByBlock(message: ChatMessage): boolean {
+  if (isBlockedAuthorNow(message.authorUserId)) return true
+  return isHiddenByBlockWindow(message.authorUserId, message.createdAt)
+}
+
+function shouldHideReactionActorByBlock(
+  actor: ChatMessageReactionActor,
+): boolean {
+  if (isBlockedAuthorNow(actor.userId)) return true
+  return isHiddenByBlockWindow(actor.userId, actor.createdAt)
+}
+
+function filterReactionByBlock(
+  reaction: ChatMessageReaction,
+  currentUserId: string | null,
+): ChatMessageReaction | null {
+  if (!Array.isArray(reaction.actors) || reaction.actors.length === 0) {
+    return reaction.count > 0 ? reaction : null
+  }
+  const visibleActors = reaction.actors.filter(
+    (actor) => !shouldHideReactionActorByBlock(actor),
+  )
+  if (visibleActors.length === 0) return null
+  return {
+    ...reaction,
+    count: visibleActors.length,
+    reacted:
+      currentUserId !== null
+        ? visibleActors.some((actor) => actor.userId === currentUserId)
+        : false,
+    actors: visibleActors,
+  }
+}
+
+function filterMessageByBlock(
+  message: ChatMessage,
+  currentUserId: string | null,
+): ChatMessage | null {
+  if (shouldHideMessageByBlock(message)) return null
+  const nextReactions = message.reactions
+    .map((reaction) => filterReactionByBlock(reaction, currentUserId))
+    .filter((reaction): reaction is ChatMessageReaction => reaction !== null)
+  if (nextReactions.length === message.reactions.length) return message
+  return {
+    ...message,
+    reactions: nextReactions,
+  }
+}
+
 function parseMessageMutationEnvelope(
   envelope: WsEnvelope,
   expectedOp: 'message_create' | 'message_update',
@@ -252,6 +323,7 @@ function parseMessageMutationEnvelope(
           emoji?: string
           count?: number
           reacted?: boolean
+          actors?: Array<{ user_id?: string; created_at?: string }>
         }>)
       : undefined,
     embeds: Array.isArray(payload.embeds)
@@ -326,6 +398,7 @@ function parseDmMessageCreateEnvelope(
           emoji?: string
           count?: number
           reacted?: boolean
+          actors?: Array<{ user_id?: string; created_at?: string }>
         }>)
       : undefined,
     embeds: Array.isArray(payload.embeds)
@@ -382,6 +455,7 @@ function parseMessageReactionUpdateEnvelope(envelope: WsEnvelope): {
             emoji?: string
             count?: number
             reacted?: boolean
+            actors?: Array<{ user_id?: string; created_at?: string }>
           }>)
         : undefined,
     ),
@@ -406,6 +480,7 @@ function parseTypingStartEnvelope(envelope: WsEnvelope): {
 function parseChannelActivityEnvelope(envelope: WsEnvelope): {
   guildSlug: string
   channelSlug: string
+  actorUserId: string | null
 } | null {
   if (envelope.op !== 'channel_activity') return null
   if (!isRecord(envelope.d)) return null
@@ -413,16 +488,26 @@ function parseChannelActivityEnvelope(envelope: WsEnvelope): {
   const guildSlug = payload.guild_slug?.trim()
   const channelSlug = payload.channel_slug?.trim()
   if (!guildSlug || !channelSlug) return null
-  return { guildSlug, channelSlug }
+  return {
+    guildSlug,
+    channelSlug,
+    actorUserId: payload.actor_user_id?.trim() || null,
+  }
 }
 
-function parseDmActivityEnvelope(envelope: WsEnvelope): string | null {
+function parseDmActivityEnvelope(envelope: WsEnvelope): {
+  dmSlug: string
+  actorUserId: string | null
+} | null {
   if (envelope.op !== 'dm_activity') return null
   if (!isRecord(envelope.d)) return null
   const payload = envelope.d as DmActivityPayload
   const dmSlug = payload.dm_slug?.trim()
   if (!dmSlug) return null
-  return dmSlug
+  return {
+    dmSlug,
+    actorUserId: payload.actor_user_id?.trim() || null,
+  }
 }
 
 function updateHistoryState(
@@ -528,8 +613,13 @@ export const messageState = $state({
   typingByChannel: {} as Record<string, Record<string, number>>,
 
   timeline: (guildSlug: string, channelSlug: string): ChatMessage[] => {
+    const _blockVersion = blockState.version
+    void _blockVersion
     const key = toChannelKey(guildSlug, channelSlug)
-    return [...(messageState.messagesByChannel[key] ?? [])]
+    const currentUserId = messageState.currentUserId
+    return (messageState.messagesByChannel[key] ?? [])
+      .map((message) => filterMessageByBlock(message, currentUserId))
+      .filter((message): message is ChatMessage => message !== null)
   },
 
   historyStateForChannel: (
@@ -541,10 +631,15 @@ export const messageState = $state({
   },
 
   timelineForDm: (dmSlug: string): ChatMessage[] => {
+    const _blockVersion = blockState.version
+    void _blockVersion
     const normalizedDmSlug = dmSlug.trim()
     if (!normalizedDmSlug) return []
     const key = toDmKey(normalizedDmSlug)
-    return [...(messageState.messagesByChannel[key] ?? [])]
+    const currentUserId = messageState.currentUserId
+    return (messageState.messagesByChannel[key] ?? [])
+      .map((message) => filterMessageByBlock(message, currentUserId))
+      .filter((message): message is ChatMessage => message !== null)
   },
 
   historyStateForDm: (dmSlug: string): ChannelHistoryState => {
@@ -558,10 +653,13 @@ export const messageState = $state({
     guildSlug: string,
     channelSlug: string,
   ): string[] => {
+    const _blockVersion = blockState.version
+    void _blockVersion
     const key = toChannelKey(guildSlug, channelSlug)
     const typingByUser = messageState.typingByChannel[key]
     if (!typingByUser) return []
     return Object.entries(typingByUser)
+      .filter(([userId]) => !isBlockedAuthorNow(userId))
       .sort(
         ([leftUserId, leftSeenAt], [rightUserId, rightSeenAt]) =>
           rightSeenAt - leftSeenAt || leftUserId.localeCompare(rightUserId),
@@ -600,6 +698,7 @@ export const messageState = $state({
     const normalizedUserId = userId.trim()
     if (!normalizedGuild || !normalizedChannel || !normalizedUserId) return
     if (normalizedUserId === messageState.currentUserId) return
+    if (isBlockedAuthorNow(normalizedUserId)) return
 
     const key = toChannelKey(normalizedGuild, normalizedChannel)
     const now = Date.now()
@@ -646,10 +745,18 @@ export const messageState = $state({
     messageState.version += 1
   },
 
-  ingestChannelActivity: (guildSlug: string, channelSlug: string): void => {
+  ingestChannelActivity: (
+    guildSlug: string,
+    channelSlug: string,
+    actorUserId: string | null,
+  ): void => {
     const normalizedGuild = guildSlug.trim()
     const normalizedChannel = channelSlug.trim()
     if (!normalizedGuild || !normalizedChannel) return
+    const normalizedActorUserId = actorUserId?.trim() || null
+    if (normalizedActorUserId && isBlockedAuthorNow(normalizedActorUserId)) {
+      return
+    }
     const key = toChannelKey(normalizedGuild, normalizedChannel)
     if (messageState.activeChannelKey === key) return
     channelState.setChannelUnreadActivity(
@@ -766,10 +873,15 @@ export const messageState = $state({
           limit: HISTORY_PAGE_LIMIT,
         },
       )
+      const filteredPageMessages = page.messages
+        .map((message) =>
+          filterMessageByBlock(message, messageState.currentUserId),
+        )
+        .filter((message): message is ChatMessage => message !== null)
       const existing = messageState.messagesByChannel[channelKey] ?? []
       messageState.messagesByChannel[channelKey] = mergeMessages(
         existing,
-        page.messages,
+        filteredPageMessages,
       )
       updateHistoryState(channelKey, {
         initialized: true,
@@ -810,22 +922,16 @@ export const messageState = $state({
           before: state.cursor,
         },
       )
-
-      if (page.messages.length === 0) {
-        updateHistoryState(channelKey, {
-          loadingHistory: false,
-          initialized: true,
-          hasMoreHistory: false,
-          cursor: null,
-        })
-        messageState.version += 1
-        return
-      }
+      const filteredPageMessages = page.messages
+        .map((message) =>
+          filterMessageByBlock(message, messageState.currentUserId),
+        )
+        .filter((message): message is ChatMessage => message !== null)
 
       const existing = messageState.messagesByChannel[channelKey] ?? []
       messageState.messagesByChannel[channelKey] = mergeMessages(
         existing,
-        page.messages,
+        filteredPageMessages,
       )
       updateHistoryState(channelKey, {
         loadingHistory: false,
@@ -856,10 +962,15 @@ export const messageState = $state({
       const page = await fetchDmHistory(normalizedDmSlug, {
         limit: HISTORY_PAGE_LIMIT,
       })
+      const filteredPageMessages = page.messages
+        .map((message) =>
+          filterMessageByBlock(message, messageState.currentUserId),
+        )
+        .filter((message): message is ChatMessage => message !== null)
       const existing = messageState.messagesByChannel[dmKey] ?? []
       messageState.messagesByChannel[dmKey] = mergeMessages(
         existing,
-        page.messages,
+        filteredPageMessages,
       )
       updateHistoryState(dmKey, {
         initialized: true,
@@ -891,21 +1002,16 @@ export const messageState = $state({
         limit: HISTORY_PAGE_LIMIT,
         before: state.cursor,
       })
-      if (page.messages.length === 0) {
-        updateHistoryState(dmKey, {
-          loadingHistory: false,
-          initialized: true,
-          hasMoreHistory: false,
-          cursor: null,
-        })
-        messageState.version += 1
-        return
-      }
+      const filteredPageMessages = page.messages
+        .map((message) =>
+          filterMessageByBlock(message, messageState.currentUserId),
+        )
+        .filter((message): message is ChatMessage => message !== null)
 
       const existing = messageState.messagesByChannel[dmKey] ?? []
       messageState.messagesByChannel[dmKey] = mergeMessages(
         existing,
-        page.messages,
+        filteredPageMessages,
       )
       updateHistoryState(dmKey, {
         loadingHistory: false,
@@ -1281,13 +1387,19 @@ export const messageState = $state({
   },
 
   ingestServerMessage: (incoming: ChatMessage): void => {
+    const filteredIncoming = filterMessageByBlock(
+      incoming,
+      messageState.currentUserId,
+    )
+    if (!filteredIncoming) return
+
     const channelKey = toChannelKey(incoming.guildSlug, incoming.channelSlug)
     const existing = messageState.messagesByChannel[channelKey] ?? []
 
-    if (existing.some((message) => message.id === incoming.id)) {
+    if (existing.some((message) => message.id === filteredIncoming.id)) {
       messageState.messagesByChannel[channelKey] = existing.map((message) =>
-        message.id === incoming.id
-          ? { ...incoming, optimistic: false }
+        message.id === filteredIncoming.id
+          ? { ...filteredIncoming, optimistic: false }
           : message,
       )
       enforceMemoryBudget()
@@ -1295,13 +1407,13 @@ export const messageState = $state({
       return
     }
 
-    const nonce = incoming.clientNonce
+    const nonce = filteredIncoming.clientNonce
     if (nonce) {
       const pending = messageState.optimisticByNonce[nonce]
       if (pending && pending.channelKey === channelKey) {
         const replaced = existing.map((message) =>
           message.id === pending.messageId
-            ? { ...incoming, optimistic: false }
+            ? { ...filteredIncoming, optimistic: false }
             : message,
         )
         messageState.messagesByChannel[channelKey] = sortMessages(replaced)
@@ -1316,7 +1428,7 @@ export const messageState = $state({
 
     messageState.messagesByChannel[channelKey] = sortMessages([
       ...existing,
-      { ...incoming, optimistic: false },
+      { ...filteredIncoming, optimistic: false },
     ])
     updateHistoryState(channelKey, { initialized: true })
     enforceMemoryBudget()
@@ -1324,34 +1436,40 @@ export const messageState = $state({
   },
 
   ingestServerDmMessage: (incoming: ChatMessage): void => {
+    const filteredIncoming = filterMessageByBlock(
+      incoming,
+      messageState.currentUserId,
+    )
+    if (!filteredIncoming) return
+
     const normalizedDmSlug = incoming.dmSlug?.trim() || ''
     if (!normalizedDmSlug) return
     const dmKey = toDmKey(normalizedDmSlug)
     const existing = messageState.messagesByChannel[dmKey] ?? []
 
-    if (existing.some((message) => message.id === incoming.id)) {
+    if (existing.some((message) => message.id === filteredIncoming.id)) {
       messageState.messagesByChannel[dmKey] = existing.map((message) =>
-        message.id === incoming.id
-          ? { ...incoming, optimistic: false }
+        message.id === filteredIncoming.id
+          ? { ...filteredIncoming, optimistic: false }
           : message,
       )
       dmState.noteMessageActivity(
         normalizedDmSlug,
-        incoming.content,
-        incoming.createdAt,
+        filteredIncoming.content,
+        filteredIncoming.createdAt,
       )
       enforceMemoryBudget()
       messageState.version += 1
       return
     }
 
-    const nonce = incoming.clientNonce
+    const nonce = filteredIncoming.clientNonce
     if (nonce) {
       const pending = messageState.optimisticByNonce[nonce]
       if (pending && pending.channelKey === dmKey) {
         const replaced = existing.map((message) =>
           message.id === pending.messageId
-            ? { ...incoming, optimistic: false }
+            ? { ...filteredIncoming, optimistic: false }
             : message,
         )
         messageState.messagesByChannel[dmKey] = sortMessages(replaced)
@@ -1360,8 +1478,8 @@ export const messageState = $state({
         updateHistoryState(dmKey, { initialized: true })
         dmState.noteMessageActivity(
           normalizedDmSlug,
-          incoming.content,
-          incoming.createdAt,
+          filteredIncoming.content,
+          filteredIncoming.createdAt,
         )
         enforceMemoryBudget()
         messageState.version += 1
@@ -1371,13 +1489,13 @@ export const messageState = $state({
 
     messageState.messagesByChannel[dmKey] = sortMessages([
       ...existing,
-      { ...incoming, optimistic: false },
+      { ...filteredIncoming, optimistic: false },
     ])
     updateHistoryState(dmKey, { initialized: true })
     dmState.noteMessageActivity(
       normalizedDmSlug,
-      incoming.content,
-      incoming.createdAt,
+      filteredIncoming.content,
+      filteredIncoming.createdAt,
     )
     enforceMemoryBudget()
     messageState.version += 1
@@ -1388,12 +1506,24 @@ export const messageState = $state({
     const existing = messageState.messagesByChannel[channelKey] ?? []
     if (!existing.some((message) => message.id === incoming.id)) return
 
+    const filteredIncoming = filterMessageByBlock(
+      incoming,
+      messageState.currentUserId,
+    )
+    if (!filteredIncoming) {
+      messageState.messagesByChannel[channelKey] = existing.filter(
+        (message) => message.id !== incoming.id,
+      )
+      messageState.version += 1
+      return
+    }
+
     messageState.messagesByChannel[channelKey] = existing.map((message) =>
       message.id === incoming.id
         ? {
-            ...incoming,
+            ...filteredIncoming,
             optimistic: false,
-            clientNonce: message.clientNonce ?? incoming.clientNonce,
+            clientNonce: message.clientNonce ?? filteredIncoming.clientNonce,
           }
         : message,
     )
@@ -1428,26 +1558,37 @@ export const messageState = $state({
     reactions: ChatMessageReaction[],
     actorUserId: string | null,
   ): void => {
+    const normalizedActorUserId = actorUserId?.trim() || null
+    if (normalizedActorUserId && isBlockedAuthorNow(normalizedActorUserId)) {
+      return
+    }
+
     const channelKey = toChannelKey(guildSlug, channelSlug)
     const existing = messageState.messagesByChannel[channelKey] ?? []
     if (!existing.some((message) => message.id === messageId)) return
 
+    const filteredReactions = reactions
+      .map((reaction) =>
+        filterReactionByBlock(reaction, messageState.currentUserId),
+      )
+      .filter((reaction): reaction is ChatMessageReaction => reaction !== null)
+
     const preserveReactedFromExisting = Boolean(
-      actorUserId &&
+      normalizedActorUserId &&
         messageState.currentUserId &&
-        actorUserId !== messageState.currentUserId,
+        normalizedActorUserId !== messageState.currentUserId,
     )
 
     messageState.messagesByChannel[channelKey] = existing.map((message) => {
       if (message.id !== messageId) return message
       if (!preserveReactedFromExisting) {
-        return { ...message, reactions }
+        return { ...message, reactions: filteredReactions }
       }
 
       const existingByEmoji = new Map(
         message.reactions.map((reaction) => [reaction.emoji, reaction]),
       )
-      const merged = reactions.map((reaction) => ({
+      const merged = filteredReactions.map((reaction) => ({
         ...reaction,
         reacted: existingByEmoji.get(reaction.emoji)?.reacted ?? false,
       }))
@@ -1456,9 +1597,13 @@ export const messageState = $state({
     messageState.version += 1
   },
 
-  ingestDmActivity: (dmSlug: string): void => {
+  ingestDmActivity: (dmSlug: string, actorUserId: string | null): void => {
     const normalizedDmSlug = dmSlug.trim()
     if (!normalizedDmSlug) return
+    const normalizedActorUserId = actorUserId?.trim() || null
+    if (normalizedActorUserId && isBlockedAuthorNow(normalizedActorUserId)) {
+      return
+    }
     const dmKey = toDmKey(normalizedDmSlug)
     if (messageState.activeDmKey === dmKey) return
     dmState.setDmUnreadActivity(normalizedDmSlug, true)
@@ -1495,13 +1640,14 @@ wsClient.subscribe((envelope) => {
     messageState.ingestChannelActivity(
       channelActivity.guildSlug,
       channelActivity.channelSlug,
+      channelActivity.actorUserId,
     )
     return
   }
 
   const dmActivity = parseDmActivityEnvelope(envelope)
   if (dmActivity) {
-    messageState.ingestDmActivity(dmActivity)
+    messageState.ingestDmActivity(dmActivity.dmSlug, dmActivity.actorUserId)
     return
   }
 

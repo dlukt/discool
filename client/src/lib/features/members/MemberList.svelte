@@ -12,6 +12,7 @@ import type {
   GuildRole,
   PresenceStatus,
 } from '$lib/features/guild/types'
+import { blockState } from '$lib/features/identity/blockStore.svelte'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
 import { presenceState } from './presenceStore.svelte'
 
@@ -72,6 +73,7 @@ let statusMessage = $state<string | null>(null)
 let selectedMemberId = $state<string | null>(null)
 let assignPanelMemberId = $state<string | null>(null)
 let pendingMemberId = $state<string | null>(null)
+let pendingBlockUserId = $state<string | null>(null)
 let roleOverridesByMember = $state<Record<string, string[]>>({})
 let scrollTop = $state(0)
 let viewportHeight = $state(240)
@@ -87,13 +89,18 @@ let assignableRoles = $derived(
 
 let membersWithPresence = $derived.by(() => {
   const _presenceVersion = presenceState.version
-  return members.map((member) => ({
-    ...member,
-    presenceStatus: presenceState.statusFor(
-      member.userId,
-      member.presenceStatus,
-    ),
-  }))
+  const _blockVersion = blockState.version
+  void _presenceVersion
+  void _blockVersion
+  return members
+    .map((member) => ({
+      ...member,
+      presenceStatus: presenceState.statusFor(
+        member.userId,
+        member.presenceStatus,
+      ),
+    }))
+    .filter((member) => !blockState.isBlocked(member.userId))
 })
 
 let currentUserId = $derived(identityState.session?.user.id ?? null)
@@ -192,6 +199,9 @@ let selectedMember = $derived(
         (member) => member.userId === selectedMemberId,
       ) ?? null)
     : null,
+)
+let selectedMemberBlocked = $derived(
+  selectedMember ? blockState.isBlocked(selectedMember.userId) : false,
 )
 
 function messageFromError(err: unknown, fallback: string): string {
@@ -486,6 +496,46 @@ function triggerModerationAction(label: string, member: GuildMember): void {
   statusMessage = `${label} for ${member.displayName} will be available in Epic 8.`
 }
 
+async function toggleBlockForMember(member: GuildMember): Promise<void> {
+  if (pendingBlockUserId || !currentUserId || member.userId === currentUserId) {
+    return
+  }
+
+  const currentlyBlocked = blockState.isBlocked(member.userId)
+  if (!currentlyBlocked && typeof window !== 'undefined') {
+    const confirmed = window.confirm(
+      `Block ${member.displayName}? Their messages, reactions, typing, and member presence will be erased from your view.`,
+    )
+    if (!confirmed) return
+  }
+
+  pendingBlockUserId = member.userId
+  errorMessage = null
+  statusMessage = null
+  try {
+    if (currentlyBlocked) {
+      const result = await blockState.unblockUser(member.userId)
+      statusMessage = result.synced
+        ? `Unblocked ${member.displayName}.`
+        : `Unblocked ${member.displayName}. Local change saved, but sync failed: ${result.syncError}`
+      return
+    }
+
+    const result = await blockState.blockUser(member.userId, {
+      displayName: member.displayName,
+      username: member.username,
+      avatarColor: member.avatarColor ?? null,
+    })
+    statusMessage = result.synced
+      ? `Blocked ${member.displayName}.`
+      : `Blocked ${member.displayName}. Local change saved, but sync failed: ${result.syncError}`
+  } catch (err) {
+    errorMessage = messageFromError(err, 'Failed to update blocked-user state.')
+  } finally {
+    pendingBlockUserId = null
+  }
+}
+
 $effect(() => {
   if (!activeGuild) return
   loading = true
@@ -668,6 +718,21 @@ $effect(() => {
           >
             Send DM
           </button>
+
+          {#if selectedMember.userId !== currentUserId}
+            <button
+              type="button"
+              class="rounded-md border border-border px-2 py-1 text-xs hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+              onclick={() => void toggleBlockForMember(selectedMember)}
+              disabled={pendingBlockUserId === selectedMember.userId}
+            >
+              {#if pendingBlockUserId === selectedMember.userId}
+                {selectedMemberBlocked ? 'Unblocking...' : 'Blocking...'}
+              {:else}
+                {selectedMemberBlocked ? 'Unblock user' : 'Block user'}
+              {/if}
+            </button>
+          {/if}
 
           {#if moderationActions.length === 0}
             <span class="rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground">

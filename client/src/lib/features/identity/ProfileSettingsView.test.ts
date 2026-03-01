@@ -3,6 +3,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from '$lib/api'
 
+type BlockedUserRecord = {
+  userId: string
+  displayName: string | null
+  username: string | null
+  avatarColor: string | null
+  intervals: Array<{ blockedAt: string; unblockedAt: string | null }>
+}
+
 const { saveProfile, startRecoveryEmailAssociation, identityState } =
   vi.hoisted(() => {
     const saveProfile = vi.fn()
@@ -34,7 +42,16 @@ const { saveProfile, startRecoveryEmailAssociation, identityState } =
     return { saveProfile, startRecoveryEmailAssociation, identityState }
   })
 
+const { blockState } = vi.hoisted(() => ({
+  blockState: {
+    version: 0,
+    blockedUsers: vi.fn(() => [] as BlockedUserRecord[]),
+    unblockUser: vi.fn(async () => ({ synced: true, syncError: null })),
+  },
+}))
+
 vi.mock('./identityStore.svelte', () => ({ identityState }))
+vi.mock('./blockStore.svelte', () => ({ blockState }))
 
 import ProfileSettingsView from './ProfileSettingsView.svelte'
 
@@ -56,6 +73,10 @@ describe('ProfileSettingsView', () => {
     }
     identityState.recoveryEmailStatus = null
     identityState.recoveryEmailLoading = false
+    blockState.version = 0
+    blockState.blockedUsers.mockReset()
+    blockState.blockedUsers.mockReturnValue([])
+    blockState.unblockUser.mockClear()
   })
 
   it('validates display name on blur', async () => {
@@ -189,5 +210,30 @@ describe('ProfileSettingsView', () => {
         'Verification email sent. Check your inbox and click the link to verify.',
       ),
     ).toBeInTheDocument()
+  })
+
+  it('renders blocked users and unblocks entries from settings', async () => {
+    blockState.blockedUsers.mockReturnValue([
+      {
+        userId: 'user-2',
+        displayName: 'Bob',
+        username: 'bob',
+        avatarColor: '#22aa88',
+        intervals: [
+          { blockedAt: '2026-03-01T00:00:00.000Z', unblockedAt: null },
+        ],
+      },
+    ])
+
+    const { getByText, getByRole } = render(ProfileSettingsView)
+    expect(getByText('Blocked users')).toBeInTheDocument()
+    expect(getByText('Bob')).toBeInTheDocument()
+
+    await fireEvent.click(getByRole('button', { name: 'Unblock' }))
+
+    await waitFor(() => {
+      expect(blockState.unblockUser).toHaveBeenCalledWith('user-2')
+    })
+    expect(getByText('Unblocked Bob.')).toBeInTheDocument()
   })
 })

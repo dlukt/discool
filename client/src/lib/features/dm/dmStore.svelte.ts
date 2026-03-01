@@ -1,3 +1,4 @@
+import { blockState } from '$lib/features/identity/blockStore.svelte'
 import { listDms, openDm } from './dmApi'
 import { type DmConversation, toDmConversation } from './types'
 
@@ -19,13 +20,75 @@ function normalizeDmSlug(value: string): string | null {
   return normalized
 }
 
+function conversationActivityAt(conversation: DmConversation): string {
+  return (
+    conversation.lastMessageAt ||
+    conversation.updatedAt ||
+    conversation.createdAt
+  )
+}
+
+function isConversationHidden(conversation: DmConversation): boolean {
+  const participantUserId = conversation.participant.userId
+  if (!participantUserId) return false
+  if (blockState.isBlocked(participantUserId)) return true
+  return blockState.isHiddenByBlockWindow(
+    participantUserId,
+    conversationActivityAt(conversation),
+  )
+}
+
+function sameConversationList(
+  left: DmConversation[],
+  right: DmConversation[],
+): boolean {
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    const leftItem = left[index]
+    const rightItem = right[index]
+    if (!rightItem) return false
+    if (
+      leftItem.dmSlug !== rightItem.dmSlug ||
+      leftItem.participant.userId !== rightItem.participant.userId ||
+      leftItem.participant.displayName !== rightItem.participant.displayName ||
+      leftItem.participant.username !== rightItem.participant.username ||
+      leftItem.updatedAt !== rightItem.updatedAt ||
+      leftItem.createdAt !== rightItem.createdAt ||
+      leftItem.lastMessageAt !== rightItem.lastMessageAt ||
+      leftItem.lastMessagePreview !== rightItem.lastMessagePreview ||
+      leftItem.hasUnreadActivity !== rightItem.hasUnreadActivity
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
 export const dmState = $state({
   version: 0,
   loading: false,
   loadedOnce: false,
   activeDmSlug: null as string | null,
+  allConversations: [] as DmConversation[],
   conversations: [] as DmConversation[],
   unreadBySlug: {} as Record<string, boolean>,
+
+  refreshVisibleConversations: (incrementVersion = true): void => {
+    const _blockVersion = blockState.version
+    void _blockVersion
+    const nextVisible = sortConversations(
+      dmState.allConversations.filter(
+        (conversation) => !isConversationHidden(conversation),
+      ),
+    )
+    if (sameConversationList(dmState.conversations, nextVisible)) {
+      return
+    }
+    dmState.conversations = nextVisible
+    if (incrementVersion) {
+      dmState.version += 1
+    }
+  },
 
   hasUnreadActivity: (): boolean => {
     return dmState.conversations.some(
@@ -59,7 +122,8 @@ export const dmState = $state({
         .filter((conversation): conversation is DmConversation =>
           Boolean(conversation),
         )
-      dmState.conversations = sortConversations(parsed)
+      dmState.allConversations = sortConversations(parsed)
+      dmState.refreshVisibleConversations(false)
       dmState.loadedOnce = true
       dmState.version += 1
     } finally {
@@ -68,7 +132,15 @@ export const dmState = $state({
   },
 
   openOrCreateDm: async (userId: string): Promise<DmConversation> => {
-    const wire = await openDm(userId)
+    const normalizedUserId = userId.trim()
+    if (!normalizedUserId) {
+      throw new Error('userId is required')
+    }
+    if (blockState.isBlocked(normalizedUserId)) {
+      throw new Error('Unblock this user before opening a direct message')
+    }
+
+    const wire = await openDm(normalizedUserId)
     const parsed = toDmConversation(
       wire,
       wire.dm_slug ? dmState.unreadBySlug[wire.dm_slug] === true : false,
@@ -77,10 +149,11 @@ export const dmState = $state({
       throw new Error('Invalid DM conversation response')
     }
 
-    const withoutCurrent = dmState.conversations.filter(
+    const withoutCurrent = dmState.allConversations.filter(
       (conversation) => conversation.dmSlug !== parsed.dmSlug,
     )
-    dmState.conversations = sortConversations([...withoutCurrent, parsed])
+    dmState.allConversations = sortConversations([...withoutCurrent, parsed])
+    dmState.refreshVisibleConversations(false)
     dmState.loadedOnce = true
     dmState.version += 1
     return parsed
@@ -102,7 +175,7 @@ export const dmState = $state({
       [normalizedDmSlug]: hasUnreadActivity,
     }
 
-    const index = dmState.conversations.findIndex(
+    const index = dmState.allConversations.findIndex(
       (conversation) => conversation.dmSlug === normalizedDmSlug,
     )
     if (index < 0) {
@@ -110,14 +183,19 @@ export const dmState = $state({
       return
     }
 
-    const next = [...dmState.conversations]
+    const next = [...dmState.allConversations]
     const current = next[index]
+    if (!current) return
     if (current && current.hasUnreadActivity === hasUnreadActivity) return
     next[index] = {
       ...current,
-      hasUnreadActivity,
+      hasUnreadActivity:
+        isConversationHidden(current) && hasUnreadActivity
+          ? false
+          : hasUnreadActivity,
     }
-    dmState.conversations = next
+    dmState.allConversations = next
+    dmState.refreshVisibleConversations(false)
     dmState.version += 1
   },
 
@@ -128,12 +206,12 @@ export const dmState = $state({
   ): void => {
     const normalizedDmSlug = normalizeDmSlug(dmSlug)
     if (!normalizedDmSlug) return
-    const index = dmState.conversations.findIndex(
+    const index = dmState.allConversations.findIndex(
       (conversation) => conversation.dmSlug === normalizedDmSlug,
     )
     if (index < 0) return
 
-    const next = [...dmState.conversations]
+    const next = [...dmState.allConversations]
     const current = next[index]
     if (!current) return
     next[index] = {
@@ -142,7 +220,8 @@ export const dmState = $state({
       lastMessageAt: createdAt || current.lastMessageAt,
       updatedAt: createdAt || current.updatedAt,
     }
-    dmState.conversations = sortConversations(next)
+    dmState.allConversations = sortConversations(next)
+    dmState.refreshVisibleConversations(false)
     dmState.version += 1
   },
 
@@ -150,8 +229,15 @@ export const dmState = $state({
     dmState.loading = false
     dmState.loadedOnce = false
     dmState.activeDmSlug = null
+    dmState.allConversations = []
     dmState.conversations = []
     dmState.unreadBySlug = {}
     dmState.version += 1
   },
+})
+
+$effect(() => {
+  const _blockVersion = blockState.version
+  void _blockVersion
+  dmState.refreshVisibleConversations()
 })

@@ -50,11 +50,29 @@ export type RecoveryEmailStatus = {
   verifiedAt: string | null
 }
 
+export type UserBlockEntry = {
+  blockedUserId: string
+  blockedAt: string
+  unblockedAt: string | null
+  blockedUserDisplayName?: string | null
+  blockedUserUsername?: string | null
+  blockedUserAvatarColor?: string | null
+}
+
 export type RecoveryEmailStatusWire = {
   associated: boolean
   email_masked?: string
   verified: boolean
   verified_at?: string
+}
+
+export type UserBlockEntryWire = {
+  blocked_user_id?: string
+  blocked_at?: string
+  unblocked_at?: string | null
+  blocked_user_display_name?: string | null
+  blocked_user_username?: string | null
+  blocked_user_avatar_color?: string | null
 }
 
 export type RecoveryEmailEncryptionContextInput = {
@@ -146,6 +164,45 @@ export function toRecoveryEmailStatus(
     emailMasked: wire.email_masked ?? null,
     verified: wire.verified,
     verifiedAt: wire.verified_at ?? null,
+  }
+}
+
+export function toUserBlockEntry(wire: UserBlockEntryWire): UserBlockEntry {
+  const blockedUserId = wire.blocked_user_id?.trim()
+  const blockedAt = wire.blocked_at?.trim()
+  const unblockedAt =
+    typeof wire.unblocked_at === 'string' ? wire.unblocked_at.trim() : null
+  const blockedUserDisplayName =
+    typeof wire.blocked_user_display_name === 'string'
+      ? wire.blocked_user_display_name.trim()
+      : null
+  const blockedUserUsername =
+    typeof wire.blocked_user_username === 'string'
+      ? wire.blocked_user_username.trim()
+      : null
+  const blockedUserAvatarColor =
+    typeof wire.blocked_user_avatar_color === 'string'
+      ? wire.blocked_user_avatar_color.trim()
+      : null
+  if (!blockedUserId || !blockedAt) {
+    throw new Error('Invalid user block response')
+  }
+  return {
+    blockedUserId,
+    blockedAt,
+    unblockedAt: unblockedAt && unblockedAt.length > 0 ? unblockedAt : null,
+    blockedUserDisplayName:
+      blockedUserDisplayName && blockedUserDisplayName.length > 0
+        ? blockedUserDisplayName
+        : null,
+    blockedUserUsername:
+      blockedUserUsername && blockedUserUsername.length > 0
+        ? blockedUserUsername
+        : null,
+    blockedUserAvatarColor:
+      blockedUserAvatarColor && blockedUserAvatarColor.length > 0
+        ? blockedUserAvatarColor
+        : null,
   }
 }
 

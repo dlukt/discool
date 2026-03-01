@@ -8,6 +8,7 @@ import {
   GUILD_PERMISSION_CATALOG,
   hasGuildPermission,
 } from '$lib/features/guild/permissions'
+import { blockState } from '$lib/features/identity/blockStore.svelte'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
 import ProfileSettingsView from '$lib/features/identity/ProfileSettingsView.svelte'
 import { wsClient } from '$lib/ws/client'
@@ -117,6 +118,9 @@ let activeDmSlug = $derived(mode === 'dm' ? activeDm?.trim() || null : null)
 
 let timelineMessages = $derived.by(() => {
   const _messageVersion = messageState.version
+  const _blockVersion = blockState.version
+  void _messageVersion
+  void _blockVersion
   if (isChannelMode) return messageState.timeline(activeGuild, activeChannel)
   if (isDmMode && activeDmSlug) return messageState.timelineForDm(activeDmSlug)
   return []
@@ -124,6 +128,9 @@ let timelineMessages = $derived.by(() => {
 
 let channelHistory = $derived.by(() => {
   const _messageVersion = messageState.version
+  const _blockVersion = blockState.version
+  void _messageVersion
+  void _blockVersion
   if (!isConversationMode) {
     return {
       initialized: false,
@@ -311,6 +318,9 @@ let emptyStateCopy = $derived(
 
 let typingUserDisplayNames = $derived.by(() => {
   const _messageVersion = messageState.version
+  const _blockVersion = blockState.version
+  void _messageVersion
+  void _blockVersion
   if (!isChannelMode) return []
   const typingUserIds = messageState.typingUserIdsForChannel(
     activeGuild,
@@ -1001,6 +1011,9 @@ $effect(() => {
   if (!isConversationMode) return
 
   const _messageVersion = messageState.version
+  const _blockVersion = blockState.version
+  void _messageVersion
+  void _blockVersion
   const contextKey = isChannelMode
     ? `${activeGuild}:${activeChannel}`
     : activeDmSlug

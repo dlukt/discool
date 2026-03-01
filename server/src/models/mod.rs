@@ -14,3 +14,4 @@ pub mod recovery_email;
 pub mod role;
 pub mod session;
 pub mod user;
+pub mod user_block;

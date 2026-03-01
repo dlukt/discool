@@ -4204,6 +4204,78 @@ async fn users_avatar_upload_accepts_png_and_exposes_avatar_url() {
 }
 
 #[tokio::test]
+async fn users_blocks_create_list_and_delete_interval_records() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "block-owner", [74u8; 32]).await;
+    let target_token = register_and_authenticate(&addr, "block-target", [75u8; 32]).await;
+
+    let target_profile =
+        http_response_with_bearer(&addr, "/api/v1/users/me/profile", &target_token).await;
+    assert_eq!(response_status(&target_profile), 200);
+    let target_profile_value: serde_json::Value =
+        serde_json::from_str(response_body(&target_profile)).unwrap();
+    let target_user_id = target_profile_value["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let res = http_response_with_bearer(&addr, "/api/v1/users/me/blocks", &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["data"], json!([]));
+
+    let create_body = json!({ "blocked_user_id": target_user_id }).to_string();
+    let res =
+        http_post_with_bearer(&addr, "/api/v1/users/me/blocks", &create_body, &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["data"]["blocked_user_id"], json!(target_user_id));
+    assert!(value["data"]["unblocked_at"].is_null());
+    assert_eq!(
+        value["data"]["blocked_user_username"],
+        json!("block-target")
+    );
+
+    let self_block_body =
+        json!({ "blocked_user_id": target_profile_value["data"]["id"] }).to_string();
+    let res = http_post_with_bearer(
+        &addr,
+        "/api/v1/users/me/blocks",
+        &self_block_body,
+        &target_token,
+    )
+    .await;
+    assert_eq!(response_status(&res), 422);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["error"]["code"], json!("VALIDATION_ERROR"));
+
+    let res = http_response_with_bearer(&addr, "/api/v1/users/me/blocks", &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["data"].as_array().unwrap().len(), 1);
+    assert!(value["data"][0]["unblocked_at"].is_null());
+
+    let delete_path = format!("/api/v1/users/me/blocks/{target_user_id}");
+    let res = http_delete_with_bearer(&addr, &delete_path, &owner_token).await;
+    assert_eq!(response_status(&res), 204);
+
+    let res = http_response_with_bearer(&addr, "/api/v1/users/me/blocks", &owner_token).await;
+    assert_eq!(response_status(&res), 200);
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(value["data"].as_array().unwrap().len(), 1);
+    assert!(value["data"][0]["unblocked_at"].is_string());
+}
+
+#[tokio::test]
 async fn message_attachment_upload_creates_message_broadcasts_and_serves_file() {
     use serde_json::json;
     use std::io::Write;

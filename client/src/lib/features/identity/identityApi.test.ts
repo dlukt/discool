@@ -6,11 +6,14 @@ vi.mock('$lib/api', () => ({
 
 import { apiFetch } from '$lib/api'
 import {
+  addUserBlock,
   getProfile,
   getRecoveryEmailStatus,
+  listUserBlocks,
   logout,
   recoverIdentityByToken,
   register,
+  removeUserBlock,
   requestChallenge,
   startIdentityRecovery,
   startRecoveryEmailAssociation,
@@ -328,5 +331,64 @@ describe('identityApi', () => {
     expect(apiFetch).toHaveBeenCalledWith(
       '/api/v1/auth/recovery-email/recover?token=abc-token',
     )
+  })
+
+  it('listUserBlocks maps blocked-user entries', async () => {
+    vi.mocked(apiFetch).mockResolvedValue([
+      {
+        blocked_user_id: 'user-2',
+        blocked_at: '2026-03-01T00:00:00.000Z',
+        unblocked_at: null,
+        blocked_user_display_name: 'Bob',
+        blocked_user_username: 'bob',
+        blocked_user_avatar_color: '#22aa88',
+      },
+    ])
+
+    await expect(listUserBlocks()).resolves.toEqual([
+      {
+        blockedUserId: 'user-2',
+        blockedAt: '2026-03-01T00:00:00.000Z',
+        unblockedAt: null,
+        blockedUserDisplayName: 'Bob',
+        blockedUserUsername: 'bob',
+        blockedUserAvatarColor: '#22aa88',
+      },
+    ])
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/users/me/blocks')
+  })
+
+  it('addUserBlock posts blocked_user_id and maps response', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      blocked_user_id: 'user-2',
+      blocked_at: '2026-03-01T00:00:00.000Z',
+      unblocked_at: null,
+    })
+
+    await expect(addUserBlock('user-2')).resolves.toEqual({
+      blockedUserId: 'user-2',
+      blockedAt: '2026-03-01T00:00:00.000Z',
+      unblockedAt: null,
+      blockedUserDisplayName: null,
+      blockedUserUsername: null,
+      blockedUserAvatarColor: null,
+    })
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/users/me/blocks', {
+      method: 'POST',
+      body: JSON.stringify({
+        blocked_user_id: 'user-2',
+      }),
+    })
+  })
+
+  it('removeUserBlock sends delete request', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(undefined)
+
+    await expect(removeUserBlock('user-2')).resolves.toBeUndefined()
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/users/me/blocks/user-2', {
+      method: 'DELETE',
+    })
   })
 })

@@ -2,7 +2,7 @@ use axum::{
     Json,
     body::Body,
     extract::rejection::JsonRejection,
-    extract::{Multipart, State},
+    extract::{Multipart, Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -13,7 +13,7 @@ use crate::{
     AppError, AppState,
     middleware::auth::AuthenticatedUser,
     services::{
-        email_service, recovery_email_service,
+        email_service, recovery_email_service, user_block_service,
         user_profile_service::{self, UpdateProfileInput},
     },
 };
@@ -37,6 +37,12 @@ pub struct StartRecoveryEmailRequest {
 pub struct RecoveryEmailEncryptionContextRequest {
     pub algorithm: Option<String>,
     pub version: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BlockUserRequest {
+    #[serde(alias = "user_id")]
+    pub blocked_user_id: Option<String>,
 }
 
 pub async fn get_profile(
@@ -135,6 +141,41 @@ pub async fn start_recovery_email(
     .await?;
 
     Ok((StatusCode::OK, Json(json!({ "data": started.status }))).into_response())
+}
+
+pub async fn list_user_blocks(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+) -> Result<Response, AppError> {
+    let blocks = user_block_service::list_user_blocks(&state.pool, &user.user_id).await?;
+    Ok((StatusCode::OK, Json(json!({ "data": blocks }))).into_response())
+}
+
+pub async fn create_user_block(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    payload: Result<Json<BlockUserRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+    let blocked_user_id = req.blocked_user_id.as_deref().unwrap_or("").trim();
+    if blocked_user_id.is_empty() {
+        return Err(AppError::ValidationError(
+            "blocked_user_id is required".to_string(),
+        ));
+    }
+
+    let block = user_block_service::block_user(&state.pool, &user.user_id, blocked_user_id).await?;
+    Ok((StatusCode::OK, Json(json!({ "data": block }))).into_response())
+}
+
+pub async fn delete_user_block(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(blocked_user_id): Path<String>,
+) -> Result<Response, AppError> {
+    user_block_service::unblock_user(&state.pool, &user.user_id, &blocked_user_id).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 pub async fn upload_avatar(
