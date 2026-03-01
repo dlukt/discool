@@ -115,7 +115,7 @@ development_status:
   epic-7: in-progress
   7-1-webrtc-signaling-and-peer-connection: done
   7-2-voice-bar-and-basic-controls: done
-  7-3-voice-channel-participants-display: backlog
+  7-3-voice-channel-participants-display: done
   7-4-individual-volume-control: backlog
   7-5-voice-channel-switching: backlog
   7-6-voice-auto-reconnect: backlog

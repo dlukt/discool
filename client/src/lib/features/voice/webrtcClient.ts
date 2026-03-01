@@ -20,7 +20,25 @@ export class VoiceWebRtcClient {
 
   private pendingRemoteCandidates: RTCIceCandidateInit[] = []
 
+  private speakingStateListener: ((isSpeaking: boolean) => void) | null = null
+
+  private audioContext: AudioContext | null = null
+
+  private speakingAnalyser: AnalyserNode | null = null
+
+  private speakingSampleBuffer: Uint8Array<ArrayBuffer> | null = null
+
+  private speakingInterval: ReturnType<typeof setInterval> | null = null
+
+  private isSpeaking = false
+
   constructor(private readonly sendSignal: SendSignal) {}
+
+  setSpeakingStateListener(
+    listener: ((isSpeaking: boolean) => void) | null,
+  ): void {
+    this.speakingStateListener = listener
+  }
 
   async applyOffer(
     context: VoiceJoinContext,
@@ -68,6 +86,9 @@ export class VoiceWebRtcClient {
     if (this.localAudioTrack) {
       this.localAudioTrack.enabled = !isMuted
     }
+    if (isMuted) {
+      this.emitSpeakingState(false)
+    }
   }
 
   setDeafened(isDeafened: boolean): void {
@@ -86,6 +107,7 @@ export class VoiceWebRtcClient {
       this.peerConnection = null
     }
     this.stopLocalStream()
+    this.stopSpeakingDetection()
     this.cleanupRemoteAudio()
     this.pendingRemoteCandidates = []
   }
@@ -150,6 +172,7 @@ export class VoiceWebRtcClient {
     this.localStream = stream
     this.localAudioTrack = audioTrack
     audioTrack.enabled = !this.isMuted
+    this.startSpeakingDetection(stream)
     return audioTrack
   }
 
@@ -160,6 +183,57 @@ export class VoiceWebRtcClient {
     }
     this.localStream = null
     this.localAudioTrack = null
+  }
+
+  private emitSpeakingState(isSpeaking: boolean): void {
+    if (this.isSpeaking === isSpeaking) return
+    this.isSpeaking = isSpeaking
+    this.speakingStateListener?.(isSpeaking)
+  }
+
+  private startSpeakingDetection(stream: MediaStream): void {
+    this.stopSpeakingDetection()
+    if (typeof AudioContext === 'undefined') return
+    const audioContext = new AudioContext()
+    const sourceNode = audioContext.createMediaStreamSource(stream)
+    const analyser = audioContext.createAnalyser()
+    analyser.fftSize = 512
+    sourceNode.connect(analyser)
+    this.audioContext = audioContext
+    this.speakingAnalyser = analyser
+    this.speakingSampleBuffer = new Uint8Array(
+      new ArrayBuffer(analyser.fftSize),
+    )
+    this.speakingInterval = setInterval(() => {
+      const activeAnalyser = this.speakingAnalyser
+      const samples = this.speakingSampleBuffer
+      if (!activeAnalyser || !samples) return
+      activeAnalyser.getByteTimeDomainData(samples)
+      let peak = 0
+      for (const sample of samples) {
+        const centered = Math.abs(sample - 128) / 128
+        if (centered > peak) {
+          peak = centered
+        }
+      }
+      const speaking = !this.isMuted && peak >= 0.06
+      this.emitSpeakingState(speaking)
+    }, 150)
+  }
+
+  private stopSpeakingDetection(): void {
+    if (this.speakingInterval) {
+      clearInterval(this.speakingInterval)
+      this.speakingInterval = null
+    }
+    const context = this.audioContext
+    this.audioContext = null
+    this.speakingAnalyser = null
+    this.speakingSampleBuffer = null
+    if (context) {
+      void context.close()
+    }
+    this.emitSpeakingState(false)
   }
 
   private attachRemoteStream(stream: MediaStream): void {

@@ -12,6 +12,7 @@ import { blockState } from '$lib/features/identity/blockStore.svelte'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
 import ProfileSettingsView from '$lib/features/identity/ProfileSettingsView.svelte'
 import VoiceBar from '$lib/features/voice/VoiceBar.svelte'
+import VoicePanel from '$lib/features/voice/VoicePanel.svelte'
 import { voiceState } from '$lib/features/voice/voiceStore.svelte'
 import { toastState } from '$lib/feedback/toastStore.svelte'
 import {
@@ -103,9 +104,14 @@ let voiceConnectionState = $derived(
     ? voiceState.statusForChannel(activeGuild, activeChannel)
     : 'idle',
 )
+let participantsOpen = $state(false)
 let showVoiceBar = $derived(
   isChannelMode && voiceConnectionState === 'connected',
 )
+let activeVoiceParticipants = $derived(
+  isChannelMode ? voiceState.activeChannelParticipants() : [],
+)
+let showVoicePanel = $derived(showVoiceBar && participantsOpen)
 let composerInput = $state<HTMLTextAreaElement | null>(null)
 let composerValue = $state('')
 let composerSelection = $state({ start: 0, end: 0 })
@@ -141,6 +147,11 @@ let channelKey = $derived(
       : null,
 )
 let activeDmSlug = $derived(mode === 'dm' ? activeDm?.trim() || null : null)
+
+$effect(() => {
+  if (showVoiceBar) return
+  participantsOpen = false
+})
 
 let timelineMessages = $derived.by(() => {
   const _messageVersion = messageState.version
@@ -1360,9 +1371,20 @@ onMount(() => {
         connectionState={voiceConnectionState}
         isMuted={voiceState.isMuted}
         isDeafened={voiceState.isDeafened}
+        isParticipantsOpen={participantsOpen}
+        onToggleParticipants={() => {
+          participantsOpen = !participantsOpen
+        }}
         onToggleMute={() => voiceState.toggleMute()}
         onToggleDeafen={() => voiceState.toggleDeafen()}
         onDisconnect={() => voiceState.disconnect()}
+      />
+    {/if}
+
+    {#if showVoicePanel}
+      <VoicePanel
+        channelName={activeChannel}
+        participants={activeVoiceParticipants}
       />
     {/if}
 

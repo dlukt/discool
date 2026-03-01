@@ -4654,6 +4654,19 @@ async fn websocket_voice_join_emits_offer_and_candidate_and_rejects_invalid_answ
     let (mut stream, response) = websocket_connect(&addr, "/ws", Some(&owner_token)).await;
     assert_eq!(response_status(&response), 101);
     let _ = websocket_read_json_with_op(&mut stream, "hello", 1_500).await;
+    websocket_send_text_frame(
+        &mut stream,
+        &json!({
+            "op": "c_subscribe",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_slug.as_str(),
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let _ = websocket_read_json_with_op(&mut stream, "channel_update", 1_500).await;
 
     websocket_send_text_frame(
         &mut stream,
@@ -4696,6 +4709,59 @@ async fn websocket_voice_join_emits_offer_and_candidate_and_rejects_invalid_answ
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false),
         "voice candidate should not be empty"
+    );
+
+    let snapshot = websocket_read_json_with_op(&mut stream, "voice_state_update", 1_500)
+        .await
+        .expect("voice join should emit initial participant snapshot");
+    assert_eq!(snapshot["d"]["guild_slug"], json!(guild_slug.as_str()));
+    assert_eq!(snapshot["d"]["channel_slug"], json!(voice_slug.as_str()));
+    assert_eq!(snapshot["d"]["participant_count"], json!(1));
+    assert_eq!(
+        snapshot["d"]["participants"][0]["username"],
+        json!("voice-join-owner")
+    );
+    assert_eq!(snapshot["d"]["participants"][0]["is_muted"], json!(false));
+    assert_eq!(
+        snapshot["d"]["participants"][0]["is_deafened"],
+        json!(false)
+    );
+    assert_eq!(
+        snapshot["d"]["participants"][0]["is_speaking"],
+        json!(false)
+    );
+
+    websocket_send_text_frame(
+        &mut stream,
+        &json!({
+            "op": "c_voice_state_update",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_slug.as_str(),
+                "is_muted": true,
+                "is_deafened": true,
+                "is_speaking": true,
+            }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let updated_snapshot = websocket_read_json_with_op(&mut stream, "voice_state_update", 1_500)
+        .await
+        .expect("voice state updates should rebroadcast participant snapshot");
+    assert_eq!(updated_snapshot["d"]["participant_count"], json!(1));
+    assert_eq!(
+        updated_snapshot["d"]["participants"][0]["is_muted"],
+        json!(true)
+    );
+    assert_eq!(
+        updated_snapshot["d"]["participants"][0]["is_deafened"],
+        json!(true)
+    );
+    assert_eq!(
+        updated_snapshot["d"]["participants"][0]["is_speaking"],
+        json!(false)
     );
 
     websocket_send_text_frame(

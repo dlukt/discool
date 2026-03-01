@@ -8,6 +8,8 @@ type Props = {
   connectionState: VoiceConnectionStatus
   isMuted: boolean
   isDeafened: boolean
+  isParticipantsOpen: boolean
+  onToggleParticipants: () => void
   onToggleMute: () => void
   onToggleDeafen: () => void
   onDisconnect: () => void
@@ -19,6 +21,8 @@ let {
   connectionState,
   isMuted,
   isDeafened,
+  isParticipantsOpen,
+  onToggleParticipants,
   onToggleMute,
   onToggleDeafen,
   onDisconnect,
@@ -78,6 +82,15 @@ let voiceControlAnnouncement = $derived.by(() => {
       <span>{qualityLabel}</span>
     </div>
     <div class="flex items-center gap-1">
+      <button
+        type="button"
+        class={`rounded-md border px-2 py-1 text-xs font-medium hover:bg-muted ${isParticipantsOpen ? 'border-fire/40 bg-fire/10 text-fire-foreground' : 'border-border bg-background text-foreground'}`}
+        onclick={onToggleParticipants}
+        aria-label={isParticipantsOpen ? 'Hide voice participants' : 'Show voice participants'}
+        data-testid="voice-bar-toggle-participants"
+      >
+        👥
+      </button>
       <button
         type="button"
         class={`rounded-md border px-2 py-1 text-xs font-medium hover:bg-muted ${isMuted ? 'border-amber-500/40 bg-amber-500/10 text-amber-200' : 'border-border bg-background text-foreground'}`}

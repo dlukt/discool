@@ -4,6 +4,7 @@ import VoiceBar from './VoiceBar.svelte'
 
 describe('VoiceBar', () => {
   it('renders channel context and routes control actions', async () => {
+    const onToggleParticipants = vi.fn()
     const onToggleMute = vi.fn()
     const onToggleDeafen = vi.fn()
     const onDisconnect = vi.fn()
@@ -13,6 +14,8 @@ describe('VoiceBar', () => {
       connectionState: 'connected',
       isMuted: false,
       isDeafened: false,
+      isParticipantsOpen: false,
+      onToggleParticipants,
       onToggleMute,
       onToggleDeafen,
       onDisconnect,
@@ -25,12 +28,16 @@ describe('VoiceBar', () => {
       'green',
     )
 
+    await fireEvent.click(
+      getByRole('button', { name: 'Show voice participants' }),
+    )
     await fireEvent.click(getByRole('button', { name: 'Mute microphone' }))
     await fireEvent.click(getByRole('button', { name: 'Deafen audio' }))
     await fireEvent.click(
       getByRole('button', { name: 'Disconnect from voice channel' }),
     )
 
+    expect(onToggleParticipants).toHaveBeenCalledTimes(1)
     expect(onToggleMute).toHaveBeenCalledTimes(1)
     expect(onToggleDeafen).toHaveBeenCalledTimes(1)
     expect(onDisconnect).toHaveBeenCalledTimes(1)
@@ -43,6 +50,8 @@ describe('VoiceBar', () => {
       connectionState: 'connecting',
       isMuted: false,
       isDeafened: false,
+      isParticipantsOpen: false,
+      onToggleParticipants: vi.fn(),
       onToggleMute: vi.fn(),
       onToggleDeafen: vi.fn(),
       onDisconnect: vi.fn(),
@@ -59,6 +68,8 @@ describe('VoiceBar', () => {
       connectionState: 'failed',
       isMuted: false,
       isDeafened: false,
+      isParticipantsOpen: false,
+      onToggleParticipants: vi.fn(),
       onToggleMute: vi.fn(),
       onToggleDeafen: vi.fn(),
       onDisconnect: vi.fn(),
@@ -77,6 +88,8 @@ describe('VoiceBar', () => {
       connectionState: 'connected',
       isMuted: false,
       isDeafened: false,
+      isParticipantsOpen: false,
+      onToggleParticipants: vi.fn(),
       onToggleMute: vi.fn(),
       onToggleDeafen: vi.fn(),
       onDisconnect: vi.fn(),
@@ -91,6 +104,8 @@ describe('VoiceBar', () => {
       connectionState: 'connected',
       isMuted: true,
       isDeafened: false,
+      isParticipantsOpen: true,
+      onToggleParticipants: vi.fn(),
       onToggleMute: vi.fn(),
       onToggleDeafen: vi.fn(),
       onDisconnect: vi.fn(),
@@ -105,6 +120,8 @@ describe('VoiceBar', () => {
       connectionState: 'connected',
       isMuted: true,
       isDeafened: true,
+      isParticipantsOpen: true,
+      onToggleParticipants: vi.fn(),
       onToggleMute: vi.fn(),
       onToggleDeafen: vi.fn(),
       onDisconnect: vi.fn(),

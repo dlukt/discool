@@ -1,8 +1,28 @@
 import { fireEvent, render, waitFor, within } from '@testing-library/svelte'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { goto, guildState, channelState, identityState } = vi.hoisted(() => {
+const {
+  goto,
+  guildState,
+  channelState,
+  identityState,
+  voiceState,
+  setVoiceParticipants,
+  clearVoiceParticipants,
+} = vi.hoisted(() => {
   const goto = vi.fn()
+  const voiceParticipantsByChannel = new Map<
+    string,
+    Array<{
+      userId: string
+      username: string
+      displayName: string | null
+      avatarColor: string | null
+      isMuted: boolean
+      isDeafened: boolean
+      isSpeaking: boolean
+    }>
+  >()
   const guildState = {
     loadGuilds: vi.fn(),
     bySlug: vi.fn(),
@@ -54,11 +74,46 @@ const { goto, guildState, channelState, identityState } = vi.hoisted(() => {
     },
   }
 
+  const voiceState = {
+    participantsForChannel: vi.fn((guildSlug: string, channelSlug: string) => {
+      return (
+        voiceParticipantsByChannel.get(`${guildSlug}:${channelSlug}`) ?? []
+      ).map((participant) => ({ ...participant }))
+    }),
+    participantCountForChannel: vi.fn(
+      (guildSlug: string, channelSlug: string) =>
+        voiceParticipantsByChannel.get(`${guildSlug}:${channelSlug}`)?.length ??
+        0,
+    ),
+  }
+
   return {
     goto,
     guildState,
     channelState,
     identityState,
+    voiceState,
+    setVoiceParticipants: (
+      guildSlug: string,
+      channelSlug: string,
+      participants: Array<{
+        userId: string
+        username: string
+        displayName: string | null
+        avatarColor: string | null
+        isMuted: boolean
+        isDeafened: boolean
+        isSpeaking: boolean
+      }>,
+    ) => {
+      voiceParticipantsByChannel.set(
+        `${guildSlug}:${channelSlug}`,
+        participants.map((participant) => ({ ...participant })),
+      )
+    },
+    clearVoiceParticipants: () => {
+      voiceParticipantsByChannel.clear()
+    },
   }
 })
 
@@ -75,6 +130,10 @@ vi.mock('$lib/features/identity/identityStore.svelte', () => ({
   identityState,
 }))
 
+vi.mock('$lib/features/voice/voiceStore.svelte', () => ({
+  voiceState,
+}))
+
 vi.mock('./channelStore.svelte', () => ({
   channelState,
 }))
@@ -84,6 +143,9 @@ import ChannelList from './ChannelList.svelte'
 describe('ChannelList', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    clearVoiceParticipants()
+    voiceState.participantsForChannel.mockClear()
+    voiceState.participantCountForChannel.mockClear()
 
     guildState.loadGuilds.mockResolvedValue([])
     guildState.bySlug.mockReturnValue({
@@ -369,6 +431,64 @@ describe('ChannelList', () => {
 
     expect(getByTestId('channel-icon-general')).toHaveTextContent('#')
     expect(getByTestId('channel-icon-team-voice')).toHaveTextContent('🔊')
+  })
+
+  it('renders voice participant avatars, overflow chip, count, and occupancy aria text', () => {
+    setVoiceParticipants('lobby', 'team-voice', [
+      {
+        userId: 'user-a',
+        username: 'alice',
+        displayName: 'Alice',
+        avatarColor: '#3366ff',
+        isMuted: false,
+        isDeafened: false,
+        isSpeaking: false,
+      },
+      {
+        userId: 'user-b',
+        username: 'bob',
+        displayName: 'Bob',
+        avatarColor: '#ff6633',
+        isMuted: false,
+        isDeafened: false,
+        isSpeaking: false,
+      },
+      {
+        userId: 'user-c',
+        username: 'carol',
+        displayName: 'Carol',
+        avatarColor: '#33aa66',
+        isMuted: false,
+        isDeafened: false,
+        isSpeaking: false,
+      },
+      {
+        userId: 'user-d',
+        username: 'dave',
+        displayName: 'Dave',
+        avatarColor: '#8899aa',
+        isMuted: false,
+        isDeafened: false,
+        isSpeaking: false,
+      },
+    ])
+
+    const { getByTestId, getAllByTestId } = render(ChannelList, {
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+    })
+
+    expect(
+      getByTestId('channel-link-team-voice').getAttribute('aria-label'),
+    ).toContain('4 users in voice channel Team Voice')
+    expect(getByTestId('channel-voice-occupancy-team-voice')).toHaveTextContent(
+      '4 users in voice channel Team Voice',
+    )
+    expect(getByTestId('channel-voice-count-team-voice')).toHaveTextContent('4')
+    expect(getByTestId('channel-voice-overflow-team-voice')).toHaveTextContent(
+      '+1',
+    )
+    expect(getAllByTestId(/^channel-voice-avatar-team-voice-/)).toHaveLength(3)
   })
 
   it('renders unread channel emphasis and unread dot', () => {

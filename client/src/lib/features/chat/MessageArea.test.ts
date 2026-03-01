@@ -45,6 +45,17 @@ const {
         | 'retrying'
         | 'failed'
     >(() => 'idle'),
+    activeChannelParticipants: vi.fn<
+      () => Array<{
+        userId: string
+        username: string
+        displayName: string | null
+        avatarColor: string | null
+        isMuted: boolean
+        isDeafened: boolean
+        isSpeaking: boolean
+      }>
+    >(() => []),
     isMuted: false,
     isDeafened: false,
     toggleMute: vi.fn(),
@@ -394,6 +405,8 @@ describe('MessageArea', () => {
     voiceState.statusMessageForChannel.mockReturnValue(null)
     voiceState.statusForChannel.mockClear()
     voiceState.statusForChannel.mockReturnValue('idle')
+    voiceState.activeChannelParticipants.mockClear()
+    voiceState.activeChannelParticipants.mockReturnValue([])
     voiceState.isMuted = false
     voiceState.isDeafened = false
     voiceState.toggleMute.mockClear()
@@ -1065,6 +1078,36 @@ describe('MessageArea', () => {
     expect(voiceState.toggleMute).toHaveBeenCalledTimes(1)
     expect(voiceState.toggleDeafen).toHaveBeenCalledTimes(1)
     expect(voiceState.disconnect).toHaveBeenCalledTimes(1)
+  })
+
+  it('toggles voice participant panel from VoiceBar expand control', async () => {
+    voiceState.statusForChannel.mockReturnValue('connected')
+    voiceState.activeChannelParticipants.mockReturnValue([
+      {
+        userId: 'user-2',
+        username: 'bob',
+        displayName: 'Bob',
+        avatarColor: '#3366ff',
+        isMuted: true,
+        isDeafened: false,
+        isSpeaking: true,
+      },
+    ])
+    const { getByTestId, queryByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    expect(queryByTestId('voice-panel')).not.toBeInTheDocument()
+    await fireEvent.click(getByTestId('voice-bar-toggle-participants'))
+    expect(getByTestId('voice-panel')).toBeInTheDocument()
+    expect(getByTestId('voice-participant-user-2')).toBeInTheDocument()
+    await fireEvent.click(getByTestId('voice-bar-toggle-participants'))
+    expect(queryByTestId('voice-panel')).not.toBeInTheDocument()
   })
 
   it('shows retry toast when send fails and retries via toast action', async () => {

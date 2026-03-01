@@ -11,6 +11,7 @@ import {
   hasGuildPermission,
 } from '$lib/features/guild/permissions'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
+import { voiceState } from '$lib/features/voice/voiceStore.svelte'
 
 import { channelState } from './channelStore.svelte'
 import type {
@@ -211,6 +212,51 @@ function channelsForCategory(categorySlug: string | null): Channel[] {
 
 function uncategorizedChannels(): Channel[] {
   return channelsForCategory(null)
+}
+
+function voiceParticipantsForChannel(channel: Channel) {
+  if (!activeGuild || channel.channelType !== 'voice') return []
+  return voiceState.participantsForChannel(activeGuild, channel.slug)
+}
+
+function voiceParticipantCountForChannel(channel: Channel): number {
+  if (!activeGuild || channel.channelType !== 'voice') return 0
+  return voiceState.participantCountForChannel(activeGuild, channel.slug)
+}
+
+function voiceOverflowCountForChannel(channel: Channel): number {
+  const count = voiceParticipantCountForChannel(channel)
+  return Math.max(0, count - 3)
+}
+
+function participantDisplayName(participant: {
+  displayName: string | null
+  username: string
+}): string {
+  const displayName = participant.displayName?.trim()
+  if (displayName) return displayName
+  return participant.username
+}
+
+function participantInitial(participant: {
+  displayName: string | null
+  username: string
+}): string {
+  return participantDisplayName(participant).charAt(0).toUpperCase() || '?'
+}
+
+function voiceOccupancyLabel(channel: Channel): string {
+  const count = voiceParticipantCountForChannel(channel)
+  const noun = count === 1 ? 'user' : 'users'
+  return `${count} ${noun} in voice channel ${channel.name}`
+}
+
+function channelAriaLabel(channel: Channel): string {
+  const unreadPrefix = channel.hasUnreadActivity ? 'Unread. ' : ''
+  if (channel.channelType !== 'voice') {
+    return `${unreadPrefix}Open channel ${channel.name}`
+  }
+  return `${unreadPrefix}Open channel ${channel.name}. ${voiceOccupancyLabel(channel)}`
 }
 
 async function openCreateDialog(categorySlug: string | null = null) {
@@ -1005,6 +1051,10 @@ function handleCategoryHeaderKeydown(
             {#if !category.collapsed}
               <ul class="space-y-1 pl-2" aria-label={`Channels in ${category.name}`}>
                 {#each channelsForCategory(category.slug) as channel}
+                  {@const voiceParticipants = voiceParticipantsForChannel(channel)}
+                  {@const voiceInlineParticipants = voiceParticipants.slice(0, 3)}
+                  {@const voiceOverflow = voiceOverflowCountForChannel(channel)}
+                  {@const voiceCount = voiceParticipantCountForChannel(channel)}
                   <li
                     class="rounded-md"
                     draggable={canManageChannels}
@@ -1026,7 +1076,7 @@ function handleCategoryHeaderKeydown(
                         }`}
                         href={`/${activeGuild}/${channel.slug}`}
                         use:routerLink
-                        aria-label={`${channel.hasUnreadActivity ? 'Unread. ' : ''}Open channel ${channel.name}`}
+                        aria-label={channelAriaLabel(channel)}
                         aria-current={channel.slug === activeChannel ? 'page' : undefined}
                         data-has-unread-activity={channel.hasUnreadActivity
                           ? 'true'
@@ -1047,6 +1097,47 @@ function handleCategoryHeaderKeydown(
                         >
                           {channel.name}
                         </span>
+                        {#if channel.channelType === 'voice'}
+                          <span class="ml-auto inline-flex items-center gap-1">
+                            <span class="inline-flex -space-x-1" data-testid={`channel-voice-avatars-${channel.slug}`}>
+                              {#each voiceInlineParticipants as participant (participant.userId)}
+                                <span
+                                  class="inline-flex h-5 w-5 items-center justify-center rounded-full border border-card text-[10px] font-semibold text-black"
+                                  style={`background-color: ${participant.avatarColor ?? '#99aab5'};`}
+                                  data-testid={`channel-voice-avatar-${channel.slug}-${participant.userId}`}
+                                  aria-hidden="true"
+                                  title={participantDisplayName(participant)}
+                                >
+                                  {participantInitial(participant)}
+                                </span>
+                              {/each}
+                            </span>
+                            {#if voiceOverflow > 0}
+                              <span
+                                class="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-muted px-1 text-[10px] text-muted-foreground"
+                                data-testid={`channel-voice-overflow-${channel.slug}`}
+                                aria-hidden="true"
+                              >
+                                +{voiceOverflow}
+                              </span>
+                            {/if}
+                            <span
+                              class="text-[11px] text-muted-foreground"
+                              data-testid={`channel-voice-count-${channel.slug}`}
+                              aria-hidden="true"
+                            >
+                              {voiceCount}
+                            </span>
+                            <span
+                              class="sr-only"
+                              aria-live="polite"
+                              aria-atomic="true"
+                              data-testid={`channel-voice-occupancy-${channel.slug}`}
+                            >
+                              {voiceOccupancyLabel(channel)}
+                            </span>
+                          </span>
+                        {/if}
                         {#if channel.hasUnreadActivity}
                           <span
                             class="ml-auto inline-flex h-2 w-2 shrink-0 rounded-full bg-sky-300"
@@ -1158,6 +1249,10 @@ function handleCategoryHeaderKeydown(
           {:else}
             <ul class="space-y-1" aria-label="Uncategorized channels">
               {#each uncategorizedChannels() as channel}
+                {@const voiceParticipants = voiceParticipantsForChannel(channel)}
+                {@const voiceInlineParticipants = voiceParticipants.slice(0, 3)}
+                {@const voiceOverflow = voiceOverflowCountForChannel(channel)}
+                {@const voiceCount = voiceParticipantCountForChannel(channel)}
                 <li
                   class="rounded-md"
                   draggable={canManageChannels}
@@ -1179,7 +1274,7 @@ function handleCategoryHeaderKeydown(
                       }`}
                       href={`/${activeGuild}/${channel.slug}`}
                       use:routerLink
-                      aria-label={`${channel.hasUnreadActivity ? 'Unread. ' : ''}Open channel ${channel.name}`}
+                      aria-label={channelAriaLabel(channel)}
                       aria-current={channel.slug === activeChannel ? 'page' : undefined}
                       data-has-unread-activity={channel.hasUnreadActivity
                         ? 'true'
@@ -1200,6 +1295,47 @@ function handleCategoryHeaderKeydown(
                       >
                         {channel.name}
                       </span>
+                      {#if channel.channelType === 'voice'}
+                        <span class="ml-auto inline-flex items-center gap-1">
+                          <span class="inline-flex -space-x-1" data-testid={`channel-voice-avatars-${channel.slug}`}>
+                            {#each voiceInlineParticipants as participant (participant.userId)}
+                              <span
+                                class="inline-flex h-5 w-5 items-center justify-center rounded-full border border-card text-[10px] font-semibold text-black"
+                                style={`background-color: ${participant.avatarColor ?? '#99aab5'};`}
+                                data-testid={`channel-voice-avatar-${channel.slug}-${participant.userId}`}
+                                aria-hidden="true"
+                                title={participantDisplayName(participant)}
+                              >
+                                {participantInitial(participant)}
+                              </span>
+                            {/each}
+                          </span>
+                          {#if voiceOverflow > 0}
+                            <span
+                              class="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-muted px-1 text-[10px] text-muted-foreground"
+                              data-testid={`channel-voice-overflow-${channel.slug}`}
+                              aria-hidden="true"
+                            >
+                              +{voiceOverflow}
+                            </span>
+                          {/if}
+                          <span
+                            class="text-[11px] text-muted-foreground"
+                            data-testid={`channel-voice-count-${channel.slug}`}
+                            aria-hidden="true"
+                          >
+                            {voiceCount}
+                          </span>
+                          <span
+                            class="sr-only"
+                            aria-live="polite"
+                            aria-atomic="true"
+                            data-testid={`channel-voice-occupancy-${channel.slug}`}
+                          >
+                            {voiceOccupancyLabel(channel)}
+                          </span>
+                        </span>
+                      {/if}
                       {#if channel.hasUnreadActivity}
                         <span
                           class="ml-auto inline-flex h-2 w-2 shrink-0 rounded-full bg-sky-300"

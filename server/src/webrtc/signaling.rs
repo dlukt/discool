@@ -25,6 +25,25 @@ pub struct VoiceConnectionStatePayload {
     pub state: &'static str,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct VoiceParticipantPayload {
+    pub user_id: String,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub avatar_color: Option<String>,
+    pub is_muted: bool,
+    pub is_deafened: bool,
+    pub is_speaking: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VoiceStateUpdatePayload {
+    pub guild_slug: String,
+    pub channel_slug: String,
+    pub participant_count: u32,
+    pub participants: Vec<VoiceParticipantPayload>,
+}
+
 pub fn build_offer_sdp(session_id: &str, ice_servers: &[RTCIceServer]) -> String {
     let ice_ufrag = format!("dc{:08x}", crc32(session_id.as_bytes()));
     let ice_pwd = format!("discool{:016x}", crc32(session_id.as_bytes()) as u64);

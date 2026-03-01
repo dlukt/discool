@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 pub const PROTOCOL_VERSION: &str = "1";
 
-pub const STORY_6_1_SERVER_EVENTS: [&str; 14] = [
+pub const STORY_6_1_SERVER_EVENTS: [&str; 15] = [
     "message_create",
     "message_update",
     "message_delete",
@@ -18,6 +18,7 @@ pub const STORY_6_1_SERVER_EVENTS: [&str; 14] = [
     "voice_offer",
     "voice_ice_candidate",
     "voice_connection_state",
+    "voice_state_update",
 ];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -59,6 +60,7 @@ pub enum ServerOp {
     VoiceOffer,
     VoiceIceCandidate,
     VoiceConnectionState,
+    VoiceStateUpdate,
 }
 
 impl ServerOp {
@@ -82,6 +84,7 @@ impl ServerOp {
             ServerOp::VoiceOffer => "voice_offer",
             ServerOp::VoiceIceCandidate => "voice_ice_candidate",
             ServerOp::VoiceConnectionState => "voice_connection_state",
+            ServerOp::VoiceStateUpdate => "voice_state_update",
         }
     }
 }
@@ -103,6 +106,7 @@ pub enum ClientOp {
     VoiceLeave,
     VoiceAnswer,
     VoiceIceCandidate,
+    VoiceStateUpdate,
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +166,7 @@ pub fn parse_client_op(op: &str) -> Result<ClientOp, ProtocolError> {
         "c_voice_leave" => Ok(ClientOp::VoiceLeave),
         "c_voice_answer" => Ok(ClientOp::VoiceAnswer),
         "c_voice_ice_candidate" => Ok(ClientOp::VoiceIceCandidate),
+        "c_voice_state_update" => Ok(ClientOp::VoiceStateUpdate),
         _ => {
             Err(ProtocolError::validation("Unknown client operation")
                 .with_details(json!({ "op": op })))
@@ -228,6 +233,10 @@ mod tests {
         assert_eq!(
             parse_client_op("c_voice_ice_candidate").unwrap(),
             ClientOp::VoiceIceCandidate
+        );
+        assert_eq!(
+            parse_client_op("c_voice_state_update").unwrap(),
+            ClientOp::VoiceStateUpdate
         );
     }
 

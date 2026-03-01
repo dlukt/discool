@@ -27,6 +27,7 @@ export type WsClientOp =
   | 'c_voice_leave'
   | 'c_voice_answer'
   | 'c_voice_ice_candidate'
+  | 'c_voice_state_update'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null

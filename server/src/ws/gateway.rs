@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -12,9 +13,14 @@ use crate::{
     AppError,
     config::AttachmentConfig,
     db::DbPool,
-    models::{channel, guild},
+    models::{channel, guild, guild_member},
     services::{dm_service, message_service, presence_service},
-    webrtc::voice_channel::VoiceRuntime,
+    webrtc::{
+        signaling::{
+            VoiceParticipantPayload, VoiceStateUpdatePayload as ServerVoiceStateUpdatePayload,
+        },
+        voice_channel::{VoiceParticipantStateUpdate, VoiceRuntime},
+    },
 };
 
 use super::{
@@ -140,6 +146,15 @@ struct VoiceIceCandidatePayload {
     sdp_mid: Option<String>,
     #[serde(default)]
     sdp_mline_index: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VoiceStateUpdateClientPayload {
+    guild_slug: String,
+    channel_slug: String,
+    is_muted: bool,
+    is_deafened: bool,
+    is_speaking: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -320,6 +335,20 @@ fn parse_voice_ice_candidate_payload(
         candidate,
         sdp_mid: parsed.sdp_mid.map(|value| value.trim().to_string()),
         sdp_mline_index: parsed.sdp_mline_index,
+    })
+}
+
+fn parse_voice_state_update_payload(
+    value: Value,
+    op: &str,
+) -> Result<VoiceStateUpdateClientPayload, ProtocolError> {
+    let parsed = parse_payload::<VoiceStateUpdateClientPayload>(value, op)?;
+    Ok(VoiceStateUpdateClientPayload {
+        guild_slug: parse_required_non_empty_field(&parsed.guild_slug, op, "guild_slug")?,
+        channel_slug: parse_required_non_empty_field(&parsed.channel_slug, op, "channel_slug")?,
+        is_muted: parsed.is_muted,
+        is_deafened: parsed.is_deafened,
+        is_speaking: parsed.is_speaking,
     })
 }
 
@@ -612,6 +641,72 @@ fn handle_resume(connection_id: &str, envelope: &ClientEnvelope) {
     registry::send_event(connection_id, ServerOp::ResumeAck, &resume_payload);
 }
 
+async fn build_voice_state_update_payload(
+    pool: &DbPool,
+    voice_runtime: &VoiceRuntime,
+    guild_slug: &str,
+    channel_slug: &str,
+) -> Result<Option<ServerVoiceStateUpdatePayload>, AppError> {
+    let Some(guild_record) = guild::find_guild_by_slug(pool, guild_slug).await? else {
+        return Ok(None);
+    };
+    let member_profiles = guild_member::list_guild_member_profiles(pool, &guild_record.id).await?;
+    let mut profile_by_user: HashMap<String, (String, Option<String>, Option<String>)> =
+        HashMap::with_capacity(member_profiles.len());
+    for profile in member_profiles {
+        profile_by_user.insert(
+            profile.user_id,
+            (profile.username, profile.display_name, profile.avatar_color),
+        );
+    }
+
+    let participant_states = voice_runtime.participants_for_channel(guild_slug, channel_slug);
+    let mut participants = Vec::with_capacity(participant_states.len());
+    for participant in participant_states {
+        let profile = profile_by_user.get(&participant.user_id);
+        let (username, display_name, avatar_color) = if let Some(profile) = profile {
+            (profile.0.clone(), profile.1.clone(), profile.2.clone())
+        } else if let Some(profile) =
+            guild_member::find_user_profile_by_id(pool, &participant.user_id).await?
+        {
+            (profile.username, profile.display_name, profile.avatar_color)
+        } else {
+            (participant.user_id.clone(), None, None)
+        };
+        participants.push(VoiceParticipantPayload {
+            user_id: participant.user_id,
+            username,
+            display_name,
+            avatar_color,
+            is_muted: participant.is_muted,
+            is_deafened: participant.is_deafened,
+            is_speaking: participant.is_speaking,
+        });
+    }
+
+    Ok(Some(ServerVoiceStateUpdatePayload {
+        guild_slug: guild_slug.to_string(),
+        channel_slug: channel_slug.to_string(),
+        participant_count: u32::try_from(participants.len()).unwrap_or(u32::MAX),
+        participants,
+    }))
+}
+
+async fn broadcast_voice_state_update(
+    pool: &DbPool,
+    voice_runtime: &VoiceRuntime,
+    guild_slug: &str,
+    channel_slug: &str,
+) -> Result<(), AppError> {
+    let Some(payload) =
+        build_voice_state_update_payload(pool, voice_runtime, guild_slug, channel_slug).await?
+    else {
+        return Ok(());
+    };
+    registry::broadcast_to_guild(guild_slug, ServerOp::VoiceStateUpdate, &payload);
+    Ok(())
+}
+
 async fn handle_voice_join(
     pool: &DbPool,
     voice_runtime: &VoiceRuntime,
@@ -662,10 +757,18 @@ async fn handle_voice_join(
     for candidate in start.candidates {
         registry::send_event(connection_id, ServerOp::VoiceIceCandidate, &candidate);
     }
+    broadcast_voice_state_update(
+        pool,
+        voice_runtime,
+        &payload.guild_slug,
+        &payload.channel_slug,
+    )
+    .await?;
     Ok(())
 }
 
 async fn handle_voice_leave(
+    pool: &DbPool,
     voice_runtime: &VoiceRuntime,
     connection_id: &str,
     payload: VoiceLeavePayload,
@@ -682,6 +785,13 @@ async fn handle_voice_leave(
             "state": "disconnected",
         }),
     );
+    broadcast_voice_state_update(
+        pool,
+        voice_runtime,
+        &payload.guild_slug,
+        &payload.channel_slug,
+    )
+    .await?;
     Ok(())
 }
 
@@ -729,6 +839,35 @@ async fn handle_voice_ice_candidate(
         )
         .await
         .map_err(AppError::ValidationError)
+}
+
+async fn handle_voice_state_update(
+    pool: &DbPool,
+    voice_runtime: &VoiceRuntime,
+    connection_id: &str,
+    user_id: &str,
+    payload: VoiceStateUpdateClientPayload,
+) -> Result<(), AppError> {
+    voice_runtime
+        .update_participant_state(
+            connection_id,
+            user_id,
+            &payload.guild_slug,
+            &payload.channel_slug,
+            VoiceParticipantStateUpdate {
+                is_muted: payload.is_muted,
+                is_deafened: payload.is_deafened,
+                is_speaking: payload.is_speaking,
+            },
+        )
+        .map_err(AppError::ValidationError)?;
+    broadcast_voice_state_update(
+        pool,
+        voice_runtime,
+        &payload.guild_slug,
+        &payload.channel_slug,
+    )
+    .await
 }
 
 async fn process_client_message(
@@ -866,7 +1005,8 @@ async fn process_client_message(
         },
         ClientOp::VoiceLeave => match parse_voice_leave_payload(envelope.d, &envelope.op) {
             Ok(payload) => {
-                if let Err(error) = handle_voice_leave(voice_runtime, connection_id, payload).await
+                if let Err(error) =
+                    handle_voice_leave(pool, voice_runtime, connection_id, payload).await
                 {
                     send_app_error(connection_id, error);
                 }
@@ -887,6 +1027,24 @@ async fn process_client_message(
                 Ok(payload) => {
                     if let Err(error) =
                         handle_voice_ice_candidate(voice_runtime, connection_id, payload).await
+                    {
+                        send_app_error(connection_id, error);
+                    }
+                }
+                Err(error) => send_protocol_error(connection_id, error),
+            }
+        }
+        ClientOp::VoiceStateUpdate => {
+            match parse_voice_state_update_payload(envelope.d, &envelope.op) {
+                Ok(payload) => {
+                    if let Err(error) = handle_voice_state_update(
+                        pool,
+                        voice_runtime,
+                        connection_id,
+                        user_id,
+                        payload,
+                    )
+                    .await
                     {
                         send_app_error(connection_id, error);
                     }
@@ -982,7 +1140,26 @@ pub async fn handle_socket(
         }
     }
 
+    let disconnected_channels = voice_runtime.channels_for_connection(&connection_id);
     voice_runtime.clear_connection(&connection_id).await;
+    for channel in disconnected_channels {
+        if let Err(error) = broadcast_voice_state_update(
+            &pool,
+            voice_runtime.as_ref(),
+            &channel.guild_slug,
+            &channel.channel_slug,
+        )
+        .await
+        {
+            tracing::debug!(
+                connection_id,
+                guild_slug = %channel.guild_slug,
+                channel_slug = %channel.channel_slug,
+                error = ?error,
+                "Failed to broadcast voice state update during websocket cleanup"
+            );
+        }
+    }
     presence_service::mark_disconnected(&user_id);
     presence_service::unregister_connection(&connection_id);
 }
@@ -1063,5 +1240,22 @@ mod tests {
         .expect_err("empty channel slug should be rejected");
         assert_eq!(err.code, "VALIDATION_ERROR");
         assert_eq!(err.details["field"], json!("channel_slug"));
+    }
+
+    #[test]
+    fn parse_voice_state_update_payload_requires_boolean_flags() {
+        let err = parse_voice_state_update_payload(
+            json!({
+                "guild_slug": "guild",
+                "channel_slug": "voice-room",
+                "is_muted": "yes",
+                "is_deafened": false,
+                "is_speaking": false,
+            }),
+            "c_voice_state_update",
+        )
+        .expect_err("invalid voice state update payload should be rejected");
+        assert_eq!(err.code, "VALIDATION_ERROR");
+        assert_eq!(err.details["reason"], json!("invalid_payload_shape"));
     }
 }

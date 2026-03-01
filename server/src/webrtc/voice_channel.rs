@@ -1,7 +1,9 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use dashmap::DashMap;
-use uuid::Uuid;
 use webrtc::{
     api::{
         APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
@@ -25,9 +27,12 @@ use super::{
 #[derive(Debug, Clone)]
 struct VoiceSession {
     peer_connection: Arc<RTCPeerConnection>,
-    _id: String,
-    _user_id: String,
-    _created_at: Instant,
+    user_id: String,
+    guild_slug: String,
+    channel_slug: String,
+    is_muted: bool,
+    is_deafened: bool,
+    is_speaking: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +40,27 @@ pub struct SignalingStart {
     pub offer: VoiceOfferPayload,
     pub candidates: Vec<VoiceIceCandidatePayload>,
     pub connection_state: VoiceConnectionStatePayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceParticipantState {
+    pub user_id: String,
+    pub is_muted: bool,
+    pub is_deafened: bool,
+    pub is_speaking: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoiceParticipantStateUpdate {
+    pub is_muted: bool,
+    pub is_deafened: bool,
+    pub is_speaking: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceChannelRef {
+    pub guild_slug: String,
+    pub channel_slug: String,
 }
 
 #[derive(Debug)]
@@ -59,7 +85,7 @@ impl VoiceRuntime {
         channel_slug: &str,
     ) -> Result<SignalingStart, String> {
         let key = session_key(connection_id, guild_slug, channel_slug);
-        let session_id = Uuid::new_v4().to_string();
+        self.close_session_by_key(&key, connection_id).await;
         let peer_connection = create_peer_connection(ice_servers_from_config(&self.config)).await?;
         peer_connection
             .add_transceiver_from_kind(RTPCodecType::Audio, None)
@@ -88,9 +114,12 @@ impl VoiceRuntime {
             key,
             VoiceSession {
                 peer_connection,
-                _id: session_id,
-                _user_id: user_id.to_string(),
-                _created_at: Instant::now(),
+                user_id: user_id.to_string(),
+                guild_slug: guild_slug.to_string(),
+                channel_slug: channel_slug.to_string(),
+                is_muted: false,
+                is_deafened: false,
+                is_speaking: false,
             },
         );
 
@@ -174,6 +203,75 @@ impl VoiceRuntime {
     pub async fn leave_session(&self, connection_id: &str, guild_slug: &str, channel_slug: &str) {
         let key = session_key(connection_id, guild_slug, channel_slug);
         self.close_session_by_key(&key, connection_id).await;
+    }
+
+    pub fn update_participant_state(
+        &self,
+        connection_id: &str,
+        user_id: &str,
+        guild_slug: &str,
+        channel_slug: &str,
+        next_state: VoiceParticipantStateUpdate,
+    ) -> Result<(), String> {
+        let key = session_key(connection_id, guild_slug, channel_slug);
+        let mut session = self
+            .sessions
+            .get_mut(&key)
+            .ok_or_else(|| "Voice session not found. Rejoin the voice channel.".to_string())?;
+        if session.user_id != user_id {
+            return Err("Voice session user mismatch".to_string());
+        }
+        session.is_muted = next_state.is_muted || next_state.is_deafened;
+        session.is_deafened = next_state.is_deafened;
+        session.is_speaking = next_state.is_speaking && !session.is_muted;
+        Ok(())
+    }
+
+    pub fn participants_for_channel(
+        &self,
+        guild_slug: &str,
+        channel_slug: &str,
+    ) -> Vec<VoiceParticipantState> {
+        let mut by_user: BTreeMap<String, VoiceParticipantState> = BTreeMap::new();
+        for session in self.sessions.iter() {
+            let value = session.value();
+            if value.guild_slug != guild_slug || value.channel_slug != channel_slug {
+                continue;
+            }
+            by_user
+                .entry(value.user_id.clone())
+                .and_modify(|participant| {
+                    participant.is_muted &= value.is_muted;
+                    participant.is_deafened &= value.is_deafened;
+                    participant.is_speaking |= value.is_speaking;
+                })
+                .or_insert_with(|| VoiceParticipantState {
+                    user_id: value.user_id.clone(),
+                    is_muted: value.is_muted,
+                    is_deafened: value.is_deafened,
+                    is_speaking: value.is_speaking,
+                });
+        }
+        by_user.into_values().collect()
+    }
+
+    pub fn channels_for_connection(&self, connection_id: &str) -> Vec<VoiceChannelRef> {
+        let prefix = format!("{connection_id}:");
+        let mut channels = BTreeSet::new();
+        for session in self.sessions.iter() {
+            if !session.key().starts_with(&prefix) {
+                continue;
+            }
+            let value = session.value();
+            channels.insert((value.guild_slug.clone(), value.channel_slug.clone()));
+        }
+        channels
+            .into_iter()
+            .map(|(guild_slug, channel_slug)| VoiceChannelRef {
+                guild_slug,
+                channel_slug,
+            })
+            .collect()
     }
 
     pub async fn clear_connection(&self, connection_id: &str) {
@@ -305,5 +403,33 @@ mod tests {
         runtime.leave_session("conn-1", "guild", "voice-room").await;
         runtime.leave_session("conn-1", "guild", "voice-room").await;
         assert!(runtime.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn participant_state_updates_clear_speaking_when_muted() {
+        let runtime = VoiceRuntime::new(VoiceConfig::default());
+        runtime
+            .start_signaling("conn-1", "user-1", "guild", "voice-room")
+            .await
+            .expect("voice signaling should start");
+        runtime
+            .update_participant_state(
+                "conn-1",
+                "user-1",
+                "guild",
+                "voice-room",
+                VoiceParticipantStateUpdate {
+                    is_muted: true,
+                    is_deafened: true,
+                    is_speaking: true,
+                },
+            )
+            .expect("voice participant state update should work");
+        let participants = runtime.participants_for_channel("guild", "voice-room");
+        assert_eq!(participants.len(), 1);
+        assert_eq!(participants[0].user_id, "user-1");
+        assert!(participants[0].is_muted);
+        assert!(participants[0].is_deafened);
+        assert!(!participants[0].is_speaking);
     }
 }

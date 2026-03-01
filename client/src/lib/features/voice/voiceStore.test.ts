@@ -59,6 +59,62 @@ describe('voiceState', () => {
     expect(voiceState.status).toBe('connecting')
   })
 
+  it('ingests voice_state_update envelopes and exposes participant selectors', () => {
+    emitEnvelope({
+      op: 'voice_state_update',
+      d: {
+        guild_slug: 'lobby',
+        channel_slug: 'voice-room',
+        participant_count: 2,
+        participants: [
+          {
+            user_id: 'user-1',
+            username: 'alice',
+            display_name: 'Alice',
+            avatar_color: '#3366ff',
+            is_muted: false,
+            is_deafened: false,
+            is_speaking: true,
+          },
+          {
+            user_id: 'user-2',
+            username: 'bob',
+            display_name: null,
+            avatar_color: '#ff6633',
+            is_muted: true,
+            is_deafened: false,
+            is_speaking: false,
+          },
+        ],
+      },
+    })
+
+    expect(voiceState.participantCountForChannel('lobby', 'voice-room')).toBe(2)
+    expect(voiceState.participantsForChannel('lobby', 'voice-room')).toEqual([
+      {
+        userId: 'user-1',
+        username: 'alice',
+        displayName: 'Alice',
+        avatarColor: '#3366ff',
+        isMuted: false,
+        isDeafened: false,
+        isSpeaking: true,
+      },
+      {
+        userId: 'user-2',
+        username: 'bob',
+        displayName: null,
+        avatarColor: '#ff6633',
+        isMuted: true,
+        isDeafened: false,
+        isSpeaking: false,
+      },
+    ])
+
+    voiceState.activateVoiceChannel('lobby', 'voice-room')
+    expect(voiceState.activeChannelParticipants()).toHaveLength(2)
+  })
+
   it('shows retry copy then terminal failure copy when retries are exhausted', () => {
     voiceState.activateVoiceChannel('lobby', 'voice-room')
 
@@ -134,6 +190,30 @@ describe('voiceState', () => {
     expect(voiceState.isMuted).toBe(false)
   })
 
+  it('sends c_voice_state_update when local control state changes while connected', () => {
+    voiceState.activateVoiceChannel('lobby', 'voice-room')
+    voiceState.status = 'connected'
+    wsSend.mockClear()
+
+    voiceState.toggleMute()
+    expect(wsSend).toHaveBeenCalledWith('c_voice_state_update', {
+      guild_slug: 'lobby',
+      channel_slug: 'voice-room',
+      is_muted: true,
+      is_deafened: false,
+      is_speaking: false,
+    })
+
+    voiceState.toggleDeafen()
+    expect(wsSend).toHaveBeenCalledWith('c_voice_state_update', {
+      guild_slug: 'lobby',
+      channel_slug: 'voice-room',
+      is_muted: true,
+      is_deafened: true,
+      is_speaking: false,
+    })
+  })
+
   it('sends c_voice_leave and resets voice control state on disconnect', () => {
     voiceState.activateVoiceChannel('lobby', 'voice-room')
     voiceState.status = 'connected'
@@ -162,6 +242,25 @@ describe('voiceState', () => {
   it('handles disconnected connection-state event without re-sending leave', () => {
     voiceState.activateVoiceChannel('lobby', 'voice-room')
     voiceState.status = 'connected'
+    emitEnvelope({
+      op: 'voice_state_update',
+      d: {
+        guild_slug: 'lobby',
+        channel_slug: 'voice-room',
+        participant_count: 1,
+        participants: [
+          {
+            user_id: 'user-1',
+            username: 'alice',
+            display_name: 'Alice',
+            avatar_color: '#3366ff',
+            is_muted: false,
+            is_deafened: false,
+            is_speaking: false,
+          },
+        ],
+      },
+    })
     wsSend.mockClear()
 
     emitEnvelope({
@@ -176,6 +275,7 @@ describe('voiceState', () => {
     expect(voiceState.status).toBe('idle')
     expect(voiceState.activeGuildSlug).toBeNull()
     expect(voiceState.activeChannelSlug).toBeNull()
+    expect(voiceState.participantCountForChannel('lobby', 'voice-room')).toBe(0)
     const leaveCalls = wsSend.mock.calls.filter(
       (call) => call[0] === 'c_voice_leave',
     )
