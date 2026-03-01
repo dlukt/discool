@@ -108,7 +108,7 @@ development_status:
   6-9-direct-messages: done
   6-10-user-blocking-complete-erasure: done
   6-11-error-handling-and-status-communication: done
-  6-12-quick-switcher: review
+  6-12-quick-switcher: done
   epic-6-retrospective: optional
 
   # Epic 7: Voice Communication
