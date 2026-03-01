@@ -15,6 +15,8 @@ class MockPeerConnection {
 
   onicecandidate: ((event: RTCPeerConnectionIceEvent) => void) | null = null
 
+  ontrack: ((event: RTCTrackEvent) => void) | null = null
+
   addTransceiver = vi.fn()
 
   setRemoteDescription = vi.fn(
@@ -93,6 +95,7 @@ describe('VoiceWebRtcClient', () => {
     const audioTrack = {
       stop: vi.fn(),
       readyState: 'live',
+      enabled: true,
     } as unknown as MediaStreamTrack
     const mediaStream = {
       getAudioTracks: () => [audioTrack],
@@ -119,9 +122,64 @@ describe('VoiceWebRtcClient', () => {
       sdp: 'v=0',
       sdp_type: 'answer',
     })
+    client.setMuted(true)
+    expect(audioTrack.enabled).toBe(false)
+    client.setMuted(false)
+    expect(audioTrack.enabled).toBe(true)
 
     client.close()
     expect(audioTrack.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('applies deafen state to tracked remote audio elements', async () => {
+    const sendSignal = vi.fn(() => true)
+    const audioTrack = {
+      stop: vi.fn(),
+      readyState: 'live',
+      enabled: true,
+    } as unknown as MediaStreamTrack
+    const mediaStream = {
+      getAudioTracks: () => [audioTrack],
+      getTracks: () => [audioTrack],
+    } as unknown as MediaStream
+    const getUserMedia = vi.fn(async () => mediaStream)
+    setMediaDevices(getUserMedia)
+    const remoteAudioElement = {
+      autoplay: false,
+      playsInline: false,
+      muted: false,
+      srcObject: null as MediaStream | null,
+      play: vi.fn(async () => {}),
+      pause: vi.fn(),
+    } as unknown as HTMLAudioElement
+    const audioCtor = vi.fn(function MockAudio() {
+      return remoteAudioElement
+    })
+    vi.stubGlobal('Audio', audioCtor as unknown as typeof Audio)
+
+    const client = new VoiceWebRtcClient(sendSignal)
+    await client.applyOffer(
+      { guildSlug: 'lobby', channelSlug: 'voice-room' },
+      'v=0\r\n',
+      vi.fn(),
+    )
+
+    const connection = latestConnection()
+    const remoteStream = { id: 'remote-stream' } as unknown as MediaStream
+    connection.ontrack?.({
+      streams: [remoteStream],
+    } as unknown as RTCTrackEvent)
+
+    expect(audioCtor).toHaveBeenCalledTimes(1)
+    expect(remoteAudioElement.srcObject).toBe(remoteStream)
+    client.setDeafened(true)
+    expect(remoteAudioElement.muted).toBe(true)
+    client.setDeafened(false)
+    expect(remoteAudioElement.muted).toBe(false)
+
+    client.close()
+    expect(remoteAudioElement.pause).toHaveBeenCalledTimes(1)
+    expect(remoteAudioElement.srcObject).toBeNull()
   })
 
   it('fails fast when microphone access is unavailable', async () => {

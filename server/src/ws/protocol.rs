@@ -100,6 +100,7 @@ pub enum ClientOp {
     TypingStart,
     Resume,
     VoiceJoin,
+    VoiceLeave,
     VoiceAnswer,
     VoiceIceCandidate,
 }
@@ -158,6 +159,7 @@ pub fn parse_client_op(op: &str) -> Result<ClientOp, ProtocolError> {
         "c_typing_start" => Ok(ClientOp::TypingStart),
         "c_resume" => Ok(ClientOp::Resume),
         "c_voice_join" => Ok(ClientOp::VoiceJoin),
+        "c_voice_leave" => Ok(ClientOp::VoiceLeave),
         "c_voice_answer" => Ok(ClientOp::VoiceAnswer),
         "c_voice_ice_candidate" => Ok(ClientOp::VoiceIceCandidate),
         _ => {
@@ -214,6 +216,10 @@ mod tests {
         assert_eq!(
             parse_client_op("c_voice_join").unwrap(),
             ClientOp::VoiceJoin
+        );
+        assert_eq!(
+            parse_client_op("c_voice_leave").unwrap(),
+            ClientOp::VoiceLeave
         );
         assert_eq!(
             parse_client_op("c_voice_answer").unwrap(),

@@ -24,6 +24,7 @@ export type WsClientOp =
   | 'c_typing_start'
   | 'c_resume'
   | 'c_voice_join'
+  | 'c_voice_leave'
   | 'c_voice_answer'
   | 'c_voice_ice_candidate'
 

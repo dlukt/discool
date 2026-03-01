@@ -11,6 +11,7 @@ import {
 import { blockState } from '$lib/features/identity/blockStore.svelte'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
 import ProfileSettingsView from '$lib/features/identity/ProfileSettingsView.svelte'
+import VoiceBar from '$lib/features/voice/VoiceBar.svelte'
 import { voiceState } from '$lib/features/voice/voiceStore.svelte'
 import { toastState } from '$lib/feedback/toastStore.svelte'
 import {
@@ -101,6 +102,9 @@ let voiceConnectionState = $derived(
   isChannelMode
     ? voiceState.statusForChannel(activeGuild, activeChannel)
     : 'idle',
+)
+let showVoiceBar = $derived(
+  isChannelMode && voiceConnectionState === 'connected',
 )
 let composerInput = $state<HTMLTextAreaElement | null>(null)
 let composerValue = $state('')
@@ -1348,6 +1352,19 @@ onMount(() => {
         </div>
       {/if}
     </section>
+
+    {#if showVoiceBar}
+      <VoiceBar
+        guildName={activeGuild}
+        channelName={activeChannel}
+        connectionState={voiceConnectionState}
+        isMuted={voiceState.isMuted}
+        isDeafened={voiceState.isDeafened}
+        onToggleMute={() => voiceState.toggleMute()}
+        onToggleDeafen={() => voiceState.toggleDeafen()}
+        onDisconnect={() => voiceState.disconnect()}
+      />
+    {/if}
 
     {#if isConversationMode}
       <section class="rounded-md border border-border bg-card p-4">

@@ -57,6 +57,52 @@ function activeContext(): VoiceJoinContext | null {
   }
 }
 
+function sendLeaveSignal(context: VoiceJoinContext): void {
+  wsClient.send('c_voice_leave', {
+    guild_slug: context.guildSlug,
+    channel_slug: context.channelSlug,
+  })
+}
+
+function resetControlState(): void {
+  voiceState.isMuted = false
+  voiceState.isDeafened = false
+  voiceClient.setMuted(false)
+  voiceClient.setDeafened(false)
+}
+
+function clearActiveChannelState(sendLeave = true): void {
+  if (
+    voiceState.activeGuildSlug === null &&
+    voiceState.activeChannelSlug === null &&
+    voiceState.attempt === 0 &&
+    voiceState.joinStartedAt === null &&
+    voiceState.connectedAt === null &&
+    voiceState.joinLatencyMs === null &&
+    voiceState.status === 'idle' &&
+    voiceState.statusMessage === null &&
+    voiceState.isMuted === false &&
+    voiceState.isDeafened === false
+  ) {
+    return
+  }
+  const context = activeContext()
+  clearRetryTimer()
+  clearJoinTimeoutTimer()
+  if (sendLeave && context) {
+    sendLeaveSignal(context)
+  }
+  voiceClient.close()
+  voiceState.activeGuildSlug = null
+  voiceState.activeChannelSlug = null
+  voiceState.attempt = 0
+  voiceState.joinStartedAt = null
+  voiceState.connectedAt = null
+  voiceState.joinLatencyMs = null
+  resetControlState()
+  setStatus('idle', null)
+}
+
 function retryDelayForAttempt(attempt: number): number {
   const exponent = Math.max(0, attempt - 1)
   return Math.min(RETRY_INITIAL_MS * 2 ** exponent, RETRY_MAX_MS)
@@ -81,6 +127,8 @@ function markConnectedIfActive(context: VoiceJoinContext): void {
   voiceState.joinLatencyMs = voiceState.joinStartedAt
     ? Math.max(0, connectedAt - voiceState.joinStartedAt)
     : null
+  voiceClient.setMuted(voiceState.isMuted)
+  voiceClient.setDeafened(voiceState.isDeafened)
 }
 
 function markFailed(): void {
@@ -226,6 +274,10 @@ function handleVoiceConnectionState(payload: VoiceConnectionStateWire): void {
   if (state === 'connected') {
     return
   }
+  if (state === 'disconnected') {
+    clearActiveChannelState(false)
+    return
+  }
   if (state === 'failed') {
     handleJoinFailure()
   }
@@ -241,6 +293,7 @@ function handleVoiceWsError(envelope: WsEnvelope): void {
       : ''
   if (
     op !== 'c_voice_join' &&
+    op !== 'c_voice_leave' &&
     op !== 'c_voice_answer' &&
     op !== 'c_voice_ice_candidate' &&
     !message.includes('voice')
@@ -275,6 +328,8 @@ export const voiceState = $state({
   version: 0,
   status: 'idle' as VoiceConnectionStatus,
   statusMessage: null as string | null,
+  isMuted: false,
+  isDeafened: false,
   activeGuildSlug: null as string | null,
   activeChannelSlug: null as string | null,
   attempt: 0,
@@ -299,9 +354,18 @@ export const voiceState = $state({
       return
     }
 
+    const previousContext = activeContext()
+    if (
+      previousContext &&
+      (previousContext.guildSlug !== normalizedGuild ||
+        previousContext.channelSlug !== normalizedChannel)
+    ) {
+      sendLeaveSignal(previousContext)
+    }
     clearRetryTimer()
     clearJoinTimeoutTimer()
     voiceClient.close()
+    resetControlState()
     voiceState.activeGuildSlug = normalizedGuild
     voiceState.activeChannelSlug = normalizedChannel
     voiceState.attempt = 0
@@ -315,28 +379,31 @@ export const voiceState = $state({
   },
 
   clearActiveChannel: (): void => {
-    if (
-      voiceState.activeGuildSlug === null &&
-      voiceState.activeChannelSlug === null &&
-      voiceState.attempt === 0 &&
-      voiceState.joinStartedAt === null &&
-      voiceState.connectedAt === null &&
-      voiceState.joinLatencyMs === null &&
-      voiceState.status === 'idle' &&
-      voiceState.statusMessage === null
-    ) {
-      return
+    clearActiveChannelState(true)
+  },
+
+  toggleMute: (): void => {
+    if (voiceState.status !== 'connected' || !activeContext()) return
+    if (voiceState.isDeafened && voiceState.isMuted) return
+    const nextMuted = !voiceState.isMuted
+    if (voiceState.isDeafened && !nextMuted) return
+    voiceState.isMuted = nextMuted
+    voiceClient.setMuted(nextMuted)
+  },
+
+  toggleDeafen: (): void => {
+    if (voiceState.status !== 'connected' || !activeContext()) return
+    const nextDeafened = !voiceState.isDeafened
+    voiceState.isDeafened = nextDeafened
+    voiceClient.setDeafened(nextDeafened)
+    if (nextDeafened) {
+      voiceState.isMuted = true
+      voiceClient.setMuted(true)
     }
-    clearRetryTimer()
-    clearJoinTimeoutTimer()
-    voiceClient.close()
-    voiceState.activeGuildSlug = null
-    voiceState.activeChannelSlug = null
-    voiceState.attempt = 0
-    voiceState.joinStartedAt = null
-    voiceState.connectedAt = null
-    voiceState.joinLatencyMs = null
-    setStatus('idle', null)
+  },
+
+  disconnect: (): void => {
+    clearActiveChannelState(true)
   },
 
   statusForChannel: (

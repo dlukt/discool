@@ -171,6 +171,11 @@ impl VoiceRuntime {
         Ok(())
     }
 
+    pub async fn leave_session(&self, connection_id: &str, guild_slug: &str, channel_slug: &str) {
+        let key = session_key(connection_id, guild_slug, channel_slug);
+        self.close_session_by_key(&key, connection_id).await;
+    }
+
     pub async fn clear_connection(&self, connection_id: &str) {
         let prefix = format!("{connection_id}:");
         let keys = self
@@ -185,12 +190,7 @@ impl VoiceRuntime {
             })
             .collect::<Vec<_>>();
         for key in keys {
-            let Some((_, session)) = self.sessions.remove(&key) else {
-                continue;
-            };
-            if let Err(error) = session.peer_connection.close().await {
-                tracing::debug!(%connection_id, %error, "Failed to close voice peer connection");
-            }
+            self.close_session_by_key(&key, connection_id).await;
         }
     }
 
@@ -204,6 +204,15 @@ impl VoiceRuntime {
 
     pub fn retry_max_attempts(&self) -> u32 {
         self.config.retry_max_attempts
+    }
+
+    async fn close_session_by_key(&self, key: &str, connection_id: &str) {
+        let Some((_, session)) = self.sessions.remove(key) else {
+            return;
+        };
+        if let Err(error) = session.peer_connection.close().await {
+            tracing::debug!(%connection_id, %error, "Failed to close voice peer connection");
+        }
     }
 }
 
@@ -288,5 +297,13 @@ mod tests {
             .await
             .expect_err("answer should fail without voice session");
         assert!(err.contains("Voice session not found"));
+    }
+
+    #[tokio::test]
+    async fn leave_session_is_idempotent() {
+        let runtime = VoiceRuntime::new(VoiceConfig::default());
+        runtime.leave_session("conn-1", "guild", "voice-room").await;
+        runtime.leave_session("conn-1", "guild", "voice-room").await;
+        assert!(runtime.sessions.is_empty());
     }
 }

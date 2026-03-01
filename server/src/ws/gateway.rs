@@ -118,6 +118,12 @@ struct VoiceJoinPayload {
 }
 
 #[derive(Debug, Deserialize)]
+struct VoiceLeavePayload {
+    guild_slug: String,
+    channel_slug: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct VoiceAnswerPayload {
     guild_slug: String,
     channel_slug: String,
@@ -258,6 +264,14 @@ fn parse_required_non_empty_field(
 fn parse_voice_join_payload(value: Value, op: &str) -> Result<VoiceJoinPayload, ProtocolError> {
     let parsed = parse_payload::<VoiceJoinPayload>(value, op)?;
     Ok(VoiceJoinPayload {
+        guild_slug: parse_required_non_empty_field(&parsed.guild_slug, op, "guild_slug")?,
+        channel_slug: parse_required_non_empty_field(&parsed.channel_slug, op, "channel_slug")?,
+    })
+}
+
+fn parse_voice_leave_payload(value: Value, op: &str) -> Result<VoiceLeavePayload, ProtocolError> {
+    let parsed = parse_payload::<VoiceLeavePayload>(value, op)?;
+    Ok(VoiceLeavePayload {
         guild_slug: parse_required_non_empty_field(&parsed.guild_slug, op, "guild_slug")?,
         channel_slug: parse_required_non_empty_field(&parsed.channel_slug, op, "channel_slug")?,
     })
@@ -651,6 +665,26 @@ async fn handle_voice_join(
     Ok(())
 }
 
+async fn handle_voice_leave(
+    voice_runtime: &VoiceRuntime,
+    connection_id: &str,
+    payload: VoiceLeavePayload,
+) -> Result<(), AppError> {
+    voice_runtime
+        .leave_session(connection_id, &payload.guild_slug, &payload.channel_slug)
+        .await;
+    registry::send_event(
+        connection_id,
+        ServerOp::VoiceConnectionState,
+        &json!({
+            "guild_slug": payload.guild_slug,
+            "channel_slug": payload.channel_slug,
+            "state": "disconnected",
+        }),
+    );
+    Ok(())
+}
+
 async fn handle_voice_answer(
     voice_runtime: &VoiceRuntime,
     connection_id: &str,
@@ -824,6 +858,15 @@ async fn process_client_message(
             Ok(payload) => {
                 if let Err(error) =
                     handle_voice_join(pool, voice_runtime, connection_id, user_id, payload).await
+                {
+                    send_app_error(connection_id, error);
+                }
+            }
+            Err(error) => send_protocol_error(connection_id, error),
+        },
+        ClientOp::VoiceLeave => match parse_voice_leave_payload(envelope.d, &envelope.op) {
+            Ok(payload) => {
+                if let Err(error) = handle_voice_leave(voice_runtime, connection_id, payload).await
                 {
                     send_app_error(connection_id, error);
                 }
@@ -1006,5 +1049,19 @@ mod tests {
         .expect_err("candidate is required");
         assert_eq!(err.code, "VALIDATION_ERROR");
         assert_eq!(err.details["field"], json!("candidate"));
+    }
+
+    #[test]
+    fn parse_voice_leave_payload_requires_non_empty_slugs() {
+        let err = parse_voice_leave_payload(
+            json!({
+                "guild_slug": "guild",
+                "channel_slug": " ",
+            }),
+            "c_voice_leave",
+        )
+        .expect_err("empty channel slug should be rejected");
+        assert_eq!(err.code, "VALIDATION_ERROR");
+        assert_eq!(err.details["field"], json!("channel_slug"));
     }
 }

@@ -22,6 +22,23 @@ const { blockState } = vi.hoisted(() => ({
   },
 }))
 
+const { voiceState } = vi.hoisted(() => ({
+  voiceState: {
+    status: 'connected' as
+      | 'idle'
+      | 'connecting'
+      | 'connected'
+      | 'disconnected'
+      | 'retrying'
+      | 'failed',
+    activateVoiceChannel: vi.fn(),
+    clearActiveChannel: vi.fn(),
+    toggleMute: vi.fn(),
+    toggleDeafen: vi.fn(),
+    disconnect: vi.fn(),
+  },
+}))
+
 const { guildState, channelState, dmState } = vi.hoisted(() => {
   const guildState = {
     version: 0,
@@ -239,6 +256,10 @@ vi.mock('$lib/features/identity/blockStore.svelte', () => ({
   blockState,
 }))
 
+vi.mock('$lib/features/voice/voiceStore.svelte', () => ({
+  voiceState,
+}))
+
 vi.mock('$lib/features/guild/GuildRail.svelte', async () => ({
   default: (await import('./__mocks__/GuildRailMock.svelte')).default,
 }))
@@ -426,6 +447,12 @@ describe('ShellRoute', () => {
     dmState.openOrCreateDm.mockClear()
     blockState.isBlocked.mockReset()
     blockState.isBlocked.mockReturnValue(false)
+    voiceState.status = 'connected'
+    voiceState.activateVoiceChannel.mockClear()
+    voiceState.clearActiveChannel.mockClear()
+    voiceState.toggleMute.mockClear()
+    voiceState.toggleDeafen.mockClear()
+    voiceState.disconnect.mockClear()
   })
 
   it('renders skip link as the first focusable element', async () => {
@@ -620,6 +647,45 @@ describe('ShellRoute', () => {
     } finally {
       textarea.remove()
       unreadSpy.mockRestore()
+    }
+  })
+
+  it('handles global voice shortcuts and prevents default for Ctrl+D', async () => {
+    const props = buildProps()
+    render(ShellRoute, props)
+
+    await fireEvent.keyDown(window, { key: 'm' })
+    await fireEvent.keyDown(window, { key: 'd' })
+
+    const ctrlDisconnect = new KeyboardEvent('keydown', {
+      key: 'd',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    const notCanceled = window.dispatchEvent(ctrlDisconnect)
+
+    expect(voiceState.toggleMute).toHaveBeenCalledTimes(1)
+    expect(voiceState.toggleDeafen).toHaveBeenCalledTimes(1)
+    expect(voiceState.disconnect).toHaveBeenCalledTimes(1)
+    expect(notCanceled).toBe(false)
+  })
+
+  it('ignores voice shortcuts in editable fields', async () => {
+    const props = buildProps()
+    render(ShellRoute, props)
+
+    const textarea = document.createElement('textarea')
+    document.body.append(textarea)
+    try {
+      await fireEvent.keyDown(textarea, { key: 'm' })
+      await fireEvent.keyDown(textarea, { key: 'd' })
+      await fireEvent.keyDown(textarea, { key: 'd', ctrlKey: true })
+      expect(voiceState.toggleMute).not.toHaveBeenCalled()
+      expect(voiceState.toggleDeafen).not.toHaveBeenCalled()
+      expect(voiceState.disconnect).not.toHaveBeenCalled()
+    } finally {
+      textarea.remove()
     }
   })
 

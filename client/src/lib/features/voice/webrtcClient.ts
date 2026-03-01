@@ -10,6 +10,14 @@ export class VoiceWebRtcClient {
 
   private localStream: MediaStream | null = null
 
+  private localAudioTrack: MediaStreamTrack | null = null
+
+  private remoteAudioElements: Set<HTMLAudioElement> = new Set()
+
+  private isMuted = false
+
+  private isDeafened = false
+
   private pendingRemoteCandidates: RTCIceCandidateInit[] = []
 
   constructor(private readonly sendSignal: SendSignal) {}
@@ -55,14 +63,30 @@ export class VoiceWebRtcClient {
     await connection.addIceCandidate(candidate)
   }
 
+  setMuted(isMuted: boolean): void {
+    this.isMuted = isMuted
+    if (this.localAudioTrack) {
+      this.localAudioTrack.enabled = !isMuted
+    }
+  }
+
+  setDeafened(isDeafened: boolean): void {
+    this.isDeafened = isDeafened
+    for (const element of this.remoteAudioElements) {
+      element.muted = isDeafened
+    }
+  }
+
   close(): void {
     if (this.peerConnection) {
       this.peerConnection.onicecandidate = null
       this.peerConnection.onconnectionstatechange = null
+      this.peerConnection.ontrack = null
       this.peerConnection.close()
       this.peerConnection = null
     }
     this.stopLocalStream()
+    this.cleanupRemoteAudio()
     this.pendingRemoteCandidates = []
   }
 
@@ -90,6 +114,11 @@ export class VoiceWebRtcClient {
       if (!sent) {
         onPeerState('failed')
       }
+    }
+    connection.ontrack = (event) => {
+      const [stream] = event.streams
+      if (!stream) return
+      this.attachRemoteStream(stream)
     }
     return connection
   }
@@ -119,6 +148,8 @@ export class VoiceWebRtcClient {
       throw new Error('No microphone audio track available.')
     }
     this.localStream = stream
+    this.localAudioTrack = audioTrack
+    audioTrack.enabled = !this.isMuted
     return audioTrack
   }
 
@@ -128,5 +159,33 @@ export class VoiceWebRtcClient {
       track.stop()
     }
     this.localStream = null
+    this.localAudioTrack = null
+  }
+
+  private attachRemoteStream(stream: MediaStream): void {
+    if (typeof Audio === 'undefined') return
+    for (const existing of this.remoteAudioElements) {
+      if (existing.srcObject === stream) {
+        existing.muted = this.isDeafened
+        return
+      }
+    }
+    const audioElement = new Audio()
+    audioElement.autoplay = true
+    ;(
+      audioElement as HTMLAudioElement & { playsInline?: boolean }
+    ).playsInline = true
+    audioElement.muted = this.isDeafened
+    audioElement.srcObject = stream
+    this.remoteAudioElements.add(audioElement)
+    void audioElement.play().catch(() => {})
+  }
+
+  private cleanupRemoteAudio(): void {
+    for (const element of this.remoteAudioElements) {
+      element.pause()
+      element.srcObject = null
+    }
+    this.remoteAudioElements.clear()
   }
 }

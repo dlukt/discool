@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { wsSend, envelopeListeners, toastState } = vi.hoisted(() => {
   const envelopeListeners = new Set<(envelope: unknown) => void>()
-  const wsSend = vi.fn(() => true)
+  const wsSend = vi.fn(
+    (_op: string, _payload?: Record<string, unknown>) => true,
+  )
   const toastState = {
     show: vi.fn(),
   }
@@ -38,10 +40,10 @@ function emitEnvelope(envelope: unknown): void {
 describe('voiceState', () => {
   beforeEach(() => {
     vi.useFakeTimers()
+    voiceState.clearActiveChannel()
     wsSend.mockReset()
     wsSend.mockReturnValue(true)
     toastState.show.mockReset()
-    voiceState.clearActiveChannel()
   })
 
   afterEach(() => {
@@ -111,5 +113,72 @@ describe('voiceState', () => {
     expect(voiceState.status).toBe('connecting')
     expect(voiceState.statusMessage).toBeNull()
     expect(voiceState.joinLatencyMs).toBeNull()
+  })
+
+  it('enforces deafen implying mute and blocks unmute while deafened', () => {
+    voiceState.activateVoiceChannel('lobby', 'voice-room')
+    voiceState.status = 'connected'
+
+    voiceState.toggleDeafen()
+    expect(voiceState.isDeafened).toBe(true)
+    expect(voiceState.isMuted).toBe(true)
+
+    voiceState.toggleMute()
+    expect(voiceState.isMuted).toBe(true)
+
+    voiceState.toggleDeafen()
+    expect(voiceState.isDeafened).toBe(false)
+    expect(voiceState.isMuted).toBe(true)
+
+    voiceState.toggleMute()
+    expect(voiceState.isMuted).toBe(false)
+  })
+
+  it('sends c_voice_leave and resets voice control state on disconnect', () => {
+    voiceState.activateVoiceChannel('lobby', 'voice-room')
+    voiceState.status = 'connected'
+    voiceState.toggleMute()
+    wsSend.mockClear()
+
+    voiceState.disconnect()
+
+    expect(wsSend).toHaveBeenCalledWith('c_voice_leave', {
+      guild_slug: 'lobby',
+      channel_slug: 'voice-room',
+    })
+    expect(voiceState.status).toBe('idle')
+    expect(voiceState.activeGuildSlug).toBeNull()
+    expect(voiceState.activeChannelSlug).toBeNull()
+    expect(voiceState.isMuted).toBe(false)
+    expect(voiceState.isDeafened).toBe(false)
+
+    voiceState.disconnect()
+    const leaveCalls = wsSend.mock.calls.filter(
+      (call) => call[0] === 'c_voice_leave',
+    )
+    expect(leaveCalls).toHaveLength(1)
+  })
+
+  it('handles disconnected connection-state event without re-sending leave', () => {
+    voiceState.activateVoiceChannel('lobby', 'voice-room')
+    voiceState.status = 'connected'
+    wsSend.mockClear()
+
+    emitEnvelope({
+      op: 'voice_connection_state',
+      d: {
+        guild_slug: 'lobby',
+        channel_slug: 'voice-room',
+        state: 'disconnected',
+      },
+    })
+
+    expect(voiceState.status).toBe('idle')
+    expect(voiceState.activeGuildSlug).toBeNull()
+    expect(voiceState.activeChannelSlug).toBeNull()
+    const leaveCalls = wsSend.mock.calls.filter(
+      (call) => call[0] === 'c_voice_leave',
+    )
+    expect(leaveCalls).toHaveLength(0)
   })
 })

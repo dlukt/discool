@@ -425,6 +425,14 @@ async function navigateUnreadChannel(direction: 'up' | 'down'): Promise<void> {
   await goto(`/${activeGuild}/${nextChannel}`)
 }
 
+function isEditableShortcutTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  if (target.isContentEditable) return true
+  const tagName = target.tagName.toLowerCase()
+  if (tagName === 'input' || tagName === 'textarea') return true
+  return target.closest('[contenteditable="true"]') !== null
+}
+
 onMount(() => {
   syncViewport()
   void dmState.ensureLoaded().catch(() => {})
@@ -459,6 +467,27 @@ onMount(() => {
       openQuickSwitcher()
     }
   }
+  const handleVoiceHotkey = (event: KeyboardEvent) => {
+    if (isEditableShortcutTarget(event.target)) return
+    if (event.altKey || event.metaKey) return
+    if (voiceState.status !== 'connected') return
+    const normalizedKey = event.key.toLowerCase()
+    if (event.ctrlKey && normalizedKey === 'd') {
+      event.preventDefault()
+      voiceState.disconnect()
+      return
+    }
+    if (event.ctrlKey || event.shiftKey) return
+    if (normalizedKey === 'm') {
+      event.preventDefault()
+      voiceState.toggleMute()
+      return
+    }
+    if (normalizedKey === 'd') {
+      event.preventDefault()
+      voiceState.toggleDeafen()
+    }
+  }
   const handleOpenDmIntent = (
     event: Event & { detail?: { userId?: unknown } },
   ) => {
@@ -473,6 +502,7 @@ onMount(() => {
   window.addEventListener('resize', syncViewport)
   window.addEventListener('keydown', handleUnreadHotkey)
   window.addEventListener('keydown', handleQuickSwitcherHotkey)
+  window.addEventListener('keydown', handleVoiceHotkey)
   window.addEventListener(
     'discool:open-dm-intent',
     handleOpenDmIntent as EventListener,
@@ -482,6 +512,7 @@ onMount(() => {
     window.removeEventListener('resize', syncViewport)
     window.removeEventListener('keydown', handleUnreadHotkey)
     window.removeEventListener('keydown', handleQuickSwitcherHotkey)
+    window.removeEventListener('keydown', handleVoiceHotkey)
     window.removeEventListener(
       'discool:open-dm-intent',
       handleOpenDmIntent as EventListener,

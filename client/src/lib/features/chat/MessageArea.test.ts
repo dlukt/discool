@@ -37,8 +37,19 @@ const {
       (
         guildSlug: string,
         channelSlug: string,
-      ) => 'idle' | 'connecting' | 'connected' | 'retrying' | 'failed'
+      ) =>
+        | 'idle'
+        | 'connecting'
+        | 'connected'
+        | 'disconnected'
+        | 'retrying'
+        | 'failed'
     >(() => 'idle'),
+    isMuted: false,
+    isDeafened: false,
+    toggleMute: vi.fn(),
+    toggleDeafen: vi.fn(),
+    disconnect: vi.fn(),
   }
 
   const timelineByChannel: Record<
@@ -383,6 +394,11 @@ describe('MessageArea', () => {
     voiceState.statusMessageForChannel.mockReturnValue(null)
     voiceState.statusForChannel.mockClear()
     voiceState.statusForChannel.mockReturnValue('idle')
+    voiceState.isMuted = false
+    voiceState.isDeafened = false
+    voiceState.toggleMute.mockClear()
+    voiceState.toggleDeafen.mockClear()
+    voiceState.disconnect.mockClear()
     guildState.memberByUserId.mockClear()
     guildState.memberRoleDataForGuild.mockClear()
     guildState.loadMembers.mockClear()
@@ -1023,6 +1039,32 @@ describe('MessageArea', () => {
       'Voice connection failed. Check your network.',
     )
     expect(failedStatus).toHaveAttribute('aria-live', 'assertive')
+  })
+
+  it('renders connected VoiceBar controls and routes control actions', async () => {
+    voiceState.statusForChannel.mockReturnValue('connected')
+    const { getByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    expect(getByTestId('voice-bar')).toBeInTheDocument()
+    expect(getByTestId('voice-bar-quality-dot')).toHaveAttribute(
+      'data-quality',
+      'green',
+    )
+
+    await fireEvent.click(getByTestId('voice-bar-toggle-mute'))
+    await fireEvent.click(getByTestId('voice-bar-toggle-deafen'))
+    await fireEvent.click(getByTestId('voice-bar-disconnect'))
+
+    expect(voiceState.toggleMute).toHaveBeenCalledTimes(1)
+    expect(voiceState.toggleDeafen).toHaveBeenCalledTimes(1)
+    expect(voiceState.disconnect).toHaveBeenCalledTimes(1)
   })
 
   it('shows retry toast when send fails and retries via toast action', async () => {

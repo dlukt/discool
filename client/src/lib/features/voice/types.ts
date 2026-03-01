@@ -2,6 +2,7 @@ export type VoiceConnectionStatus =
   | 'idle'
   | 'connecting'
   | 'connected'
+  | 'disconnected'
   | 'retrying'
   | 'failed'
 
@@ -23,12 +24,7 @@ export type VoiceIceCandidateWire = {
 export type VoiceConnectionStateWire = {
   guild_slug?: string
   channel_slug?: string
-  state?:
-    | VoiceConnectionStatus
-    | 'connecting'
-    | 'connected'
-    | 'retrying'
-    | 'failed'
+  state?: VoiceConnectionStatus
 }
 
 export type VoiceJoinContext = {
