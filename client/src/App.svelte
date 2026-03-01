@@ -7,6 +7,7 @@ import { ApiError, getInstanceStatus, type InstanceStatus } from '$lib/api'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import SetupPage from '$lib/components/SetupPage.svelte'
 import { channelState } from '$lib/features/channel/channelStore.svelte'
+import { dmState } from '$lib/features/dm/dmStore.svelte'
 import {
   getInviteMetadata,
   joinGuildByInvite,
@@ -31,6 +32,7 @@ import { presenceState } from '$lib/features/members/presenceStore.svelte'
 import {
   createAuthenticatedRoutes,
   isPersistableLocation,
+  parsePersistedChannelLocation,
   resolveInitialLocation,
 } from './routes/routes'
 
@@ -257,6 +259,7 @@ $effect(() => {
   if (identityState.session) return
   guildState.clear()
   channelState.clear()
+  dmState.clearAll()
   initialRouteResolved = false
   shellBootstrapping = true
 })
@@ -304,9 +307,9 @@ function handleShellRouteResolved(path: string): void {
   if (!identityState.session) return
   if (!isPersistableLocation(path)) return
   saveLastLocation(path)
-  const locationMatch = path.match(/^\/([^/]+)\/([^/]+)$/)
-  if (!locationMatch?.[1] || !locationMatch?.[2]) return
-  saveLastViewedChannel(locationMatch[1], locationMatch[2])
+  const channelLocation = parsePersistedChannelLocation(path)
+  if (!channelLocation) return
+  saveLastViewedChannel(channelLocation.guild, channelLocation.channel)
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.

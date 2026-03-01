@@ -17,6 +17,7 @@ mod admin;
 mod auth;
 mod categories;
 mod channels;
+mod dms;
 mod guilds;
 mod health;
 mod instance;
@@ -104,6 +105,8 @@ pub fn router(state: AppState) -> Router {
             "/guilds/{guild_slug}/channels/{channel_slug}/messages",
             get(messages::list_messages),
         )
+        .route("/dms", get(dms::list_dms).post(dms::open_dm))
+        .route("/dms/{dm_slug}/messages", get(dms::list_dm_messages))
         .route(
             "/guilds/{guild_slug}/channels/{channel_slug}/messages/attachments",
             post(messages::create_message_attachment),

@@ -573,6 +573,27 @@ async fn register_and_authenticate(addr: &str, username: &str, secret: [u8; 32])
     value["data"]["token"].as_str().unwrap().to_string()
 }
 
+async fn user_id_by_username(pool: &sqlx::SqlitePool, username: &str) -> String {
+    sqlx::query_scalar::<_, String>("SELECT id FROM users WHERE username = ?1")
+        .bind(username)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn add_guild_member(pool: &sqlx::SqlitePool, guild_id: &str, user_id: &str) {
+    sqlx::query(
+        "INSERT OR IGNORE INTO guild_members (guild_id, user_id, joined_at, joined_via_invite_code)
+         VALUES (?1, ?2, ?3, NULL)",
+    )
+    .bind(guild_id)
+    .bind(user_id)
+    .bind("2026-02-28T00:00:00Z")
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 fn write_server_config_with_db_url(
     path: &Path,
     host: &str,
@@ -4520,6 +4541,414 @@ async fn websocket_invalid_client_operation_returns_protocol_error() {
         .expect("expected websocket error event");
     assert_eq!(error_event["d"]["code"], json!("VALIDATION_ERROR"));
     assert_eq!(error_event["d"]["details"]["op"], json!("typing_start"));
+}
+
+#[tokio::test]
+async fn dm_open_requires_shared_guild_membership() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "dm-owner", [141u8; 32]).await;
+    let _peer_token = register_and_authenticate(&addr, "dm-peer", [142u8; 32]).await;
+
+    let url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let owner_user_id = user_id_by_username(&pool, "dm-owner").await;
+    let peer_user_id = user_id_by_username(&pool, "dm-peer").await;
+
+    let open_dm_body = json!({ "user_id": peer_user_id }).to_string();
+    let forbidden = http_post_with_bearer(&addr, "/api/v1/dms", &open_dm_body, &owner_token).await;
+    assert_eq!(response_status(&forbidden), 403);
+    let forbidden_json: serde_json::Value =
+        serde_json::from_str(response_body(&forbidden)).unwrap();
+    assert_eq!(
+        forbidden_json["error"]["message"],
+        json!("Direct messages require a shared guild")
+    );
+
+    let guild_body = json!({ "name": "DM Shared Guild" }).to_string();
+    let guild_res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_id = guild_json["data"]["id"].as_str().unwrap().to_string();
+
+    add_guild_member(&pool, &guild_id, &owner_user_id).await;
+    add_guild_member(&pool, &guild_id, &peer_user_id).await;
+
+    let opened = http_post_with_bearer(&addr, "/api/v1/dms", &open_dm_body, &owner_token).await;
+    assert_eq!(response_status(&opened), 200);
+    let opened_json: serde_json::Value = serde_json::from_str(response_body(&opened)).unwrap();
+    assert!(
+        opened_json["data"]["dm_slug"]
+            .as_str()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false),
+        "expected non-empty dm_slug in open DM response"
+    );
+}
+
+#[tokio::test]
+async fn dm_history_access_is_limited_to_dm_participants() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "dm-history-owner", [151u8; 32]).await;
+    let participant_token =
+        register_and_authenticate(&addr, "dm-history-participant", [152u8; 32]).await;
+    let outsider_token = register_and_authenticate(&addr, "dm-history-outsider", [153u8; 32]).await;
+
+    let url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let owner_user_id = user_id_by_username(&pool, "dm-history-owner").await;
+    let participant_user_id = user_id_by_username(&pool, "dm-history-participant").await;
+
+    let guild_body = json!({ "name": "DM History Guild" }).to_string();
+    let guild_res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_id = guild_json["data"]["id"].as_str().unwrap().to_string();
+    add_guild_member(&pool, &guild_id, &owner_user_id).await;
+    add_guild_member(&pool, &guild_id, &participant_user_id).await;
+
+    let open_dm_body = json!({ "user_id": participant_user_id }).to_string();
+    let opened = http_post_with_bearer(&addr, "/api/v1/dms", &open_dm_body, &owner_token).await;
+    assert_eq!(response_status(&opened), 200);
+    let opened_json: serde_json::Value = serde_json::from_str(response_body(&opened)).unwrap();
+    let dm_slug = opened_json["data"]["dm_slug"].as_str().unwrap().to_string();
+    let history_path = format!("/api/v1/dms/{dm_slug}/messages");
+
+    let participant_history = http_get_with_bearer(&addr, &history_path, &participant_token).await;
+    assert_eq!(response_status(&participant_history), 200);
+    let participant_history_json: serde_json::Value =
+        serde_json::from_str(response_body(&participant_history)).unwrap();
+    assert!(
+        participant_history_json["data"].is_array(),
+        "participant history response should include data array"
+    );
+
+    let outsider_history = http_get_with_bearer(&addr, &history_path, &outsider_token).await;
+    assert_eq!(response_status(&outsider_history), 403);
+    let outsider_json: serde_json::Value =
+        serde_json::from_str(response_body(&outsider_history)).unwrap();
+    assert_eq!(
+        outsider_json["error"]["message"],
+        json!("Only DM participants can access this conversation")
+    );
+}
+
+#[tokio::test]
+async fn dm_message_send_requires_shared_guild_membership() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "dm-send-owner", [156u8; 32]).await;
+    let _participant_token =
+        register_and_authenticate(&addr, "dm-send-participant", [157u8; 32]).await;
+
+    let url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let owner_user_id = user_id_by_username(&pool, "dm-send-owner").await;
+    let participant_user_id = user_id_by_username(&pool, "dm-send-participant").await;
+
+    let guild_body = json!({ "name": "DM Send Guild" }).to_string();
+    let guild_res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_id = guild_json["data"]["id"].as_str().unwrap().to_string();
+    add_guild_member(&pool, &guild_id, &owner_user_id).await;
+    add_guild_member(&pool, &guild_id, &participant_user_id).await;
+
+    let open_dm_body = json!({ "user_id": participant_user_id }).to_string();
+    let opened = http_post_with_bearer(&addr, "/api/v1/dms", &open_dm_body, &owner_token).await;
+    assert_eq!(response_status(&opened), 200);
+    let opened_json: serde_json::Value = serde_json::from_str(response_body(&opened)).unwrap();
+    let dm_slug = opened_json["data"]["dm_slug"].as_str().unwrap().to_string();
+
+    sqlx::query("DELETE FROM guild_members WHERE guild_id = ?1 AND user_id = ?2")
+        .bind(&guild_id)
+        .bind(&participant_user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (mut owner_stream, owner_response) =
+        websocket_connect(&addr, "/ws", Some(&owner_token)).await;
+    assert_eq!(response_status(&owner_response), 101);
+    let _ = websocket_read_json_with_op(&mut owner_stream, "hello", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_dm_message_create",
+            "d": {
+                "dm_slug": dm_slug.as_str(),
+                "content": "still there?"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let error_event = websocket_read_json_with_op(&mut owner_stream, "error", 1_500)
+        .await
+        .expect("message send should fail without shared guild");
+    assert_eq!(error_event["d"]["code"], json!("FORBIDDEN"));
+    assert_eq!(
+        error_event["d"]["message"],
+        json!("Direct messages require a shared guild")
+    );
+}
+
+#[tokio::test]
+async fn websocket_dm_message_fanout_targets_dm_participants_only() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "dm-ws-owner", [161u8; 32]).await;
+    let participant_token =
+        register_and_authenticate(&addr, "dm-ws-participant", [162u8; 32]).await;
+    let outsider_token = register_and_authenticate(&addr, "dm-ws-outsider", [163u8; 32]).await;
+
+    let url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let owner_user_id = user_id_by_username(&pool, "dm-ws-owner").await;
+    let participant_user_id = user_id_by_username(&pool, "dm-ws-participant").await;
+
+    let guild_body = json!({ "name": "DM WS Guild" }).to_string();
+    let guild_res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_id = guild_json["data"]["id"].as_str().unwrap().to_string();
+    add_guild_member(&pool, &guild_id, &owner_user_id).await;
+    add_guild_member(&pool, &guild_id, &participant_user_id).await;
+
+    let open_dm_body = json!({ "user_id": participant_user_id }).to_string();
+    let opened = http_post_with_bearer(&addr, "/api/v1/dms", &open_dm_body, &owner_token).await;
+    assert_eq!(response_status(&opened), 200);
+    let opened_json: serde_json::Value = serde_json::from_str(response_body(&opened)).unwrap();
+    let dm_slug = opened_json["data"]["dm_slug"].as_str().unwrap().to_string();
+
+    let (mut owner_stream, owner_response) =
+        websocket_connect(&addr, "/ws", Some(&owner_token)).await;
+    let (mut participant_stream, participant_response) =
+        websocket_connect(&addr, "/ws", Some(&participant_token)).await;
+    let (mut outsider_stream, outsider_response) =
+        websocket_connect(&addr, "/ws", Some(&outsider_token)).await;
+    assert_eq!(response_status(&owner_response), 101);
+    assert_eq!(response_status(&participant_response), 101);
+    assert_eq!(response_status(&outsider_response), 101);
+    let _ = websocket_read_json_with_op(&mut owner_stream, "hello", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut participant_stream, "hello", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut outsider_stream, "hello", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_dm_subscribe",
+            "d": { "dm_slug": dm_slug.as_str() }
+        })
+        .to_string(),
+    )
+    .await;
+    websocket_send_text_frame(
+        &mut participant_stream,
+        &json!({
+            "op": "c_dm_subscribe",
+            "d": { "dm_slug": dm_slug.as_str() }
+        })
+        .to_string(),
+    )
+    .await;
+    websocket_send_text_frame(
+        &mut outsider_stream,
+        &json!({
+            "op": "c_dm_subscribe",
+            "d": { "dm_slug": dm_slug.as_str() }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let outsider_error = websocket_read_json_with_op(&mut outsider_stream, "error", 1_500)
+        .await
+        .expect("outsider DM subscribe should return error");
+    assert_eq!(outsider_error["d"]["code"], json!("FORBIDDEN"));
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_dm_message_create",
+            "d": {
+                "dm_slug": dm_slug.as_str(),
+                "content": "hello <b>dm</b>",
+                "client_nonce": "dm-nonce-1"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let owner_event = websocket_read_json_with_op(&mut owner_stream, "dm_message_create", 1_500)
+        .await
+        .expect("DM owner should receive dm_message_create");
+    let participant_event =
+        websocket_read_json_with_op(&mut participant_stream, "dm_message_create", 1_500)
+            .await
+            .expect("DM participant should receive dm_message_create");
+    let outsider_event =
+        websocket_read_json_with_op(&mut outsider_stream, "dm_message_create", 700).await;
+
+    assert_eq!(owner_event["d"]["dm_slug"], json!(dm_slug.as_str()));
+    assert_eq!(
+        owner_event["d"]["content"],
+        json!("hello &lt;b&gt;dm&lt;/b&gt;")
+    );
+    assert_eq!(participant_event["d"]["id"], owner_event["d"]["id"]);
+    assert!(
+        outsider_event.is_none(),
+        "non-participant unexpectedly received dm_message_create"
+    );
+}
+
+#[tokio::test]
+async fn websocket_dm_activity_is_emitted_for_non_author_participants() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "dm-activity-owner", [171u8; 32]).await;
+    let participant_token =
+        register_and_authenticate(&addr, "dm-activity-participant", [172u8; 32]).await;
+
+    let url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let owner_user_id = user_id_by_username(&pool, "dm-activity-owner").await;
+    let participant_user_id = user_id_by_username(&pool, "dm-activity-participant").await;
+
+    let guild_body = json!({ "name": "DM Activity Guild" }).to_string();
+    let guild_res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_id = guild_json["data"]["id"].as_str().unwrap().to_string();
+    add_guild_member(&pool, &guild_id, &owner_user_id).await;
+    add_guild_member(&pool, &guild_id, &participant_user_id).await;
+
+    let open_dm_body = json!({ "user_id": participant_user_id }).to_string();
+    let opened = http_post_with_bearer(&addr, "/api/v1/dms", &open_dm_body, &owner_token).await;
+    assert_eq!(response_status(&opened), 200);
+    let opened_json: serde_json::Value = serde_json::from_str(response_body(&opened)).unwrap();
+    let dm_slug = opened_json["data"]["dm_slug"].as_str().unwrap().to_string();
+
+    let (mut owner_stream, owner_response) =
+        websocket_connect(&addr, "/ws", Some(&owner_token)).await;
+    let (mut participant_stream, participant_response) =
+        websocket_connect(&addr, "/ws", Some(&participant_token)).await;
+    assert_eq!(response_status(&owner_response), 101);
+    assert_eq!(response_status(&participant_response), 101);
+    let _ = websocket_read_json_with_op(&mut owner_stream, "hello", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut participant_stream, "hello", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_dm_message_create",
+            "d": {
+                "dm_slug": dm_slug.as_str(),
+                "content": "ping unread"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let activity_event = websocket_read_json_with_op(&mut participant_stream, "dm_activity", 1_500)
+        .await
+        .expect("participant should receive dm_activity event");
+    assert_eq!(activity_event["d"]["dm_slug"], json!(dm_slug.as_str()));
+    assert_eq!(
+        activity_event["d"]["actor_user_id"],
+        json!(owner_user_id.as_str())
+    );
+
+    let owner_activity = websocket_read_json_with_op(&mut owner_stream, "dm_activity", 700).await;
+    assert!(
+        owner_activity.is_none(),
+        "author unexpectedly received dm_activity event"
+    );
 }
 
 #[tokio::test]

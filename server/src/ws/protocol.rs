@@ -3,11 +3,13 @@ use serde_json::{Value, json};
 
 pub const PROTOCOL_VERSION: &str = "1";
 
-pub const STORY_6_1_SERVER_EVENTS: [&str; 9] = [
+pub const STORY_6_1_SERVER_EVENTS: [&str; 11] = [
     "message_create",
     "message_update",
     "message_delete",
     "message_reaction_update",
+    "dm_message_create",
+    "dm_activity",
     "typing_start",
     "channel_activity",
     "presence_update",
@@ -45,6 +47,8 @@ pub enum ServerOp {
     MessageUpdate,
     MessageDelete,
     MessageReactionUpdate,
+    DmMessageCreate,
+    DmActivity,
     TypingStart,
     ChannelActivity,
     GuildUpdate,
@@ -63,6 +67,8 @@ impl ServerOp {
             ServerOp::MessageUpdate => "message_update",
             ServerOp::MessageDelete => "message_delete",
             ServerOp::MessageReactionUpdate => "message_reaction_update",
+            ServerOp::DmMessageCreate => "dm_message_create",
+            ServerOp::DmActivity => "dm_activity",
             ServerOp::TypingStart => "typing_start",
             ServerOp::ChannelActivity => "channel_activity",
             ServerOp::GuildUpdate => "guild_update",
@@ -80,6 +86,8 @@ pub enum ClientOp {
     MessageUpdate,
     MessageDelete,
     MessageReactionToggle,
+    DmSubscribe,
+    DmMessageCreate,
     TypingStart,
     Resume,
 }
@@ -133,6 +141,8 @@ pub fn parse_client_op(op: &str) -> Result<ClientOp, ProtocolError> {
         "c_message_update" => Ok(ClientOp::MessageUpdate),
         "c_message_delete" => Ok(ClientOp::MessageDelete),
         "c_message_reaction_toggle" => Ok(ClientOp::MessageReactionToggle),
+        "c_dm_subscribe" => Ok(ClientOp::DmSubscribe),
+        "c_dm_message_create" => Ok(ClientOp::DmMessageCreate),
         "c_typing_start" => Ok(ClientOp::TypingStart),
         "c_resume" => Ok(ClientOp::Resume),
         _ => {
@@ -172,6 +182,14 @@ mod tests {
         assert_eq!(
             parse_client_op("c_message_reaction_toggle").unwrap(),
             ClientOp::MessageReactionToggle
+        );
+        assert_eq!(
+            parse_client_op("c_dm_subscribe").unwrap(),
+            ClientOp::DmSubscribe
+        );
+        assert_eq!(
+            parse_client_op("c_dm_message_create").unwrap(),
+            ClientOp::DmMessageCreate
         );
         assert_eq!(
             parse_client_op("c_typing_start").unwrap(),

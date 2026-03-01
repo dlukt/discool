@@ -64,6 +64,48 @@ const historyApiMock = vi.hoisted(() => {
       }>
       cursor: string | null
     }>,
+    dmResponses: [] as Array<{
+      messages: Array<{
+        id: string
+        guildSlug: string
+        channelSlug: string
+        dmSlug?: string | null
+        authorUserId: string
+        authorUsername: string
+        authorDisplayName: string
+        authorAvatarColor: string | null
+        authorRoleColor: string
+        content: string
+        isSystem: boolean
+        createdAt: string
+        updatedAt: string
+        optimistic: boolean
+        clientNonce?: string
+        attachments: Array<{
+          id: string
+          storageKey: string
+          originalFilename: string
+          mimeType: string
+          sizeBytes: number
+          isImage: boolean
+          url: string
+        }>
+        reactions: Array<{
+          emoji: string
+          count: number
+          reacted: boolean
+        }>
+        embeds: Array<{
+          id: string
+          url: string
+          domain: string
+          title: string | null
+          description: string | null
+          thumbnailUrl: string | null
+        }>
+      }>
+      cursor: string | null
+    }>,
     uploadResult: null as {
       id: string
       guildSlug: string
@@ -107,6 +149,9 @@ const historyApiMock = vi.hoisted(() => {
   const fetchChannelHistory = vi.fn(async () => {
     return state.responses.shift() ?? { messages: [], cursor: null }
   })
+  const fetchDmHistory = vi.fn(async () => {
+    return state.dmResponses.shift() ?? { messages: [], cursor: null }
+  })
   const uploadMessageAttachment = vi.fn(async () => {
     if (!state.uploadResult) {
       throw new Error('uploadResult not configured')
@@ -114,7 +159,7 @@ const historyApiMock = vi.hoisted(() => {
     return state.uploadResult
   })
 
-  return { state, fetchChannelHistory, uploadMessageAttachment }
+  return { state, fetchChannelHistory, fetchDmHistory, uploadMessageAttachment }
 })
 
 const channelStoreMock = vi.hoisted(() => {
@@ -171,6 +216,15 @@ const guildStoreMock = vi.hoisted(() => {
   return { state, guildState }
 })
 
+const dmStoreMock = vi.hoisted(() => {
+  const dmState = {
+    setDmUnreadActivity: vi.fn(),
+    noteMessageActivity: vi.fn(),
+    setActiveDm: vi.fn(),
+  }
+  return { dmState }
+})
+
 vi.mock('$lib/ws/client', () => ({
   wsClient: wsMock.wsClient,
 }))
@@ -180,12 +234,20 @@ vi.mock('./messageApi', () => ({
   uploadMessageAttachment: historyApiMock.uploadMessageAttachment,
 }))
 
+vi.mock('$lib/features/dm/dmApi', () => ({
+  fetchDmHistory: historyApiMock.fetchDmHistory,
+}))
+
 vi.mock('$lib/features/channel/channelStore.svelte', () => ({
   channelState: channelStoreMock.channelState,
 }))
 
 vi.mock('$lib/features/guild/guildStore.svelte', () => ({
   guildState: guildStoreMock.guildState,
+}))
+
+vi.mock('$lib/features/dm/dmStore.svelte', () => ({
+  dmState: dmStoreMock.dmState,
 }))
 
 import { messageState } from './messageStore.svelte'
@@ -211,14 +273,25 @@ function makeMessage(id: string, createdAt: string) {
   }
 }
 
+function makeDmMessage(id: string, createdAt: string, dmSlug = 'dm-1') {
+  return {
+    ...makeMessage(id, createdAt),
+    guildSlug: '',
+    channelSlug: '',
+    dmSlug,
+  }
+}
+
 describe('messageState', () => {
   beforeEach(() => {
     messageState.clearAll()
     wsMock.state.sendResult = true
     wsMock.wsClient.send.mockClear()
     historyApiMock.fetchChannelHistory.mockClear()
+    historyApiMock.fetchDmHistory.mockClear()
     historyApiMock.uploadMessageAttachment.mockClear()
     historyApiMock.state.responses = []
+    historyApiMock.state.dmResponses = []
     historyApiMock.state.uploadResult = null
     channelStoreMock.state.byGuild = {
       lobby: [{ slug: 'general' }, { slug: 'random' }],
@@ -228,6 +301,9 @@ describe('messageState', () => {
     channelStoreMock.channelState.orderedChannelsForGuild.mockClear()
     guildStoreMock.state.unreadByGuild = {}
     guildStoreMock.guildState.setGuildUnreadActivity.mockClear()
+    dmStoreMock.dmState.setDmUnreadActivity.mockClear()
+    dmStoreMock.dmState.noteMessageActivity.mockClear()
+    dmStoreMock.dmState.setActiveDm.mockClear()
   })
 
   it('creates optimistic message and reconciles when message_create arrives', () => {
@@ -635,5 +711,110 @@ describe('messageState', () => {
     expect(timeline[0]?.reactions).toEqual([
       { emoji: '🎉', count: 3, reacted: true },
     ])
+  })
+
+  it('creates optimistic DM message and reconciles on dm_message_create', () => {
+    messageState.setCurrentUser('user-1')
+    messageState.setActiveDm('dm-1')
+
+    const sent = messageState.sendDmMessage('dm-1', 'hello dm', {
+      userId: 'user-1',
+      username: 'alice',
+      displayName: 'Alice',
+      avatarColor: '#3366ff',
+      roleColor: '#3366ff',
+    })
+
+    expect(sent).toBe(true)
+    expect(wsMock.wsClient.send).toHaveBeenCalledWith(
+      'c_dm_message_create',
+      expect.objectContaining({
+        dm_slug: 'dm-1',
+        content: 'hello dm',
+      }),
+    )
+    expect(messageState.timelineForDm('dm-1')).toHaveLength(1)
+    expect(messageState.timelineForDm('dm-1')[0]?.optimistic).toBe(true)
+
+    const payload = wsMock.wsClient.send.mock.calls.find(
+      (call) => call[0] === 'c_dm_message_create',
+    )?.[1] as { client_nonce: string }
+
+    wsMock.state.listener?.({
+      op: 'dm_message_create',
+      d: {
+        id: 'dm-msg-1',
+        dm_slug: 'dm-1',
+        author_user_id: 'user-1',
+        author_username: 'alice',
+        author_display_name: 'Alice',
+        content: 'hello dm',
+        is_system: false,
+        created_at: '2026-02-28T00:00:00Z',
+        updated_at: '2026-02-28T00:00:00Z',
+        client_nonce: payload.client_nonce,
+      },
+    })
+
+    const reconciled = messageState.timelineForDm('dm-1')
+    expect(reconciled).toHaveLength(1)
+    expect(reconciled[0]?.id).toBe('dm-msg-1')
+    expect(reconciled[0]?.optimistic).toBe(false)
+    expect(dmStoreMock.dmState.noteMessageActivity).toHaveBeenCalled()
+  })
+
+  it('loads DM history pages with cursor state', async () => {
+    historyApiMock.state.dmResponses = [
+      {
+        messages: [makeDmMessage('dm-msg-2', '2026-02-28T00:00:02Z')],
+        cursor: 'dm-cursor-1',
+      },
+      {
+        messages: [makeDmMessage('dm-msg-1', '2026-02-28T00:00:01Z')],
+        cursor: null,
+      },
+    ]
+
+    await messageState.ensureDmHistoryLoaded('dm-1')
+    expect(historyApiMock.fetchDmHistory).toHaveBeenCalledWith('dm-1', {
+      limit: 50,
+    })
+    expect(
+      messageState.timelineForDm('dm-1').map((message) => message.id),
+    ).toEqual(['dm-msg-2'])
+    expect(messageState.historyStateForDm('dm-1').cursor).toBe('dm-cursor-1')
+
+    await messageState.loadOlderDmHistory('dm-1')
+    expect(historyApiMock.fetchDmHistory).toHaveBeenLastCalledWith('dm-1', {
+      limit: 50,
+      before: 'dm-cursor-1',
+    })
+    expect(
+      messageState.timelineForDm('dm-1').map((message) => message.id),
+    ).toEqual(['dm-msg-1', 'dm-msg-2'])
+    expect(messageState.historyStateForDm('dm-1').hasMoreHistory).toBe(false)
+  })
+
+  it('marks DM unread activity only for inactive DM conversations', () => {
+    messageState.setActiveDm('dm-1')
+
+    wsMock.state.listener?.({
+      op: 'dm_activity',
+      d: {
+        dm_slug: 'dm-1',
+      },
+    })
+    expect(dmStoreMock.dmState.setDmUnreadActivity).not.toHaveBeenCalled()
+
+    wsMock.state.listener?.({
+      op: 'dm_activity',
+      d: {
+        dm_slug: 'dm-2',
+      },
+    })
+    expect(dmStoreMock.dmState.setDmUnreadActivity).toHaveBeenCalledWith(
+      'dm-2',
+      true,
+    )
   })
 })

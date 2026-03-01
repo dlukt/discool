@@ -1,0 +1,13 @@
+<script lang="ts">
+// biome-ignore-all lint/correctness/noUnusedVariables: Svelte template usage isn't detected reliably.
+type Props = {
+  activeGuild: string
+}
+
+let { activeGuild }: Props = $props()
+</script>
+
+<aside data-testid="member-list">
+  <h2>Members</h2>
+  <span>{activeGuild}</span>
+</aside>

@@ -54,6 +54,7 @@ export type ChatMessage = {
   id: string
   guildSlug: string
   channelSlug: string
+  dmSlug?: string | null
   authorUserId: string
   authorUsername: string
   authorDisplayName: string
@@ -72,8 +73,9 @@ export type ChatMessage = {
 
 export type ChatMessageWire = {
   id: string
-  guild_slug: string
-  channel_slug: string
+  guild_slug?: string
+  channel_slug?: string
+  dm_slug?: string
   author_user_id: string
   author_username: string
   author_display_name: string
@@ -189,10 +191,17 @@ export function toChatMessageEmbeds(
 }
 
 export function toChatMessage(wire: ChatMessageWire): ChatMessage {
+  const dmSlug =
+    typeof wire.dm_slug === 'string' && wire.dm_slug.trim().length > 0
+      ? wire.dm_slug.trim()
+      : null
   return {
     id: wire.id,
-    guildSlug: wire.guild_slug,
-    channelSlug: wire.channel_slug,
+    guildSlug:
+      typeof wire.guild_slug === 'string' ? wire.guild_slug.trim() : '',
+    channelSlug:
+      typeof wire.channel_slug === 'string' ? wire.channel_slug.trim() : '',
+    dmSlug,
     authorUserId: wire.author_user_id,
     authorUsername: wire.author_username,
     authorDisplayName: wire.author_display_name || wire.author_username,

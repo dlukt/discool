@@ -9,6 +9,7 @@ import {
 describe('routes', () => {
   it('restores last persisted guild/channel path from root', () => {
     expect(resolveInitialLocation('/', '/lobby/general')).toBe('/lobby/general')
+    expect(resolveInitialLocation('/', '/dm/abc123')).toBe('/dm/abc123')
   })
 
   it('ignores non-persistable targets for restore', () => {
@@ -25,6 +26,7 @@ describe('routes', () => {
 
   it('only persists guild/channel locations', () => {
     expect(isPersistableLocation('/lobby/general')).toBe(true)
+    expect(isPersistableLocation('/dm/abc123')).toBe(true)
     expect(isPersistableLocation('/')).toBe(false)
     expect(isPersistableLocation('/settings')).toBe(false)
     expect(isPersistableLocation('/admin')).toBe(false)
@@ -39,5 +41,6 @@ describe('routes', () => {
     expect(adminRoutes.some((route) => route.path === '/:guild/:channel')).toBe(
       true,
     )
+    expect(adminRoutes.some((route) => route.path === '/dm/:dm')).toBe(true)
   })
 })

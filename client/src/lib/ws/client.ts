@@ -40,6 +40,8 @@ class SharedWsClient {
 
   private subscribedChannel: string | null = null
 
+  private subscribedDm: string | null = null
+
   getLifecycleState(): WsLifecycleState {
     return this.lifecycleState
   }
@@ -86,6 +88,7 @@ class SharedWsClient {
     this.token = null
     this.subscribedGuild = null
     this.subscribedChannel = null
+    this.subscribedDm = null
     this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS
     this.clearReconnectTimer()
     this.clearHeartbeatTimer()
@@ -123,6 +126,14 @@ class SharedWsClient {
         channel_slug: nextChannel,
       })
     }
+  }
+
+  setDmSubscription(dmSlug: string | null): void {
+    const nextDmSlug = dmSlug?.trim() || null
+    if (this.subscribedDm === nextDmSlug) return
+    this.subscribedDm = nextDmSlug
+    if (!this.isSocketOpen()) return
+    this.send('c_dm_subscribe', { dm_slug: nextDmSlug })
   }
 
   send(op: WsClientOp, d: Record<string, unknown> = {}): boolean {
@@ -184,11 +195,13 @@ class SharedWsClient {
   }
 
   private syncSubscription(): void {
-    if (!this.subscribedGuild) return
-    this.send('c_subscribe', {
-      guild_slug: this.subscribedGuild,
-      channel_slug: this.subscribedChannel,
-    })
+    if (this.subscribedGuild) {
+      this.send('c_subscribe', {
+        guild_slug: this.subscribedGuild,
+        channel_slug: this.subscribedChannel,
+      })
+    }
+    this.send('c_dm_subscribe', { dm_slug: this.subscribedDm })
   }
 
   private scheduleReconnect(): void {

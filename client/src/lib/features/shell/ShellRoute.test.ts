@@ -16,6 +16,161 @@ const { wsLifecycleState, lifecycleListeners } = vi.hoisted(() => ({
   lifecycleListeners: new Set<(state: MockLifecycle) => void>(),
 }))
 
+const { guildState, channelState, dmState } = vi.hoisted(() => {
+  const guildState = {
+    version: 0,
+    guilds: [
+      {
+        id: 'guild-1',
+        slug: 'lobby',
+        name: 'Lobby',
+        defaultChannelSlug: 'general',
+        lastViewedChannelSlug: 'general',
+      },
+    ],
+    bySlug: vi.fn(
+      (slug: string) =>
+        guildState.guilds.find((guild) => guild.slug === slug) ?? null,
+    ),
+    loadGuilds: vi.fn(async () => guildState.guilds),
+    hasUnreadActivity: vi.fn(() => false),
+    memberRoleDataForGuild: vi.fn(() => ({
+      members: [
+        {
+          userId: 'user-1',
+          username: 'darko',
+          displayName: 'Darko',
+          roleIds: ['role-everyone'],
+          isOwner: true,
+          presenceStatus: 'online',
+        },
+      ],
+      roles: [
+        {
+          id: 'role-everyone',
+          name: '@everyone',
+          color: '#94a3b8',
+          position: 0,
+          isDefault: true,
+          permissionsBitflag: Number.MAX_SAFE_INTEGER,
+        },
+      ],
+      assignableRoleIds: [] as string[],
+    })),
+    loadMembers: vi.fn(async () => undefined),
+    updateMemberRoles: vi.fn(async () => ({
+      members: [],
+      roles: [],
+      assignableRoleIds: [],
+    })),
+    memberByUserId: vi.fn(() => null),
+    roleNameForMember: vi.fn(() => null),
+  }
+
+  const channelState = {
+    activeGuild: 'lobby',
+    loading: false,
+    channels: [
+      {
+        id: 'channel-general',
+        guildId: 'guild-1',
+        slug: 'general',
+        name: 'general',
+        topic: null,
+        kind: 'text',
+        position: 0,
+        categorySlug: null,
+        isDefault: true,
+      },
+      {
+        id: 'channel-random',
+        guildId: 'guild-1',
+        slug: 'random',
+        name: 'random',
+        topic: null,
+        kind: 'text',
+        position: 1,
+        categorySlug: null,
+        isDefault: false,
+      },
+    ],
+    categories: [] as Array<{ slug: string; name: string; position: number }>,
+    orderedChannelsForGuild: vi.fn((guildSlug: string) => {
+      if (guildSlug !== 'lobby') return []
+      return channelState.channels
+    }),
+    loadChannels: vi.fn(async (guildSlug: string) => {
+      channelState.activeGuild = guildSlug
+      return channelState.channels
+    }),
+    noteMessageActivity: vi.fn(),
+    setChannelUnreadActivity: vi.fn(),
+    createChannel: vi.fn(async () => channelState.channels[0]),
+    createCategory: vi.fn(async () => ({
+      slug: 'new-category',
+      name: 'New Category',
+      position: 0,
+    })),
+    updateChannel: vi.fn(async () => channelState.channels[0]),
+    updateCategory: vi.fn(async () => ({
+      slug: 'updated-category',
+      name: 'Updated Category',
+      position: 0,
+    })),
+    deleteChannel: vi.fn(async () => null),
+    deleteCategory: vi.fn(async () => undefined),
+    loadChannelPermissionOverrides: vi.fn(async () => ({
+      overrides: [],
+      roles: [],
+    })),
+    deleteChannelPermissionOverride: vi.fn(async () => undefined),
+    upsertChannelPermissionOverride: vi.fn(async () => ({
+      allowBitflag: 0,
+      denyBitflag: 0,
+    })),
+    moveChannel: vi.fn(async () => undefined),
+    reorderCategories: vi.fn(async () => undefined),
+    setCategoryCollapsed: vi.fn(async () => undefined),
+  }
+
+  const dmState = {
+    version: 0,
+    conversations: [] as Array<{
+      dmSlug: string
+      participant: {
+        userId: string
+        username: string
+        displayName: string
+        avatarColor: string | null
+      }
+      createdAt: string
+      updatedAt: string
+      lastMessagePreview: string | null
+      lastMessageAt: string | null
+      hasUnreadActivity: boolean
+    }>,
+    ensureLoaded: vi.fn(async () => {}),
+    openOrCreateDm: vi.fn(async () => ({
+      dmSlug: 'dm-1',
+      participant: {
+        userId: 'user-2',
+        username: 'bob',
+        displayName: 'Bob',
+        avatarColor: '#22aa88',
+      },
+      createdAt: '2026-02-28T00:00:00Z',
+      updatedAt: '2026-02-28T00:00:00Z',
+      lastMessagePreview: null,
+      lastMessageAt: null,
+      hasUnreadActivity: false,
+    })),
+    setActiveDm: vi.fn(),
+    hasUnreadActivity: vi.fn(() => false),
+  }
+
+  return { guildState, channelState, dmState }
+})
+
 vi.mock('@mateothegreat/svelte5-router', () => ({
   goto: routerGoto,
   route: vi.fn(() => () => {}),
@@ -37,11 +192,39 @@ vi.mock('$lib/ws/client', () => ({
   },
 }))
 
+vi.mock('$lib/features/guild/guildStore.svelte', () => ({
+  guildState,
+}))
+
+vi.mock('$lib/features/channel/channelStore.svelte', () => ({
+  channelState,
+}))
+
+vi.mock('$lib/features/dm/dmStore.svelte', () => ({
+  dmState,
+}))
+
+vi.mock('$lib/features/guild/GuildRail.svelte', async () => ({
+  default: (await import('./__mocks__/GuildRailMock.svelte')).default,
+}))
+
+vi.mock('$lib/features/channel/ChannelList.svelte', async () => ({
+  default: (await import('./__mocks__/ChannelListMock.svelte')).default,
+}))
+
+vi.mock('$lib/features/chat/MessageArea.svelte', async () => ({
+  default: (await import('./__mocks__/MessageAreaMock.svelte')).default,
+}))
+
+vi.mock('$lib/features/members/MemberList.svelte', async () => ({
+  default: (await import('./__mocks__/MemberListMock.svelte')).default,
+}))
+
 import { messageState } from '$lib/features/chat/messageStore.svelte'
 import ShellRoute from './ShellRoute.svelte'
 
 type RenderProps = {
-  mode: 'home' | 'channel' | 'settings' | 'admin'
+  mode: 'home' | 'channel' | 'dm' | 'settings' | 'admin'
   route: {
     result: {
       path: {
@@ -123,6 +306,9 @@ describe('ShellRoute', () => {
     wsLifecycleState.value = 'disconnected'
     lifecycleListeners.clear()
     routerGoto.mockClear()
+    dmState.conversations = []
+    dmState.ensureLoaded.mockClear()
+    dmState.openOrCreateDm.mockClear()
   })
 
   it('renders skip link as the first focusable element', async () => {
@@ -318,5 +504,54 @@ describe('ShellRoute', () => {
       textarea.remove()
       unreadSpy.mockRestore()
     }
+  })
+
+  it('opens DM route from member-list DM intent events', async () => {
+    const props = buildProps()
+    render(ShellRoute, props)
+
+    window.dispatchEvent(
+      new CustomEvent('discool:open-dm-intent', {
+        detail: { guildSlug: 'lobby', userId: 'user-2' },
+      }),
+    )
+
+    await waitFor(() => {
+      expect(dmState.openOrCreateDm).toHaveBeenCalledWith('user-2')
+      expect(routerGoto).toHaveBeenCalledWith('/dm/dm-1')
+    })
+  })
+
+  it('includes DM conversations in Ctrl+K quick switcher results', async () => {
+    dmState.conversations = [
+      {
+        dmSlug: 'dm-1',
+        participant: {
+          userId: 'user-2',
+          username: 'bob',
+          displayName: 'Bob',
+          avatarColor: '#22aa88',
+        },
+        createdAt: '2026-02-28T00:00:00Z',
+        updatedAt: '2026-02-28T00:00:00Z',
+        lastMessagePreview: 'Hello',
+        lastMessageAt: '2026-02-28T00:00:00Z',
+        hasUnreadActivity: false,
+      },
+    ]
+    const props = buildProps()
+    const view = render(ShellRoute, props)
+
+    await fireEvent.keyDown(window, { key: 'k', ctrlKey: true })
+    await waitFor(() => {
+      expect(view.getByTestId('quick-switcher')).toBeInTheDocument()
+    })
+    const dmResult = view.getByTestId('quick-switcher-result-dm:dm-1')
+    expect(dmResult).toHaveTextContent('Bob')
+
+    await fireEvent.click(dmResult)
+    await waitFor(() => {
+      expect(routerGoto).toHaveBeenCalledWith('/dm/dm-1')
+    })
   })
 })

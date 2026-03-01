@@ -19,6 +19,8 @@ export type WsClientOp =
   | 'c_message_update'
   | 'c_message_delete'
   | 'c_message_reaction_toggle'
+  | 'c_dm_subscribe'
+  | 'c_dm_message_create'
   | 'c_typing_start'
   | 'c_resume'
 

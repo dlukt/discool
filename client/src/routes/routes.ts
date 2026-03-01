@@ -1,6 +1,9 @@
 import type { RouteConfig } from '@mateothegreat/svelte5-router'
 
-export type ShellMode = 'home' | 'channel' | 'settings' | 'admin'
+export type ShellMode = 'home' | 'channel' | 'dm' | 'settings' | 'admin'
+
+const CHANNEL_LOCATION_RE = /^\/(?!dm\/)([^/]+)\/([^/]+)$/
+const DM_LOCATION_RE = /^\/dm\/[^/]+$/
 
 const shellComponent = () => import('$lib/features/shell/ShellRoute.svelte')
 
@@ -19,7 +22,8 @@ export function isPersistableLocation(path: string): boolean {
   ) {
     return false
   }
-  return /^\/[^/]+\/[^/]+$/.test(normalizedPath)
+  if (DM_LOCATION_RE.test(normalizedPath)) return true
+  return CHANNEL_LOCATION_RE.test(normalizedPath)
 }
 
 export function resolveInitialLocation(
@@ -43,9 +47,22 @@ function shellRoute(path: RouteConfig['path'], mode: ShellMode): RouteConfig {
   }
 }
 
+export function parsePersistedChannelLocation(
+  path: string,
+): { guild: string; channel: string } | null {
+  const normalizedPath = normalizePath(path)
+  const match = normalizedPath.match(CHANNEL_LOCATION_RE)
+  if (!match?.[1] || !match?.[2]) return null
+  return {
+    guild: match[1],
+    channel: match[2],
+  }
+}
+
 export function createAuthenticatedRoutes(isAdmin: boolean): RouteConfig[] {
   const routes = [
     shellRoute('/settings', 'settings'),
+    shellRoute('/dm/:dm', 'dm'),
     shellRoute('/:guild/:channel', 'channel'),
     shellRoute(/^\/$/, 'home'),
     shellRoute(/^\/(?<fallback>.*)$/, 'home'),

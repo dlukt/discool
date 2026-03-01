@@ -1,7 +1,7 @@
 import { fireEvent, render, waitFor } from '@testing-library/svelte'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { getLastViewedChannel, goto, guildState } = vi.hoisted(() => {
+const { getLastViewedChannel, goto, guildState, dmState } = vi.hoisted(() => {
   const getLastViewedChannel = vi.fn(
     (_guildSlug: string) => null as string | null,
   )
@@ -23,7 +23,26 @@ const { getLastViewedChannel, goto, guildState } = vi.hoisted(() => {
     createGuild: vi.fn(),
     setGuildOrder: vi.fn(),
   }
-  return { getLastViewedChannel, goto, guildState }
+  const dmState = {
+    version: 0,
+    conversations: [] as Array<{
+      dmSlug: string
+      participant: {
+        userId: string
+        username: string
+        displayName: string
+        avatarColor: string | null
+      }
+      createdAt: string
+      updatedAt: string
+      lastMessagePreview: string | null
+      lastMessageAt: string | null
+      hasUnreadActivity: boolean
+    }>,
+    ensureLoaded: vi.fn(),
+    hasUnreadActivity: vi.fn(() => false),
+  }
+  return { getLastViewedChannel, goto, guildState, dmState }
 })
 
 vi.mock('@mateothegreat/svelte5-router', () => ({
@@ -37,6 +56,10 @@ vi.mock('$lib/features/identity/navigationState', () => ({
 
 vi.mock('./guildStore.svelte', () => ({
   guildState,
+}))
+
+vi.mock('$lib/features/dm/dmStore.svelte', () => ({
+  dmState,
 }))
 
 import GuildRail from './GuildRail.svelte'
@@ -73,12 +96,17 @@ describe('GuildRail', () => {
       isOwner: true,
       createdAt: '2026-02-28T00:00:00.000Z',
     })
+    dmState.hasUnreadActivity.mockReturnValue(false)
+    dmState.conversations = []
+    dmState.ensureLoaded.mockResolvedValue(undefined)
   })
 
   it('opens create dialog and validates required name on blur', async () => {
     const { getByLabelText, findByText } = render(GuildRail, {
       activeGuild: 'lobby',
       activeChannel: 'general',
+      activeDm: null,
+      mode: 'channel',
     })
 
     await fireEvent.click(getByLabelText('Create guild'))
@@ -93,6 +121,8 @@ describe('GuildRail', () => {
     const { getByLabelText, getByRole } = render(GuildRail, {
       activeGuild: 'lobby',
       activeChannel: 'general',
+      activeDm: null,
+      mode: 'channel',
     })
 
     await fireEvent.click(getByLabelText('Create guild'))
@@ -116,6 +146,8 @@ describe('GuildRail', () => {
     const { getByRole, getByTestId } = render(GuildRail, {
       activeGuild: 'lobby',
       activeChannel: 'general',
+      activeDm: null,
+      mode: 'channel',
     })
 
     expect(getByRole('button', { name: 'Home' })).toBeInTheDocument()
@@ -135,6 +167,8 @@ describe('GuildRail', () => {
     const { getByRole } = render(GuildRail, {
       activeGuild: 'lobby',
       activeChannel: 'general',
+      activeDm: null,
+      mode: 'channel',
     })
 
     await fireEvent.click(getByRole('button', { name: 'Makers Hub' }))
@@ -148,6 +182,8 @@ describe('GuildRail', () => {
     const { getByRole } = render(GuildRail, {
       activeGuild: 'lobby',
       activeChannel: 'general',
+      activeDm: null,
+      mode: 'channel',
     })
 
     const lobbyButton = getByRole('button', { name: 'Lobby' })
@@ -168,5 +204,34 @@ describe('GuildRail', () => {
       'makers-hub',
       'lobby',
     ])
+  })
+
+  it('renders DM list and unread badge when home mode is active', () => {
+    dmState.hasUnreadActivity.mockReturnValue(true)
+    dmState.conversations = [
+      {
+        dmSlug: 'dm-1',
+        participant: {
+          userId: 'user-2',
+          username: 'bob',
+          displayName: 'Bob',
+          avatarColor: '#22aa88',
+        },
+        createdAt: '2026-02-28T00:00:00Z',
+        updatedAt: '2026-02-28T00:00:10Z',
+        lastMessagePreview: 'Hello',
+        lastMessageAt: '2026-02-28T00:00:10Z',
+        hasUnreadActivity: true,
+      },
+    ]
+    const { getByTestId } = render(GuildRail, {
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      activeDm: 'dm-1',
+      mode: 'home',
+    })
+
+    expect(getByTestId('home-dm-unread-badge')).toBeInTheDocument()
+    expect(getByTestId('dm-list')).toBeInTheDocument()
   })
 })

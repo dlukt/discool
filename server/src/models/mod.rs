@@ -1,6 +1,8 @@
 pub mod category;
 pub mod channel;
 pub mod channel_permission_override;
+pub mod dm_channel;
+pub mod dm_message;
 pub mod guild;
 pub mod guild_invite;
 pub mod guild_member;

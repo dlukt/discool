@@ -1,8 +1,12 @@
 <script lang="ts">
+// biome-ignore-all lint/correctness/noUnusedVariables: Svelte template usage isn't detected reliably.
 import { goto } from '@mateothegreat/svelte5-router'
 import { onMount } from 'svelte'
 
 import { ApiError } from '$lib/api'
+// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
+import DMList from '$lib/features/dm/DMList.svelte'
+import { dmState } from '$lib/features/dm/dmStore.svelte'
 import { getLastViewedChannel } from '$lib/features/identity/navigationState'
 
 import { guildState } from './guildStore.svelte'
@@ -14,31 +18,34 @@ const allowedIconTypes = new Set(['image/png', 'image/jpeg', 'image/webp'])
 type Props = {
   activeGuild: string
   activeChannel: string
+  activeDm: string | null
+  mode: 'home' | 'channel' | 'dm' | 'settings' | 'admin'
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
-let { activeGuild, activeChannel }: Props = $props()
+let { activeGuild, activeChannel, activeDm, mode }: Props = $props()
 
 let guilds = $derived(guildState.guilds)
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let createDialogOpen = $state(false)
 let createName = $state('')
 let createNameError = $state<string | null>(null)
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let createError = $state<string | null>(null)
 let createSubmitting = $state(false)
 let selectedIcon = $state<File | null>(null)
 let iconError = $state<string | null>(null)
 let failedIcons = $state<Record<string, boolean>>({})
 let draggedGuildSlug = $state<string | null>(null)
+let hasUnreadDms = $derived(dmState.hasUnreadActivity())
+let showDmList = $derived(mode === 'home')
 
 onMount(() => {
   void guildState.loadGuilds().catch(() => {
     // errors are surfaced in the create form or other shell views; rail can remain usable.
   })
+  void dmState.ensureLoaded().catch(() => {
+    // DM list remains optional if loading fails.
+  })
 })
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 function initials(value: string): string {
   const trimmed = value.trim()
   if (!trimmed) return '?'
@@ -52,7 +59,6 @@ function validateGuildName(value: string): string | null {
   return null
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 function openCreateDialog() {
   createDialogOpen = true
   createName = ''
@@ -66,12 +72,10 @@ function closeCreateDialog() {
   createDialogOpen = false
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 function onCreateNameBlur() {
   createNameError = validateGuildName(createName)
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 function onIconChange(event: Event) {
   iconError = null
   const input = event.currentTarget as HTMLInputElement | null
@@ -96,7 +100,6 @@ function onIconChange(event: Event) {
   selectedIcon = file
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 async function handleCreateSubmit(event: SubmitEvent) {
   event.preventDefault()
   if (createSubmitting) return
@@ -126,7 +129,6 @@ async function handleCreateSubmit(event: SubmitEvent) {
   }
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 function onGuildIconError(slug: string) {
   failedIcons = { ...failedIcons, [slug]: true }
 }
@@ -144,12 +146,10 @@ async function goToGuild(guild: Guild): Promise<void> {
   await goto(`/${guild.slug}/${resolveTargetChannel(guild)}`)
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 async function goHome(): Promise<void> {
   await goto('/')
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 function tooltipIdForGuild(guildSlug: string): string {
   return `guild-tooltip-${guildSlug}`
 }
@@ -170,7 +170,6 @@ function focusGuildButtonByOffset(source: HTMLElement, offset: number): void {
   guildButtons[targetIndex]?.focus()
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 function onGuildKeydown(event: KeyboardEvent, guild: Guild): void {
   const source = event.currentTarget as HTMLElement | null
   if (!source) return
@@ -195,7 +194,6 @@ function resolveDraggedGuildSlug(event: DragEvent): string | null {
   return draggedGuildSlug ?? event.dataTransfer?.getData('text/plain') ?? null
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 function onGuildDragStart(event: DragEvent, guildSlug: string): void {
   draggedGuildSlug = guildSlug
   event.dataTransfer?.setData('text/plain', guildSlug)
@@ -204,7 +202,6 @@ function onGuildDragStart(event: DragEvent, guildSlug: string): void {
   }
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 function onGuildDragOver(event: DragEvent): void {
   const sourceSlug = resolveDraggedGuildSlug(event)
   if (!sourceSlug) return
@@ -224,7 +221,6 @@ function persistGuildOrder(sourceSlug: string, targetSlug: string): void {
   guildState.setGuildOrder(slugs)
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 function onGuildDrop(event: DragEvent, targetSlug: string): void {
   event.preventDefault()
   const sourceSlug = resolveDraggedGuildSlug(event)
@@ -233,7 +229,6 @@ function onGuildDrop(event: DragEvent, targetSlug: string): void {
   persistGuildOrder(sourceSlug, targetSlug)
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 function onGuildDragEnd(): void {
   draggedGuildSlug = null
 }
@@ -243,15 +238,27 @@ function onGuildDragEnd(): void {
   class="flex h-full w-full flex-col items-center gap-3 border-r border-border bg-sidebar py-3"
   data-testid="guild-rail"
 >
-  <button
-    type="button"
-    class="inline-flex h-12 w-12 items-center justify-center rounded-full bg-fire text-sm font-semibold text-fire-foreground transition-opacity hover:opacity-90"
-    aria-label="Home"
-    data-testid="guild-rail-home"
-    onclick={() => void goHome()}
-  >
-    H
-  </button>
+  <div class="relative">
+    <button
+      type="button"
+      class="inline-flex h-12 w-12 items-center justify-center rounded-full bg-fire text-sm font-semibold text-fire-foreground transition-opacity hover:opacity-90"
+      aria-label="Home"
+      data-testid="guild-rail-home"
+      onclick={() => void goHome()}
+    >
+      H
+    </button>
+    {#if hasUnreadDms}
+      <span
+        class="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-fire-foreground ring-2 ring-fire"
+        data-testid="home-dm-unread-badge"
+      ></span>
+    {/if}
+  </div>
+
+  {#if showDmList}
+    <DMList activeDm={activeDm} />
+  {/if}
 
   <nav
     class="flex w-full flex-1 flex-col items-center gap-2 overflow-y-auto"

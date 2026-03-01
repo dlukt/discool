@@ -9,7 +9,7 @@ use crate::{
     AppError,
     config::AttachmentConfig,
     db::DbPool,
-    services::{message_service, presence_service},
+    services::{dm_service, message_service, presence_service},
 };
 
 use super::{
@@ -70,10 +70,32 @@ struct TypingStartPayload {
     channel_slug: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct DmSubscribePayload {
+    #[serde(default)]
+    dm_slug: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DmMessageCreatePayload {
+    dm_slug: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    client_nonce: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct ChannelActivityPayload {
     guild_slug: String,
     channel_slug: String,
+    actor_user_id: String,
+    message_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DmActivityPayload {
+    dm_slug: String,
     actor_user_id: String,
     message_id: String,
 }
@@ -208,6 +230,26 @@ fn handle_subscribe(connection_id: &str, payload: SubscribePayload, subscribe: b
     registry::send_event(connection_id, ServerOp::ChannelUpdate, &event_payload);
 }
 
+async fn handle_dm_subscribe(
+    pool: &DbPool,
+    user_id: &str,
+    connection_id: &str,
+    payload: DmSubscribePayload,
+) -> Result<(), AppError> {
+    let Some(dm_slug) = payload.dm_slug.as_deref() else {
+        registry::clear_dm_subscription(connection_id);
+        return Ok(());
+    };
+    let dm_slug = dm_slug.trim();
+    if dm_slug.is_empty() {
+        registry::clear_dm_subscription(connection_id);
+        return Ok(());
+    }
+    dm_service::assert_dm_participant(pool, user_id, dm_slug).await?;
+    registry::subscribe_dm(connection_id, dm_slug);
+    Ok(())
+}
+
 async fn handle_message_create(
     pool: &DbPool,
     user_id: &str,
@@ -231,6 +273,52 @@ async fn handle_message_create(
         &created,
     );
     emit_channel_activity_event(pool, &created).await?;
+    Ok(())
+}
+
+async fn handle_dm_message_create(
+    pool: &DbPool,
+    user_id: &str,
+    payload: DmMessageCreatePayload,
+) -> Result<(), AppError> {
+    let created = dm_service::create_dm_message(
+        pool,
+        user_id,
+        dm_service::CreateDmMessageInput {
+            dm_slug: payload.dm_slug,
+            content: payload.content,
+            client_nonce: payload.client_nonce,
+        },
+    )
+    .await?;
+
+    let dm_targets = registry::dm_connection_targets(&created.message.dm_slug);
+    for target in dm_targets {
+        if created.participant_user_ids.contains(&target.user_id) {
+            registry::send_event(
+                &target.connection_id,
+                ServerOp::DmMessageCreate,
+                &created.message,
+            );
+        }
+    }
+
+    let activity_payload = DmActivityPayload {
+        dm_slug: created.message.dm_slug.clone(),
+        actor_user_id: created.message.author_user_id.clone(),
+        message_id: created.message.id.clone(),
+    };
+    for target in registry::user_connection_targets(&created.participant_user_ids) {
+        if target.user_id == created.message.author_user_id {
+            continue;
+        }
+        registry::send_event(
+            &target.connection_id,
+            ServerOp::DmActivity,
+            &activity_payload,
+        );
+    }
+
     Ok(())
 }
 
@@ -395,9 +483,14 @@ fn handle_resume(connection_id: &str, envelope: &ClientEnvelope) {
         });
     let requested_sequence = payload.last_sequence.or(envelope.s).unwrap_or(0);
     let snapshot = registry::connection_snapshot(connection_id);
+    let active_channel = snapshot
+        .as_ref()
+        .and_then(|item| item.active_channel.clone());
+    let active_dm = snapshot.as_ref().and_then(|item| item.active_dm.clone());
     let resume_payload = json!({
         "requested_sequence": requested_sequence,
-        "active_channel": snapshot.and_then(|item| item.active_channel),
+        "active_channel": active_channel,
+        "active_dm": active_dm,
         "replay_supported": false,
     });
     registry::send_event(connection_id, ServerOp::ResumeAck, &resume_payload);
@@ -490,6 +583,28 @@ async fn process_client_message(
                 Ok(payload) => {
                     if let Err(error) = handle_message_reaction_toggle(pool, user_id, payload).await
                     {
+                        send_app_error(connection_id, error);
+                    }
+                }
+                Err(error) => send_protocol_error(connection_id, error),
+            }
+        }
+        ClientOp::DmSubscribe => {
+            match parse_payload::<DmSubscribePayload>(envelope.d, &envelope.op) {
+                Ok(payload) => {
+                    if let Err(error) =
+                        handle_dm_subscribe(pool, user_id, connection_id, payload).await
+                    {
+                        send_app_error(connection_id, error);
+                    }
+                }
+                Err(error) => send_protocol_error(connection_id, error),
+            }
+        }
+        ClientOp::DmMessageCreate => {
+            match parse_payload::<DmMessageCreatePayload>(envelope.d, &envelope.op) {
+                Ok(payload) => {
+                    if let Err(error) = handle_dm_message_create(pool, user_id, payload).await {
                         send_app_error(connection_id, error);
                     }
                 }

@@ -1,4 +1,6 @@
 import { channelState } from '$lib/features/channel/channelStore.svelte'
+import { fetchDmHistory } from '$lib/features/dm/dmApi'
+import { dmState } from '$lib/features/dm/dmStore.svelte'
 import { guildState } from '$lib/features/guild/guildStore.svelte'
 import { wsClient } from '$lib/ws/client'
 import type { WsEnvelope } from '$lib/ws/protocol'
@@ -24,6 +26,7 @@ type MessageCreatePayload = {
   id?: string
   guild_slug?: string
   channel_slug?: string
+  dm_slug?: string
   author_user_id?: string
   author_username?: string
   author_display_name?: string
@@ -62,6 +65,10 @@ type TypingStartPayload = {
 type ChannelActivityPayload = {
   guild_slug?: string
   channel_slug?: string
+}
+
+type DmActivityPayload = {
+  dm_slug?: string
 }
 
 export type ChatAuthorInput = {
@@ -114,6 +121,10 @@ function readHistoryState(
 
 function toChannelKey(guildSlug: string, channelSlug: string): string {
   return `${guildSlug}:${channelSlug}`
+}
+
+function toDmKey(dmSlug: string): string {
+  return `dm:${dmSlug}`
 }
 
 function typingTimerKey(channelKey: string, userId: string): string {
@@ -264,6 +275,72 @@ function parseMessageUpdateEnvelope(envelope: WsEnvelope): ChatMessage | null {
   return parseMessageMutationEnvelope(envelope, 'message_update')
 }
 
+function parseDmMessageCreateEnvelope(
+  envelope: WsEnvelope,
+): ChatMessage | null {
+  if (envelope.op !== 'dm_message_create') return null
+  if (!isRecord(envelope.d)) return null
+  const payload = envelope.d as MessageCreatePayload
+
+  const id = payload.id?.trim()
+  const dmSlug = payload.dm_slug?.trim()
+  const authorUserId = payload.author_user_id?.trim()
+  const authorUsername = payload.author_username?.trim()
+  const createdAt = payload.created_at?.trim()
+
+  if (!id || !dmSlug || !authorUserId || !authorUsername || !createdAt) {
+    return null
+  }
+
+  return toChatMessage({
+    id,
+    dm_slug: dmSlug,
+    guild_slug: '',
+    channel_slug: '',
+    author_user_id: authorUserId,
+    author_username: authorUsername,
+    author_display_name: payload.author_display_name?.trim() || authorUsername,
+    author_avatar_color:
+      typeof payload.author_avatar_color === 'string'
+        ? payload.author_avatar_color
+        : null,
+    author_role_color: payload.author_role_color?.trim() || DEFAULT_ROLE_COLOR,
+    content: typeof payload.content === 'string' ? payload.content : '',
+    is_system: payload.is_system === true,
+    created_at: createdAt,
+    updated_at: payload.updated_at?.trim() || createdAt,
+    client_nonce: payload.client_nonce?.trim() || undefined,
+    attachments: Array.isArray(payload.attachments)
+      ? (payload.attachments as Array<{
+          id?: string
+          storage_key?: string
+          original_filename?: string
+          mime_type?: string
+          size_bytes?: number
+          is_image?: boolean
+          url?: string
+        }>)
+      : undefined,
+    reactions: Array.isArray(payload.reactions)
+      ? (payload.reactions as Array<{
+          emoji?: string
+          count?: number
+          reacted?: boolean
+        }>)
+      : undefined,
+    embeds: Array.isArray(payload.embeds)
+      ? (payload.embeds as Array<{
+          id?: string
+          url?: string
+          domain?: string
+          title?: string | null
+          description?: string | null
+          thumbnail_url?: string | null
+        }>)
+      : undefined,
+  })
+}
+
 function parseMessageDeleteEnvelope(envelope: WsEnvelope): {
   id: string
   guildSlug: string
@@ -339,6 +416,15 @@ function parseChannelActivityEnvelope(envelope: WsEnvelope): {
   return { guildSlug, channelSlug }
 }
 
+function parseDmActivityEnvelope(envelope: WsEnvelope): string | null {
+  if (envelope.op !== 'dm_activity') return null
+  if (!isRecord(envelope.d)) return null
+  const payload = envelope.d as DmActivityPayload
+  const dmSlug = payload.dm_slug?.trim()
+  if (!dmSlug) return null
+  return dmSlug
+}
+
 function updateHistoryState(
   channelKey: string,
   updates: Partial<ChannelHistoryState>,
@@ -369,7 +455,7 @@ function enforceMemoryBudget(
   activeTrimMode: ActiveTrimMode = 'drop_oldest',
 ): boolean {
   let changed = false
-  const activeKey = messageState.activeChannelKey
+  const activeKey = messageState.activeDmKey ?? messageState.activeChannelKey
 
   for (const [channelKey, messages] of Object.entries(
     messageState.messagesByChannel,
@@ -434,6 +520,7 @@ function enforceMemoryBudget(
 export const messageState = $state({
   version: 0,
   activeChannelKey: null as string | null,
+  activeDmKey: null as string | null,
   currentUserId: null as string | null,
   messagesByChannel: {} as Record<string, ChatMessage[]>,
   optimisticByNonce: {} as Record<string, PendingOptimisticEntry>,
@@ -450,6 +537,20 @@ export const messageState = $state({
     channelSlug: string,
   ): ChannelHistoryState => {
     const key = toChannelKey(guildSlug, channelSlug)
+    return { ...readHistoryState(messageState.historyByChannel, key) }
+  },
+
+  timelineForDm: (dmSlug: string): ChatMessage[] => {
+    const normalizedDmSlug = dmSlug.trim()
+    if (!normalizedDmSlug) return []
+    const key = toDmKey(normalizedDmSlug)
+    return [...(messageState.messagesByChannel[key] ?? [])]
+  },
+
+  historyStateForDm: (dmSlug: string): ChannelHistoryState => {
+    const normalizedDmSlug = dmSlug.trim()
+    if (!normalizedDmSlug) return defaultHistoryState()
+    const key = toDmKey(normalizedDmSlug)
     return { ...readHistoryState(messageState.historyByChannel, key) }
   },
 
@@ -589,9 +690,12 @@ export const messageState = $state({
     const normalizedChannel = channelSlug.trim()
     if (!normalizedGuild || !normalizedChannel) return
     const nextKey = toChannelKey(normalizedGuild, normalizedChannel)
-    if (messageState.activeChannelKey === nextKey) return
+    const hadActiveDm = messageState.activeDmKey !== null
+    if (messageState.activeChannelKey === nextKey && !hadActiveDm) return
 
     const previousKey = messageState.activeChannelKey
+    messageState.activeDmKey = null
+    dmState.setActiveDm(null)
     if (previousKey) {
       const separatorIndex = previousKey.indexOf(':')
       if (separatorIndex > 0) {
@@ -610,6 +714,24 @@ export const messageState = $state({
       normalizedGuild,
       channelState.hasGuildUnreadActivity(normalizedGuild),
     )
+    if (enforceMemoryBudget()) {
+      messageState.version += 1
+    }
+  },
+
+  setActiveDm: (dmSlug: string | null): void => {
+    const normalizedDmSlug = dmSlug?.trim() || null
+    const nextDmKey = normalizedDmSlug ? toDmKey(normalizedDmSlug) : null
+    if (
+      messageState.activeDmKey === nextDmKey &&
+      messageState.activeChannelKey === null
+    ) {
+      return
+    }
+
+    messageState.activeChannelKey = null
+    messageState.activeDmKey = nextDmKey
+    dmState.setActiveDm(normalizedDmSlug)
     if (enforceMemoryBudget()) {
       messageState.version += 1
     }
@@ -720,6 +842,86 @@ export const messageState = $state({
     }
   },
 
+  ensureDmHistoryLoaded: async (dmSlug: string): Promise<void> => {
+    const normalizedDmSlug = dmSlug.trim()
+    if (!normalizedDmSlug) return
+    const dmKey = toDmKey(normalizedDmSlug)
+    const state = readHistoryState(messageState.historyByChannel, dmKey)
+    if (state.initialized || state.loadingHistory) return
+
+    updateHistoryState(dmKey, { loadingHistory: true })
+    messageState.version += 1
+
+    try {
+      const page = await fetchDmHistory(normalizedDmSlug, {
+        limit: HISTORY_PAGE_LIMIT,
+      })
+      const existing = messageState.messagesByChannel[dmKey] ?? []
+      messageState.messagesByChannel[dmKey] = mergeMessages(
+        existing,
+        page.messages,
+      )
+      updateHistoryState(dmKey, {
+        initialized: true,
+        loadingHistory: false,
+        hasMoreHistory: page.cursor !== null,
+        cursor: page.cursor,
+      })
+      enforceMemoryBudget()
+      messageState.version += 1
+    } catch (error) {
+      updateHistoryState(dmKey, { loadingHistory: false })
+      messageState.version += 1
+      throw error
+    }
+  },
+
+  loadOlderDmHistory: async (dmSlug: string): Promise<void> => {
+    const normalizedDmSlug = dmSlug.trim()
+    if (!normalizedDmSlug) return
+    const dmKey = toDmKey(normalizedDmSlug)
+    const state = readHistoryState(messageState.historyByChannel, dmKey)
+    if (state.loadingHistory || !state.hasMoreHistory) return
+
+    updateHistoryState(dmKey, { loadingHistory: true })
+    messageState.version += 1
+
+    try {
+      const page = await fetchDmHistory(normalizedDmSlug, {
+        limit: HISTORY_PAGE_LIMIT,
+        before: state.cursor,
+      })
+      if (page.messages.length === 0) {
+        updateHistoryState(dmKey, {
+          loadingHistory: false,
+          initialized: true,
+          hasMoreHistory: false,
+          cursor: null,
+        })
+        messageState.version += 1
+        return
+      }
+
+      const existing = messageState.messagesByChannel[dmKey] ?? []
+      messageState.messagesByChannel[dmKey] = mergeMessages(
+        existing,
+        page.messages,
+      )
+      updateHistoryState(dmKey, {
+        loadingHistory: false,
+        initialized: true,
+        hasMoreHistory: page.cursor !== null,
+        cursor: page.cursor,
+      })
+      enforceMemoryBudget('drop_newest')
+      messageState.version += 1
+    } catch (error) {
+      updateHistoryState(dmKey, { loadingHistory: false })
+      messageState.version += 1
+      throw error
+    }
+  },
+
   setScrollTop: (
     guildSlug: string,
     channelSlug: string,
@@ -740,6 +942,23 @@ export const messageState = $state({
   scrollTopForChannel: (guildSlug: string, channelSlug: string): number => {
     const channelKey = toChannelKey(guildSlug, channelSlug)
     return readHistoryState(messageState.historyByChannel, channelKey).scrollTop
+  },
+
+  setScrollTopForDm: (dmSlug: string, scrollTop: number): void => {
+    const normalizedDmSlug = dmSlug.trim()
+    if (!normalizedDmSlug || !Number.isFinite(scrollTop)) return
+    const dmKey = toDmKey(normalizedDmSlug)
+    const normalizedTop = Math.max(0, Math.round(scrollTop))
+    const current = readHistoryState(messageState.historyByChannel, dmKey)
+    if (current.scrollTop === normalizedTop) return
+    updateHistoryState(dmKey, { scrollTop: normalizedTop })
+  },
+
+  scrollTopForDm: (dmSlug: string): number => {
+    const normalizedDmSlug = dmSlug.trim()
+    if (!normalizedDmSlug) return 0
+    const dmKey = toDmKey(normalizedDmSlug)
+    return readHistoryState(messageState.historyByChannel, dmKey).scrollTop
   },
 
   addPendingNew: (guildSlug: string, channelSlug: string, count = 1): void => {
@@ -774,6 +993,38 @@ export const messageState = $state({
   ): number => {
     const channelKey = toChannelKey(guildSlug, channelSlug)
     return readHistoryState(messageState.historyByChannel, channelKey)
+      .pendingNewCount
+  },
+
+  addPendingNewForDm: (dmSlug: string, count = 1): void => {
+    const normalizedDmSlug = dmSlug.trim()
+    if (!normalizedDmSlug) return
+    const dmKey = toDmKey(normalizedDmSlug)
+    const current = readHistoryState(messageState.historyByChannel, dmKey)
+    const increment = Number.isFinite(count)
+      ? Math.max(1, Math.floor(count))
+      : 1
+    updateHistoryState(dmKey, {
+      pendingNewCount: current.pendingNewCount + increment,
+    })
+    messageState.version += 1
+  },
+
+  clearPendingNewForDm: (dmSlug: string): void => {
+    const normalizedDmSlug = dmSlug.trim()
+    if (!normalizedDmSlug) return
+    const dmKey = toDmKey(normalizedDmSlug)
+    const current = readHistoryState(messageState.historyByChannel, dmKey)
+    if (current.pendingNewCount === 0) return
+    updateHistoryState(dmKey, { pendingNewCount: 0 })
+    messageState.version += 1
+  },
+
+  pendingNewCountForDm: (dmSlug: string): number => {
+    const normalizedDmSlug = dmSlug.trim()
+    if (!normalizedDmSlug) return 0
+    const dmKey = toDmKey(normalizedDmSlug)
+    return readHistoryState(messageState.historyByChannel, dmKey)
       .pendingNewCount
   },
 
@@ -830,6 +1081,78 @@ export const messageState = $state({
     const sent = wsClient.send('c_message_create', {
       guild_slug: normalizedGuild,
       channel_slug: normalizedChannel,
+      content: normalizedContent,
+      client_nonce: nonce,
+    })
+
+    if (sent) return true
+
+    const pending = messageState.optimisticByNonce[nonce]
+    if (pending) {
+      const channelMessages =
+        messageState.messagesByChannel[pending.channelKey] ?? []
+      messageState.messagesByChannel[pending.channelKey] =
+        channelMessages.filter((message) => message.id !== pending.messageId)
+      const { [nonce]: _removed, ...rest } = messageState.optimisticByNonce
+      messageState.optimisticByNonce = rest
+      messageState.version += 1
+    }
+
+    return false
+  },
+
+  sendDmMessage: (
+    dmSlug: string,
+    content: string,
+    author: ChatAuthorInput,
+  ): boolean => {
+    const normalizedDmSlug = dmSlug.trim()
+    const normalizedContent = normalizeOutboundContent(content)
+
+    if (!normalizedDmSlug) return false
+    if (!author.userId.trim() || !author.username.trim()) return false
+    if (!normalizedContent.trim()) return false
+
+    const dmKey = toDmKey(normalizedDmSlug)
+    const nonce = generateClientNonce()
+    const optimisticMessageId = `optimistic-${nonce}`
+    const now = new Date().toISOString()
+    const optimisticMessage: ChatMessage = {
+      id: optimisticMessageId,
+      guildSlug: '',
+      channelSlug: '',
+      dmSlug: normalizedDmSlug,
+      authorUserId: author.userId,
+      authorUsername: author.username,
+      authorDisplayName: author.displayName || author.username,
+      authorAvatarColor: author.avatarColor,
+      authorRoleColor: author.roleColor || DEFAULT_ROLE_COLOR,
+      content: normalizedContent,
+      isSystem: false,
+      createdAt: now,
+      updatedAt: now,
+      optimistic: true,
+      clientNonce: nonce,
+      attachments: [],
+      reactions: [],
+      embeds: [],
+    }
+
+    messageState.messagesByChannel[dmKey] = sortMessages([
+      ...(messageState.messagesByChannel[dmKey] ?? []),
+      optimisticMessage,
+    ])
+    messageState.optimisticByNonce = {
+      ...messageState.optimisticByNonce,
+      [nonce]: { channelKey: dmKey, messageId: optimisticMessageId },
+    }
+    updateHistoryState(dmKey, { initialized: true })
+    dmState.noteMessageActivity(normalizedDmSlug, normalizedContent, now)
+    enforceMemoryBudget()
+    messageState.version += 1
+
+    const sent = wsClient.send('c_dm_message_create', {
+      dm_slug: normalizedDmSlug,
       content: normalizedContent,
       client_nonce: nonce,
     })
@@ -1000,6 +1323,66 @@ export const messageState = $state({
     messageState.version += 1
   },
 
+  ingestServerDmMessage: (incoming: ChatMessage): void => {
+    const normalizedDmSlug = incoming.dmSlug?.trim() || ''
+    if (!normalizedDmSlug) return
+    const dmKey = toDmKey(normalizedDmSlug)
+    const existing = messageState.messagesByChannel[dmKey] ?? []
+
+    if (existing.some((message) => message.id === incoming.id)) {
+      messageState.messagesByChannel[dmKey] = existing.map((message) =>
+        message.id === incoming.id
+          ? { ...incoming, optimistic: false }
+          : message,
+      )
+      dmState.noteMessageActivity(
+        normalizedDmSlug,
+        incoming.content,
+        incoming.createdAt,
+      )
+      enforceMemoryBudget()
+      messageState.version += 1
+      return
+    }
+
+    const nonce = incoming.clientNonce
+    if (nonce) {
+      const pending = messageState.optimisticByNonce[nonce]
+      if (pending && pending.channelKey === dmKey) {
+        const replaced = existing.map((message) =>
+          message.id === pending.messageId
+            ? { ...incoming, optimistic: false }
+            : message,
+        )
+        messageState.messagesByChannel[dmKey] = sortMessages(replaced)
+        const { [nonce]: _removed, ...rest } = messageState.optimisticByNonce
+        messageState.optimisticByNonce = rest
+        updateHistoryState(dmKey, { initialized: true })
+        dmState.noteMessageActivity(
+          normalizedDmSlug,
+          incoming.content,
+          incoming.createdAt,
+        )
+        enforceMemoryBudget()
+        messageState.version += 1
+        return
+      }
+    }
+
+    messageState.messagesByChannel[dmKey] = sortMessages([
+      ...existing,
+      { ...incoming, optimistic: false },
+    ])
+    updateHistoryState(dmKey, { initialized: true })
+    dmState.noteMessageActivity(
+      normalizedDmSlug,
+      incoming.content,
+      incoming.createdAt,
+    )
+    enforceMemoryBudget()
+    messageState.version += 1
+  },
+
   ingestUpdatedMessage: (incoming: ChatMessage): void => {
     const channelKey = toChannelKey(incoming.guildSlug, incoming.channelSlug)
     const existing = messageState.messagesByChannel[channelKey] ?? []
@@ -1073,11 +1456,20 @@ export const messageState = $state({
     messageState.version += 1
   },
 
+  ingestDmActivity: (dmSlug: string): void => {
+    const normalizedDmSlug = dmSlug.trim()
+    if (!normalizedDmSlug) return
+    const dmKey = toDmKey(normalizedDmSlug)
+    if (messageState.activeDmKey === dmKey) return
+    dmState.setDmUnreadActivity(normalizedDmSlug, true)
+  },
+
   clearAll: (): void => {
     for (const timerKey of typingExpiryTimers.keys()) {
       clearTypingExpiryTimer(timerKey)
     }
     messageState.activeChannelKey = null
+    messageState.activeDmKey = null
     messageState.currentUserId = null
     messageState.messagesByChannel = {}
     messageState.optimisticByNonce = {}
@@ -1107,9 +1499,21 @@ wsClient.subscribe((envelope) => {
     return
   }
 
+  const dmActivity = parseDmActivityEnvelope(envelope)
+  if (dmActivity) {
+    messageState.ingestDmActivity(dmActivity)
+    return
+  }
+
   const created = parseMessageCreateEnvelope(envelope)
   if (created) {
     messageState.ingestServerMessage(created)
+    return
+  }
+
+  const dmCreated = parseDmMessageCreateEnvelope(envelope)
+  if (dmCreated) {
+    messageState.ingestServerDmMessage(dmCreated)
     return
   }
 

@@ -1,6 +1,7 @@
 pub mod auth_service;
 pub mod category_service;
 pub mod channel_service;
+pub mod dm_service;
 pub mod email_service;
 pub mod embed_service;
 pub mod file_storage_service;

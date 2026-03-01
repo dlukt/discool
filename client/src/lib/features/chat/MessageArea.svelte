@@ -17,9 +17,10 @@ import { type ChatAuthorInput, messageState } from './messageStore.svelte'
 import type { ChatMessage } from './types'
 
 type Props = {
-  mode: 'home' | 'channel' | 'settings' | 'admin'
+  mode: 'home' | 'channel' | 'dm' | 'settings' | 'admin'
   activeGuild: string
   activeChannel: string
+  activeDm?: string | null
   displayName: string
   isAdmin: boolean
   showRecoveryNudge: boolean
@@ -57,6 +58,7 @@ let {
   mode,
   activeGuild,
   activeChannel,
+  activeDm,
   displayName,
   isAdmin,
   showRecoveryNudge,
@@ -67,11 +69,16 @@ let {
 let detailText = $derived(
   mode === 'channel'
     ? `#${activeChannel} in ${activeGuild}`
-    : `Signed in as ${displayName}.`,
+    : mode === 'dm' && activeDm
+      ? `Direct message (${activeDm})`
+      : `Signed in as ${displayName}.`,
 )
+let isChannelMode = $derived(mode === 'channel')
+let isDmMode = $derived(mode === 'dm')
+let isConversationMode = $derived(isChannelMode || isDmMode)
 let canShowAdminPanel = $derived(mode === 'admin' && isAdmin)
 let shouldShowRecoveryNudge = $derived(
-  showRecoveryNudge && (mode === 'home' || mode === 'channel'),
+  showRecoveryNudge && (mode === 'home' || mode === 'channel' || mode === 'dm'),
 )
 let wsLifecycleState = $state<WsLifecycleState>(wsClient.getLifecycleState())
 let showReconnectingBanner = $derived(wsLifecycleState === 'reconnecting')
@@ -83,7 +90,6 @@ let timelineViewport = $state<HTMLDivElement | null>(null)
 let scrollTop = $state(0)
 let viewportHeight = $state(320)
 let distanceFromBottomPx = $state(0)
-let restoringChannelKey = $state<string | null>(null)
 let loadHistoryInFlight = $state(false)
 let lastTailMessageId = $state<string | null>(null)
 let skipNextTailChange = $state(false)
@@ -98,20 +104,27 @@ let dragActive = $state(false)
 let attachmentContextKey = $state<string | null>(null)
 let lastTypingStartSentAt = $state(0)
 let typingStartChannelKey = $state<string | null>(null)
+let restoringTimelineKey = $state<string | null>(null)
 
 let channelKey = $derived(
-  mode === 'channel' ? `${activeGuild}:${activeChannel}` : null,
+  mode === 'channel'
+    ? `${activeGuild}:${activeChannel}`
+    : mode === 'dm' && activeDm
+      ? `dm:${activeDm}`
+      : null,
 )
+let activeDmSlug = $derived(mode === 'dm' ? activeDm?.trim() || null : null)
 
 let timelineMessages = $derived.by(() => {
   const _messageVersion = messageState.version
-  if (mode !== 'channel') return []
-  return messageState.timeline(activeGuild, activeChannel)
+  if (isChannelMode) return messageState.timeline(activeGuild, activeChannel)
+  if (isDmMode && activeDmSlug) return messageState.timelineForDm(activeDmSlug)
+  return []
 })
 
 let channelHistory = $derived.by(() => {
   const _messageVersion = messageState.version
-  if (mode !== 'channel') {
+  if (!isConversationMode) {
     return {
       initialized: false,
       loadingHistory: false,
@@ -121,7 +134,20 @@ let channelHistory = $derived.by(() => {
       pendingNewCount: 0,
     }
   }
-  return messageState.historyStateForChannel(activeGuild, activeChannel)
+  if (isChannelMode) {
+    return messageState.historyStateForChannel(activeGuild, activeChannel)
+  }
+  if (isDmMode && activeDmSlug) {
+    return messageState.historyStateForDm(activeDmSlug)
+  }
+  return {
+    initialized: false,
+    loadingHistory: false,
+    hasMoreHistory: false,
+    cursor: null,
+    scrollTop: 0,
+    pendingNewCount: 0,
+  }
 })
 
 function estimateMessageRowHeight(
@@ -214,11 +240,22 @@ let visibleRows = $derived.by(() => {
 })
 
 let currentSessionUser = $derived(identityState.session?.user ?? null)
-let activeGuildRecord = $derived(guildState.bySlug(activeGuild))
+let activeGuildRecord = $derived(
+  isChannelMode ? guildState.bySlug(activeGuild) : null,
+)
 const attachFilesPermission = GUILD_PERMISSION_CATALOG.find(
   (permission) => permission.key === 'ATTACH_FILES',
 )
-let memberRoleData = $derived(guildState.memberRoleDataForGuild(activeGuild))
+let memberRoleData = $derived(
+  isChannelMode
+    ? guildState.memberRoleDataForGuild(activeGuild)
+    : {
+        members: [],
+        roles: [],
+        assignableRoleIds: [],
+        canManageRoles: false,
+      },
+)
 let currentMember = $derived(
   currentSessionUser
     ? (memberRoleData.members.find(
@@ -241,17 +278,20 @@ let currentMemberPermissionsBitflag = $derived(
   ),
 )
 let canAttachFiles = $derived(
-  Boolean(activeGuildRecord?.isOwner) ||
-    (attachFilesPermission !== undefined &&
-      hasGuildPermission(
-        currentMemberPermissionsBitflag,
-        attachFilesPermission,
-      )),
+  isChannelMode &&
+    (Boolean(activeGuildRecord?.isOwner) ||
+      (attachFilesPermission !== undefined &&
+        hasGuildPermission(
+          currentMemberPermissionsBitflag,
+          attachFilesPermission,
+        ))),
 )
 let currentRoleColor = $derived(
-  currentMember?.highestRoleColor ??
-    currentSessionUser?.avatarColor ??
-    '#99aab5',
+  isChannelMode
+    ? (currentMember?.highestRoleColor ??
+        currentSessionUser?.avatarColor ??
+        '#99aab5')
+    : (currentSessionUser?.avatarColor ?? '#99aab5'),
 )
 let canSubmitComposer = $derived(
   Boolean(currentSessionUser) &&
@@ -264,12 +304,14 @@ let hasComposerSelection = $derived(
   composerSelection.end > composerSelection.start,
 )
 let emptyStateCopy = $derived(
-  `This is the beginning of #${activeChannel}. Say something!`,
+  isChannelMode
+    ? `This is the beginning of #${activeChannel}. Say something!`
+    : 'This is the beginning of your direct conversation. Say something!',
 )
 
 let typingUserDisplayNames = $derived.by(() => {
   const _messageVersion = messageState.version
-  if (mode !== 'channel') return []
+  if (!isChannelMode) return []
   const typingUserIds = messageState.typingUserIdsForChannel(
     activeGuild,
     activeChannel,
@@ -299,7 +341,7 @@ let typingIndicatorText = $derived.by(() => {
 })
 
 let showJumpToPresent = $derived(
-  mode === 'channel' &&
+  isConversationMode &&
     (distanceFromBottomPx > JUMP_TO_PRESENT_THRESHOLD_PX ||
       channelHistory.pendingNewCount > 0),
 )
@@ -475,10 +517,10 @@ function handleTimelineDrop(event: DragEvent): void {
 
 async function sendComposerMessage() {
   const author = buildCurrentAuthor()
-  if (!author || mode !== 'channel') return
+  if (!author || !isConversationMode) return
   attachmentError = null
 
-  if (composerEdit) {
+  if (composerEdit && isChannelMode) {
     const sent = messageState.sendMessageUpdate(
       activeGuild,
       activeChannel,
@@ -494,7 +536,7 @@ async function sendComposerMessage() {
     return
   }
 
-  if (selectedAttachment) {
+  if (selectedAttachment && isChannelMode) {
     if (!canAttachFiles) {
       attachmentError = 'Missing ATTACH_FILES permission in this channel'
       return
@@ -522,12 +564,16 @@ async function sendComposerMessage() {
     return
   }
 
-  const sent = messageState.sendMessage(
-    activeGuild,
-    activeChannel,
-    composerValue,
-    author,
-  )
+  const sent = isChannelMode
+    ? messageState.sendMessage(
+        activeGuild,
+        activeChannel,
+        composerValue,
+        author,
+      )
+    : activeDmSlug
+      ? messageState.sendDmMessage(activeDmSlug, composerValue, author)
+      : false
   if (sent) {
     composerValue = ''
     composerSelection = { start: 0, end: 0 }
@@ -715,10 +761,15 @@ function updateViewportMetrics(
     target.scrollHeight - (target.scrollTop + target.clientHeight),
   )
 
-  if (mode === 'channel') {
+  if (isChannelMode) {
     messageState.setScrollTop(guildSlug, channelSlug, target.scrollTop)
     if (distanceFromBottomPx <= 24) {
       messageState.clearPendingNew(guildSlug, channelSlug)
+    }
+  } else if (isDmMode && activeDmSlug) {
+    messageState.setScrollTopForDm(activeDmSlug, target.scrollTop)
+    if (distanceFromBottomPx <= 24) {
+      messageState.clearPendingNewForDm(activeDmSlug)
     }
   }
 }
@@ -728,7 +779,7 @@ function isNearBottom(threshold = 24): boolean {
 }
 
 async function loadOlderHistoryIfNeeded(): Promise<void> {
-  if (mode !== 'channel' || loadHistoryInFlight) return
+  if (!isConversationMode || loadHistoryInFlight) return
   if (!channelHistory.hasMoreHistory || channelHistory.loadingHistory) return
   if (scrollTop > HISTORY_LOAD_TRIGGER_PX) return
 
@@ -736,18 +787,33 @@ async function loadOlderHistoryIfNeeded(): Promise<void> {
   if (!viewport) return
   const loadGuild = activeGuild
   const loadChannel = activeChannel
-  const loadKey = `${loadGuild}:${loadChannel}`
+  const loadDm = activeDmSlug
+  const loadKey = isChannelMode
+    ? `${loadGuild}:${loadChannel}`
+    : loadDm
+      ? `dm:${loadDm}`
+      : null
+  if (!loadKey) return
 
   loadHistoryInFlight = true
   const beforeHeight = viewport.scrollHeight
   const beforeTop = viewport.scrollTop
 
   try {
-    await messageState.loadOlderHistory(loadGuild, loadChannel)
+    if (isChannelMode) {
+      await messageState.loadOlderHistory(loadGuild, loadChannel)
+    } else if (loadDm) {
+      await messageState.loadOlderDmHistory(loadDm)
+    }
   } finally {
     await tick()
     const nextViewport = timelineViewport
-    if (nextViewport && `${activeGuild}:${activeChannel}` === loadKey) {
+    const currentKey = isChannelMode
+      ? `${activeGuild}:${activeChannel}`
+      : activeDmSlug
+        ? `dm:${activeDmSlug}`
+        : null
+    if (nextViewport && currentKey === loadKey) {
       const delta = Math.max(0, nextViewport.scrollHeight - beforeHeight)
       nextViewport.scrollTop = beforeTop + delta
       updateViewportMetrics(nextViewport, loadGuild, loadChannel)
@@ -770,15 +836,18 @@ function jumpToPresent(): void {
   if (!target) return
   target.scrollTop = target.scrollHeight
   updateViewportMetrics(target, activeGuild, activeChannel)
-  if (mode === 'channel') {
+  if (isChannelMode) {
     messageState.clearPendingNew(activeGuild, activeChannel)
+  } else if (isDmMode && activeDmSlug) {
+    messageState.clearPendingNewForDm(activeDmSlug)
   }
 }
 
 $effect(() => {
-  if (mode !== 'channel') return
+  if (!isConversationMode) return
   activeGuild
   activeChannel
+  activeDmSlug
   void tick().then(() => {
     composerInput?.focus()
   })
@@ -789,18 +858,27 @@ $effect(() => {
 })
 
 $effect(() => {
-  if (mode !== 'channel' || !activeGuild || activeGuildRecord?.isOwner) return
+  if (!isChannelMode || !activeGuild || activeGuildRecord?.isOwner) return
   void guildState.loadMembers(activeGuild).catch(() => {
     // Member role data is loaded opportunistically for attachment permission gating.
   })
 })
 
 $effect(() => {
-  if (mode !== 'channel') {
+  if (!isConversationMode) {
     composerEdit = null
     composerSelection = { start: 0, end: 0 }
     pendingDeleteMessage = null
     attachmentContextKey = null
+    resetTypingStartThrottle()
+    clearSelectedAttachment()
+    attachmentError = null
+    attachmentUploadInFlight = false
+    return
+  }
+  if (!isChannelMode) {
+    composerEdit = null
+    pendingDeleteMessage = null
     resetTypingStartThrottle()
     clearSelectedAttachment()
     attachmentError = null
@@ -824,7 +902,7 @@ $effect(() => {
 })
 
 $effect(() => {
-  if (mode !== 'channel') return
+  if (!isChannelMode) return
   const key = `${activeGuild}:${activeChannel}`
   if (attachmentContextKey === key) return
   attachmentContextKey = key
@@ -839,50 +917,77 @@ $effect(() => {
 })
 
 $effect(() => {
-  if (mode !== 'channel') {
-    restoringChannelKey = null
+  if (!isConversationMode) {
+    restoringTimelineKey = null
     lastTailMessageId = null
     skipNextTailChange = false
+    messageState.setActiveDm(null)
+    wsClient.setDmSubscription?.(null)
     return
   }
 
-  const currentKey = `${activeGuild}:${activeChannel}`
-  const restoreGuild = activeGuild
-  const restoreChannel = activeChannel
-  const currentHistory = messageState.historyStateForChannel(
-    activeGuild,
-    activeChannel,
-  )
-  messageState.setActiveChannel(activeGuild, activeChannel)
-  void messageState
-    .ensureHistoryLoaded(activeGuild, activeChannel)
-    .catch(() => {})
+  const currentKey =
+    isChannelMode && activeGuild && activeChannel
+      ? `${activeGuild}:${activeChannel}`
+      : isDmMode && activeDmSlug
+        ? `dm:${activeDmSlug}`
+        : null
+  if (!currentKey) return
 
-  if (restoringChannelKey === currentKey) return
+  let currentHistory = channelHistory
+  let restoreGuild = activeGuild
+  let restoreChannel = activeChannel
+  let restoreDm = activeDmSlug
+  if (isChannelMode) {
+    currentHistory = messageState.historyStateForChannel(
+      activeGuild,
+      activeChannel,
+    )
+    messageState.setActiveChannel(activeGuild, activeChannel)
+    wsClient.setDmSubscription?.(null)
+    void messageState
+      .ensureHistoryLoaded(activeGuild, activeChannel)
+      .catch(() => {})
+  } else if (isDmMode && activeDmSlug) {
+    currentHistory = messageState.historyStateForDm(activeDmSlug)
+    messageState.setActiveDm(activeDmSlug)
+    wsClient.setDmSubscription?.(activeDmSlug)
+    void messageState.ensureDmHistoryLoaded(activeDmSlug).catch(() => {})
+  }
 
-  restoringChannelKey = currentKey
+  if (restoringTimelineKey === currentKey) return
+
+  restoringTimelineKey = currentKey
   skipNextTailChange = !currentHistory.initialized
   lastTailMessageId = timelineMessages.at(-1)?.id ?? null
 
   void tick().then(() => {
-    if (
-      mode !== 'channel' ||
-      `${activeGuild}:${activeChannel}` !== currentKey
-    ) {
+    const liveKey =
+      isChannelMode && activeGuild && activeChannel
+        ? `${activeGuild}:${activeChannel}`
+        : isDmMode && activeDmSlug
+          ? `dm:${activeDmSlug}`
+          : null
+    if (liveKey !== currentKey) {
       return
     }
     const viewport = timelineViewport
     if (!viewport) return
 
-    const savedTop = messageState.scrollTopForChannel(
-      restoreGuild,
-      restoreChannel,
-    )
+    const savedTop = isChannelMode
+      ? messageState.scrollTopForChannel(restoreGuild, restoreChannel)
+      : restoreDm
+        ? messageState.scrollTopForDm(restoreDm)
+        : 0
     if (savedTop > 0) {
       viewport.scrollTop = savedTop
     } else {
       viewport.scrollTop = viewport.scrollHeight
-      messageState.clearPendingNew(restoreGuild, restoreChannel)
+      if (isChannelMode) {
+        messageState.clearPendingNew(restoreGuild, restoreChannel)
+      } else if (restoreDm) {
+        messageState.clearPendingNewForDm(restoreDm)
+      }
     }
     updateViewportMetrics(viewport, restoreGuild, restoreChannel)
 
@@ -893,9 +998,15 @@ $effect(() => {
 })
 
 $effect(() => {
-  if (mode !== 'channel') return
+  if (!isConversationMode) return
 
   const _messageVersion = messageState.version
+  const contextKey = isChannelMode
+    ? `${activeGuild}:${activeChannel}`
+    : activeDmSlug
+      ? `dm:${activeDmSlug}`
+      : null
+  if (!contextKey) return
   const currentTail = timelineMessages.at(-1)?.id ?? null
   if (!currentTail || currentTail === lastTailMessageId) return
 
@@ -910,21 +1021,35 @@ $effect(() => {
   if (isNearBottom(JUMP_TO_PRESENT_THRESHOLD_PX)) {
     const tailGuild = activeGuild
     const tailChannel = activeChannel
-    const tailKey = `${tailGuild}:${tailChannel}`
+    const tailDm = activeDmSlug
+    const tailKey = contextKey
     void tick().then(() => {
-      if (mode !== 'channel' || `${activeGuild}:${activeChannel}` !== tailKey) {
+      const liveKey = isChannelMode
+        ? `${activeGuild}:${activeChannel}`
+        : activeDmSlug
+          ? `dm:${activeDmSlug}`
+          : null
+      if (liveKey !== tailKey) {
         return
       }
       const viewport = timelineViewport
       if (!viewport) return
       viewport.scrollTop = viewport.scrollHeight
       updateViewportMetrics(viewport, tailGuild, tailChannel)
-      messageState.clearPendingNew(tailGuild, tailChannel)
+      if (isChannelMode) {
+        messageState.clearPendingNew(tailGuild, tailChannel)
+      } else if (tailDm) {
+        messageState.clearPendingNewForDm(tailDm)
+      }
     })
     return
   }
 
-  messageState.addPendingNew(activeGuild, activeChannel, 1)
+  if (isChannelMode) {
+    messageState.addPendingNew(activeGuild, activeChannel, 1)
+  } else if (activeDmSlug) {
+    messageState.addPendingNewForDm(activeDmSlug, 1)
+  }
 })
 
 onMount(() => {
@@ -995,9 +1120,11 @@ onMount(() => {
       ondragover={handleTimelineDragOver}
       ondragleave={handleTimelineDragLeave}
       ondrop={handleTimelineDrop}
-      aria-label="Channel timeline"
+      aria-label={isChannelMode ? 'Channel timeline' : 'Direct message timeline'}
     >
-      <h2 class="text-sm font-medium text-foreground">Channel Timeline</h2>
+      <h2 class="text-sm font-medium text-foreground">
+        {isChannelMode ? 'Channel Timeline' : 'Direct Message Timeline'}
+      </h2>
       <div class="mt-3 min-h-0 flex-1" data-testid="channel-timeline">
         <div
           class="h-full overflow-y-auto rounded-md border border-border/40 bg-background/20 px-2 py-2"
@@ -1061,7 +1188,7 @@ onMount(() => {
         </div>
       {/if}
 
-      {#if mode === 'channel' && showJumpToPresent}
+      {#if isConversationMode && showJumpToPresent}
         <div class="mt-2 flex justify-end">
           <button
             type="button"
@@ -1079,7 +1206,7 @@ onMount(() => {
       {/if}
     </section>
 
-    {#if mode === 'channel'}
+    {#if isConversationMode}
       <section class="rounded-md border border-border bg-card p-4">
         <label
           for="message-composer"
@@ -1087,53 +1214,55 @@ onMount(() => {
         >
           Message
         </label>
-        <input
-          type="file"
-          class="hidden"
-          bind:this={attachmentInput}
-          onchange={handleAttachmentInputChange}
-          data-testid="message-attachment-input"
-        />
-        {#if selectedAttachment}
-          <div
-            class="mb-2 flex items-center gap-2 rounded-md border border-border bg-muted px-2 py-1.5 text-xs text-foreground"
-            data-testid="attachment-preview-chip"
-          >
-            <span class="truncate">{selectedAttachment.name}</span>
-            <span class="shrink-0 text-muted-foreground">
-              {formatFileSize(selectedAttachment.size)}
-            </span>
-            <button
-              type="button"
-              class="ml-auto rounded px-2 py-0.5 text-xs text-foreground hover:bg-background/70"
-              onclick={() => clearSelectedAttachment()}
-              disabled={attachmentUploadInFlight}
-              data-testid="attachment-preview-remove"
+        {#if isChannelMode}
+          <input
+            type="file"
+            class="hidden"
+            bind:this={attachmentInput}
+            onchange={handleAttachmentInputChange}
+            data-testid="message-attachment-input"
+          />
+          {#if selectedAttachment}
+            <div
+              class="mb-2 flex items-center gap-2 rounded-md border border-border bg-muted px-2 py-1.5 text-xs text-foreground"
+              data-testid="attachment-preview-chip"
             >
-              Remove
-            </button>
-          </div>
-        {/if}
-        {#if attachmentError}
-          <p
-            class="mb-2 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive"
-            data-testid="attachment-error"
-          >
-            {attachmentError}
-          </p>
-        {/if}
-        {#if attachmentUploadInFlight && attachmentUploadProgress !== null}
-          <div class="mb-2" data-testid="attachment-upload-progress">
-            <div class="h-1.5 w-full rounded bg-muted">
-              <div
-                class="h-full rounded bg-fire transition-all"
-                style={`width: ${Math.max(0, Math.min(100, attachmentUploadProgress))}%`}
-              ></div>
+              <span class="truncate">{selectedAttachment.name}</span>
+              <span class="shrink-0 text-muted-foreground">
+                {formatFileSize(selectedAttachment.size)}
+              </span>
+              <button
+                type="button"
+                class="ml-auto rounded px-2 py-0.5 text-xs text-foreground hover:bg-background/70"
+                onclick={() => clearSelectedAttachment()}
+                disabled={attachmentUploadInFlight}
+                data-testid="attachment-preview-remove"
+              >
+                Remove
+              </button>
             </div>
-            <p class="mt-1 text-xs text-muted-foreground">
-              Uploading {Math.round(attachmentUploadProgress)}%
+          {/if}
+          {#if attachmentError}
+            <p
+              class="mb-2 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive"
+              data-testid="attachment-error"
+            >
+              {attachmentError}
             </p>
-          </div>
+          {/if}
+          {#if attachmentUploadInFlight && attachmentUploadProgress !== null}
+            <div class="mb-2" data-testid="attachment-upload-progress">
+              <div class="h-1.5 w-full rounded bg-muted">
+                <div
+                  class="h-full rounded bg-fire transition-all"
+                  style={`width: ${Math.max(0, Math.min(100, attachmentUploadProgress))}%`}
+                ></div>
+              </div>
+              <p class="mt-1 text-xs text-muted-foreground">
+                Uploading {Math.round(attachmentUploadProgress)}%
+              </p>
+            </div>
+          {/if}
         {/if}
         {#if hasComposerSelection}
           <div
@@ -1170,24 +1299,26 @@ onMount(() => {
           </div>
         {/if}
         <div class="flex items-end gap-2">
-          <button
-            type="button"
-            class="inline-flex h-[44px] shrink-0 items-center justify-center rounded-md border border-border bg-background px-3 text-lg text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-            onclick={openAttachmentPicker}
-            disabled={!canAttachFiles || attachmentUploadInFlight}
-            title={canAttachFiles
-              ? 'Attach file'
-              : 'You do not have permission to attach files'}
-            aria-label="Attach file"
-            data-testid="message-attachment-button"
-          >
-            📎
-          </button>
+          {#if isChannelMode}
+            <button
+              type="button"
+              class="inline-flex h-[44px] shrink-0 items-center justify-center rounded-md border border-border bg-background px-3 text-lg text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+              onclick={openAttachmentPicker}
+              disabled={!canAttachFiles || attachmentUploadInFlight}
+              title={canAttachFiles
+                ? 'Attach file'
+                : 'You do not have permission to attach files'}
+              aria-label="Attach file"
+              data-testid="message-attachment-button"
+            >
+              📎
+            </button>
+          {/if}
           <textarea
             id="message-composer"
             data-testid="message-composer-input"
             class="min-h-[44px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-            placeholder={`Message #${activeChannel}`}
+            placeholder={isChannelMode ? `Message #${activeChannel}` : 'Message'}
             bind:this={composerInput}
             bind:value={composerValue}
             onkeydown={handleComposerKeydown}
@@ -1196,7 +1327,7 @@ onMount(() => {
             onclick={handleComposerSelectionEvent}
             onkeyup={handleComposerSelectionEvent}
             onselect={handleComposerSelectionEvent}
-            disabled={attachmentUploadInFlight}
+            disabled={isChannelMode && attachmentUploadInFlight}
           ></textarea>
           <button
             type="button"
@@ -1208,7 +1339,7 @@ onMount(() => {
             {composerEdit ? 'Save' : 'Send'}
           </button>
         </div>
-        {#if typingIndicatorText}
+        {#if isChannelMode && typingIndicatorText}
           <p
             class="mt-2 text-xs text-muted-foreground"
             aria-live="polite"
@@ -1221,7 +1352,11 @@ onMount(() => {
           {#if composerEdit}
             Editing message · Enter to save · Escape to cancel
           {:else}
-            Enter to send · Shift+Enter for newline · Ctrl+B/Ctrl+I/Ctrl+E format selected text · Up to edit latest own message · Drag/drop or paperclip to attach files
+            {#if isChannelMode}
+              Enter to send · Shift+Enter for newline · Ctrl+B/Ctrl+I/Ctrl+E format selected text · Up to edit latest own message · Drag/drop or paperclip to attach files
+            {:else}
+              Enter to send · Shift+Enter for newline · Ctrl+B/Ctrl+I/Ctrl+E format selected text
+            {/if}
           {/if}
         </p>
       </section>

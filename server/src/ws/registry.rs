@@ -28,6 +28,8 @@ struct ConnectionState {
     guild_subscriptions: RwLock<HashSet<String>>,
     channel_subscriptions: RwLock<HashSet<String>>,
     active_channel: RwLock<Option<String>>,
+    dm_subscriptions: RwLock<HashSet<String>>,
+    active_dm: RwLock<Option<String>>,
     sequence: AtomicU64,
     last_heartbeat: RwLock<Instant>,
 }
@@ -37,6 +39,7 @@ pub struct ConnectionSnapshot {
     pub user_id: String,
     pub session_id: String,
     pub active_channel: Option<String>,
+    pub active_dm: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +80,8 @@ pub fn register_connection(
         guild_subscriptions: RwLock::new(HashSet::new()),
         channel_subscriptions: RwLock::new(HashSet::new()),
         active_channel: RwLock::new(None),
+        dm_subscriptions: RwLock::new(HashSet::new()),
+        active_dm: RwLock::new(None),
         sequence: AtomicU64::new(0),
         last_heartbeat: RwLock::new(Instant::now()),
     };
@@ -108,6 +113,7 @@ pub fn connection_snapshot(connection_id: &str) -> Option<ConnectionSnapshot> {
             user_id: connection.user_id.clone(),
             session_id: connection.session_id.clone(),
             active_channel: lock_read(&connection.active_channel).clone(),
+            active_dm: lock_read(&connection.active_dm).clone(),
         })
 }
 
@@ -152,6 +158,31 @@ pub fn unsubscribe(connection_id: &str, guild_slug: &str, channel_slug: Option<&
             *lock_write(&connection.active_channel) = None;
         }
     }
+}
+
+pub fn subscribe_dm(connection_id: &str, dm_slug: &str) {
+    let Some(connection) = registry().connections.get(connection_id) else {
+        return;
+    };
+
+    let normalized = dm_slug.trim();
+    if normalized.is_empty() {
+        return;
+    }
+    {
+        let mut subscriptions = lock_write(&connection.dm_subscriptions);
+        subscriptions.clear();
+        subscriptions.insert(normalized.to_string());
+    }
+    *lock_write(&connection.active_dm) = Some(normalized.to_string());
+}
+
+pub fn clear_dm_subscription(connection_id: &str) {
+    let Some(connection) = registry().connections.get(connection_id) else {
+        return;
+    };
+    lock_write(&connection.dm_subscriptions).clear();
+    *lock_write(&connection.active_dm) = None;
 }
 
 pub fn send_event<T: Serialize>(connection_id: &str, op: ServerOp, payload: &T) {
@@ -252,6 +283,23 @@ pub fn broadcast_to_channel<T: Serialize>(
     }
 }
 
+pub fn broadcast_to_dm<T: Serialize>(dm_slug: &str, op: ServerOp, payload: &T) {
+    let targets: Vec<String> = registry()
+        .connections
+        .iter()
+        .filter_map(|entry| {
+            if lock_read(&entry.dm_subscriptions).contains(dm_slug) {
+                Some(entry.key().clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    for connection_id in targets {
+        send_event(&connection_id, op, payload);
+    }
+}
+
 pub fn channel_connection_targets(
     guild_slug: &str,
     channel_slug: &str,
@@ -262,6 +310,48 @@ pub fn channel_connection_targets(
         .iter()
         .filter_map(|entry| {
             if lock_read(&entry.channel_subscriptions).contains(&key) {
+                Some(ChannelConnectionTarget {
+                    connection_id: entry.key().clone(),
+                    user_id: entry.user_id.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+pub fn dm_connection_targets(dm_slug: &str) -> Vec<ChannelConnectionTarget> {
+    registry()
+        .connections
+        .iter()
+        .filter_map(|entry| {
+            if lock_read(&entry.dm_subscriptions).contains(dm_slug) {
+                Some(ChannelConnectionTarget {
+                    connection_id: entry.key().clone(),
+                    user_id: entry.user_id.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+pub fn user_connection_targets(user_ids: &[String]) -> Vec<ChannelConnectionTarget> {
+    let target_users: HashSet<&str> = user_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .collect();
+    if target_users.is_empty() {
+        return Vec::new();
+    }
+    registry()
+        .connections
+        .iter()
+        .filter_map(|entry| {
+            if target_users.contains(entry.user_id.as_str()) {
                 Some(ChannelConnectionTarget {
                     connection_id: entry.key().clone(),
                     user_id: entry.user_id.clone(),
@@ -349,6 +439,33 @@ mod tests {
         assert!(
             receiver_b.try_recv().is_err(),
             "non-subscribed connection received a channel event"
+        );
+    }
+
+    #[test]
+    fn dm_broadcast_targets_only_dm_subscribed_connections() {
+        let _guard = test_lock().lock().expect("registry test lock poisoned");
+        reset_for_tests();
+
+        let (sender_a, mut receiver_a) = mpsc::unbounded_channel();
+        let (sender_b, mut receiver_b) = mpsc::unbounded_channel();
+        let connection_a = register_connection("user-a", "session-a", sender_a);
+        let connection_b = register_connection("user-b", "session-b", sender_b);
+
+        subscribe_dm(&connection_a, "dm-abc");
+        subscribe_dm(&connection_b, "dm-def");
+
+        broadcast_to_dm(
+            "dm-abc",
+            ServerOp::DmActivity,
+            &json!({ "dm_slug": "dm-abc" }),
+        );
+
+        let targeted = read_text_message(&mut receiver_a);
+        assert_eq!(targeted["op"], json!("dm_activity"));
+        assert!(
+            receiver_b.try_recv().is_err(),
+            "non-subscribed connection received a dm event"
         );
     }
 }

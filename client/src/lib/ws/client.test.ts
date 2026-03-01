@@ -137,4 +137,29 @@ describe('wsClient', () => {
     expect(ops).toContain('c_subscribe')
     expect(ops).toContain('c_unsubscribe')
   })
+
+  it('syncs dm subscription with c_dm_subscribe operations', () => {
+    wsClient.ensureConnected('session-token')
+    const socket = latestSocket()
+    socket.triggerOpen()
+
+    wsClient.setDmSubscription('dm-123')
+    wsClient.setDmSubscription(null)
+
+    const dmPayloads = socket.sentPayloads
+      .map(
+        (payload) =>
+          JSON.parse(payload) as {
+            op: string
+            d?: { dm_slug?: string | null }
+          },
+      )
+      .filter((payload) => payload.op === 'c_dm_subscribe')
+
+    expect(dmPayloads.length).toBeGreaterThanOrEqual(2)
+    expect(dmPayloads.some((payload) => payload.d?.dm_slug === 'dm-123')).toBe(
+      true,
+    )
+    expect(dmPayloads.some((payload) => payload.d?.dm_slug === null)).toBe(true)
+  })
 })

@@ -189,6 +189,49 @@ pub async fn find_user_profile_by_id(
     Ok(profile)
 }
 
+pub async fn users_share_guild(
+    pool: &DbPool,
+    left_user_id: &str,
+    right_user_id: &str,
+) -> Result<bool, AppError> {
+    let shares_guild = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(
+                SELECT 1
+                FROM guild_members left_member
+                JOIN guild_members right_member
+                  ON right_member.guild_id = left_member.guild_id
+                WHERE left_member.user_id = $1
+                  AND right_member.user_id = $2
+            )",
+            )
+            .bind(left_user_id)
+            .bind(right_user_id)
+            .fetch_one(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM guild_members left_member
+                JOIN guild_members right_member
+                  ON right_member.guild_id = left_member.guild_id
+                WHERE left_member.user_id = ?1
+                  AND right_member.user_id = ?2
+            )",
+        )
+        .bind(left_user_id)
+        .bind(right_user_id)
+        .fetch_one(pool)
+        .await
+        .map(|value| value != 0),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(shares_guild)
+}
+
 pub async fn is_guild_member(
     pool: &DbPool,
     guild_id: &str,

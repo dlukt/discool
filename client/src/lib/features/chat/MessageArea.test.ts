@@ -21,6 +21,7 @@ const {
       id: string
       guildSlug: string
       channelSlug: string
+      dmSlug?: string
       authorUserId: string
       authorUsername: string
       authorDisplayName: string
@@ -73,6 +74,10 @@ const {
     return `${guildSlug}:${channelSlug}`
   }
 
+  function dmKey(dmSlug: string): string {
+    return `dm:${dmSlug}`
+  }
+
   function ensureHistory(key: string) {
     if (!historyByChannel[key]) {
       historyByChannel[key] = {
@@ -93,7 +98,11 @@ const {
     timeline: vi.fn((guildSlug: string, channelSlug: string) => {
       return timelineByChannel[channelKey(guildSlug, channelSlug)] ?? []
     }),
+    timelineForDm: vi.fn((dmSlug: string) => {
+      return timelineByChannel[dmKey(dmSlug)] ?? []
+    }),
     sendMessage: vi.fn(() => true),
+    sendDmMessage: vi.fn(() => true),
     sendTypingStart: vi.fn(() => true),
     uploadAttachment: vi.fn(
       async (
@@ -106,6 +115,7 @@ const {
     sendMessageDelete: vi.fn(() => true),
     sendMessageReactionToggle: vi.fn(() => true),
     setActiveChannel: vi.fn(),
+    setActiveDm: vi.fn(),
     setCurrentUser: vi.fn((userId: string | null) => {
       messageState.currentUserId = userId
     }),
@@ -117,16 +127,23 @@ const {
     historyStateForChannel: vi.fn((guildSlug: string, channelSlug: string) => ({
       ...ensureHistory(channelKey(guildSlug, channelSlug)),
     })),
+    historyStateForDm: vi.fn((dmSlug: string) => ({
+      ...ensureHistory(dmKey(dmSlug)),
+    })),
     loadOlderHistory: vi.fn(async () => {}),
+    ensureDmHistoryLoaded: vi.fn(async (_dmSlug: string) => {}),
+    loadOlderDmHistory: vi.fn(async (_dmSlug: string) => {}),
     setScrollTop: vi.fn(
       (guildSlug: string, channelSlug: string, top: number) => {
         ensureHistory(channelKey(guildSlug, channelSlug)).scrollTop =
           Math.round(top)
       },
     ),
+    setScrollTopForDm: vi.fn((_dmSlug: string, _top: number) => {}),
     scrollTopForChannel: vi.fn((guildSlug: string, channelSlug: string) => {
       return ensureHistory(channelKey(guildSlug, channelSlug)).scrollTop
     }),
+    scrollTopForDm: vi.fn((_dmSlug: string) => 0),
     addPendingNew: vi.fn(
       (guildSlug: string, channelSlug: string, count = 1) => {
         ensureHistory(channelKey(guildSlug, channelSlug)).pendingNewCount +=
@@ -138,6 +155,8 @@ const {
       ensureHistory(channelKey(guildSlug, channelSlug)).pendingNewCount = 0
       messageState.version += 1
     }),
+    addPendingNewForDm: vi.fn((_dmSlug: string, _count = 1) => {}),
+    clearPendingNewForDm: vi.fn((_dmSlug: string) => {}),
     typingUserIdsForChannel: vi.fn(() => [] as string[]),
   }
 
@@ -174,6 +193,7 @@ const {
     lifecycleListeners,
     timelineByChannel,
     historyByChannel,
+    dmKey,
     messageState,
     identityState,
     guildState,
@@ -228,6 +248,31 @@ function seedChannelMessages(channelKey: string, count: number): void {
   }))
 }
 
+function seedDmMessages(dmSlug: string, count: number): void {
+  timelineByChannel[`dm:${dmSlug}`] = Array.from(
+    { length: count },
+    (_, index) => ({
+      id: `dm-${index}`,
+      guildSlug: '',
+      channelSlug: '',
+      dmSlug,
+      authorUserId: 'user-1',
+      authorUsername: 'alice',
+      authorDisplayName: 'Alice',
+      authorAvatarColor: '#3366ff',
+      authorRoleColor: '#3366ff',
+      content: `dm-message-${index}`,
+      isSystem: false,
+      createdAt: `2026-02-28T00:10:${String(index).padStart(2, '0')}Z`,
+      updatedAt: `2026-02-28T00:10:${String(index).padStart(2, '0')}Z`,
+      optimistic: false,
+      attachments: [],
+      reactions: [],
+      embeds: [],
+    }),
+  )
+}
+
 describe('MessageArea', () => {
   beforeEach(() => {
     Object.keys(timelineByChannel).forEach((key) => {
@@ -259,21 +304,31 @@ describe('MessageArea', () => {
 
     messageState.version += 1
     messageState.timeline.mockClear()
+    messageState.timelineForDm.mockClear()
     messageState.sendMessage.mockClear()
+    messageState.sendDmMessage.mockClear()
     messageState.sendTypingStart.mockClear()
     messageState.uploadAttachment.mockClear()
     messageState.sendMessageUpdate.mockClear()
     messageState.sendMessageDelete.mockClear()
     messageState.sendMessageReactionToggle.mockClear()
     messageState.setActiveChannel.mockClear()
+    messageState.setActiveDm.mockClear()
     messageState.setCurrentUser.mockClear()
     messageState.ensureHistoryLoaded.mockClear()
+    messageState.ensureDmHistoryLoaded.mockClear()
     messageState.historyStateForChannel.mockClear()
+    messageState.historyStateForDm.mockClear()
     messageState.loadOlderHistory.mockClear()
+    messageState.loadOlderDmHistory.mockClear()
     messageState.setScrollTop.mockClear()
+    messageState.setScrollTopForDm.mockClear()
     messageState.scrollTopForChannel.mockClear()
+    messageState.scrollTopForDm.mockClear()
     messageState.addPendingNew.mockClear()
+    messageState.addPendingNewForDm.mockClear()
     messageState.clearPendingNew.mockClear()
+    messageState.clearPendingNewForDm.mockClear()
     messageState.typingUserIdsForChannel.mockClear()
     messageState.typingUserIdsForChannel.mockReturnValue([])
     guildState.memberByUserId.mockClear()
@@ -323,6 +378,46 @@ describe('MessageArea', () => {
 
     expect(messageState.sendMessage).not.toHaveBeenCalled()
     expect(composer.value).toBe('line one\n')
+  })
+
+  it('reuses composer and timeline behavior for DM mode', async () => {
+    seedDmMessages('dm-1', 1)
+    historyByChannel['dm:dm-1'] = {
+      initialized: true,
+      loadingHistory: false,
+      hasMoreHistory: true,
+      cursor: 'dm-cursor-1',
+      scrollTop: 0,
+      pendingNewCount: 0,
+    }
+
+    const { getByTestId } = render(MessageArea, {
+      mode: 'dm',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      activeDm: 'dm-1',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    expect(messageState.setActiveDm).toHaveBeenCalledWith('dm-1')
+    const composer = getByTestId(
+      'message-composer-input',
+    ) as HTMLTextAreaElement
+
+    await fireEvent.input(composer, { target: { value: 'hello dm' } })
+    await fireEvent.keyDown(composer, { key: 'Enter' })
+
+    expect(messageState.sendDmMessage).toHaveBeenCalledWith(
+      'dm-1',
+      'hello dm',
+      expect.objectContaining({
+        userId: 'user-1',
+        username: 'alice',
+        displayName: 'Alice',
+      }),
+    )
   })
 
   it('emits typing_start only for non-empty composer drafts', async () => {
