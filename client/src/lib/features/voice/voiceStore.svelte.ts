@@ -224,7 +224,6 @@ function handleVoiceConnectionState(payload: VoiceConnectionStateWire): void {
   if (!context || !matchesActiveContext(context)) return
   const state = payload.state
   if (state === 'connected') {
-    markConnectedIfActive(context)
     return
   }
   if (state === 'failed') {

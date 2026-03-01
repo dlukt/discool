@@ -630,12 +630,15 @@ async fn handle_voice_join(
         ));
     }
 
-    let start = voice_runtime.start_signaling(
-        connection_id,
-        user_id,
-        &payload.guild_slug,
-        &payload.channel_slug,
-    );
+    let start = voice_runtime
+        .start_signaling(
+            connection_id,
+            user_id,
+            &payload.guild_slug,
+            &payload.channel_slug,
+        )
+        .await
+        .map_err(AppError::ValidationError)?;
     registry::send_event(
         connection_id,
         ServerOp::VoiceConnectionState,
@@ -648,7 +651,7 @@ async fn handle_voice_join(
     Ok(())
 }
 
-fn handle_voice_answer(
+async fn handle_voice_answer(
     voice_runtime: &VoiceRuntime,
     connection_id: &str,
     payload: VoiceAnswerPayload,
@@ -665,12 +668,13 @@ fn handle_voice_answer(
             &payload.channel_slug,
             &payload.sdp,
         )
+        .await
         .map_err(AppError::ValidationError)?;
     registry::send_event(connection_id, ServerOp::VoiceConnectionState, &state);
     Ok(())
 }
 
-fn handle_voice_ice_candidate(
+async fn handle_voice_ice_candidate(
     voice_runtime: &VoiceRuntime,
     connection_id: &str,
     payload: VoiceIceCandidatePayload,
@@ -680,10 +684,16 @@ fn handle_voice_ice_candidate(
             "candidate is required".to_string(),
         ));
     }
-    let _ = payload.sdp_mid.as_deref();
-    let _ = payload.sdp_mline_index;
     voice_runtime
-        .apply_remote_candidate(connection_id, &payload.guild_slug, &payload.channel_slug)
+        .apply_remote_candidate(
+            connection_id,
+            &payload.guild_slug,
+            &payload.channel_slug,
+            &payload.candidate,
+            payload.sdp_mid.as_deref(),
+            payload.sdp_mline_index,
+        )
+        .await
         .map_err(AppError::ValidationError)
 }
 
@@ -822,7 +832,8 @@ async fn process_client_message(
         },
         ClientOp::VoiceAnswer => match parse_voice_answer_payload(envelope.d, &envelope.op) {
             Ok(payload) => {
-                if let Err(error) = handle_voice_answer(voice_runtime, connection_id, payload) {
+                if let Err(error) = handle_voice_answer(voice_runtime, connection_id, payload).await
+                {
                     send_app_error(connection_id, error);
                 }
             }
@@ -832,7 +843,7 @@ async fn process_client_message(
             match parse_voice_ice_candidate_payload(envelope.d, &envelope.op) {
                 Ok(payload) => {
                     if let Err(error) =
-                        handle_voice_ice_candidate(voice_runtime, connection_id, payload)
+                        handle_voice_ice_candidate(voice_runtime, connection_id, payload).await
                     {
                         send_app_error(connection_id, error);
                     }
@@ -928,6 +939,7 @@ pub async fn handle_socket(
         }
     }
 
+    voice_runtime.clear_connection(&connection_id).await;
     presence_service::mark_disconnected(&user_id);
     presence_service::unregister_connection(&connection_id);
 }

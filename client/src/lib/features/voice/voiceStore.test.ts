@@ -96,7 +96,7 @@ describe('voiceState', () => {
     })
   })
 
-  it('marks voice as connected when server confirms connection state', () => {
+  it('does not mark voice as connected from server state alone', () => {
     voiceState.activateVoiceChannel('lobby', 'voice-room')
 
     emitEnvelope({
@@ -108,8 +108,8 @@ describe('voiceState', () => {
       },
     })
 
-    expect(voiceState.status).toBe('connected')
+    expect(voiceState.status).toBe('connecting')
     expect(voiceState.statusMessage).toBeNull()
-    expect(voiceState.joinLatencyMs).not.toBeNull()
+    expect(voiceState.joinLatencyMs).toBeNull()
   })
 })

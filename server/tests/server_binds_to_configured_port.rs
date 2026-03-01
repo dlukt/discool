@@ -4616,7 +4616,7 @@ async fn websocket_invalid_client_operation_returns_protocol_error() {
 }
 
 #[tokio::test]
-async fn websocket_voice_join_emits_offer_and_candidate_then_transitions_connected() {
+async fn websocket_voice_join_emits_offer_and_candidate_and_rejects_invalid_answer_sdp() {
     use serde_json::json;
 
     let port = pick_free_port();
@@ -4713,10 +4713,10 @@ async fn websocket_voice_join_emits_offer_and_candidate_then_transitions_connect
     )
     .await;
 
-    let connected = websocket_read_json_with_op(&mut stream, "voice_connection_state", 1_500)
+    let answer_error = websocket_read_json_with_op(&mut stream, "error", 1_500)
         .await
-        .expect("voice answer should emit connected state");
-    assert_eq!(connected["d"]["state"], json!("connected"));
+        .expect("invalid voice answer SDP should return error");
+    assert_eq!(answer_error["d"]["code"], json!("VALIDATION_ERROR"));
 }
 
 #[tokio::test]
