@@ -116,7 +116,7 @@ development_status:
   7-1-webrtc-signaling-and-peer-connection: done
   7-2-voice-bar-and-basic-controls: done
   7-3-voice-channel-participants-display: done
-  7-4-individual-volume-control: backlog
+  7-4-individual-volume-control: ready-for-dev
   7-5-voice-channel-switching: backlog
   7-6-voice-auto-reconnect: backlog
   7-7-mobile-voice-controls: backlog
