@@ -128,7 +128,7 @@ development_status:
   8-2-kick-user-from-guild: done
   8-3-ban-user-from-guild: done
   8-4-kick-user-from-voice-channel: done
-  8-5-moderation-log: backlog
+  8-5-moderation-log: done
   8-6-message-deletion-by-moderators: backlog
   8-7-view-user-message-history-moderator: backlog
   8-8-user-content-reporting: backlog

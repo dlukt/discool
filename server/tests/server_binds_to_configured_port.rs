@@ -5437,6 +5437,97 @@ async fn moderation_voice_kick_disconnects_target_and_allows_rejoin() {
 }
 
 #[tokio::test]
+async fn moderation_log_lists_real_actions_and_enforces_view_permission() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "modlog-owner", [207u8; 32]).await;
+    let member_token = register_and_authenticate(&addr, "modlog-member", [208u8; 32]).await;
+
+    let member_profile =
+        http_response_with_bearer(&addr, "/api/v1/users/me/profile", &member_token).await;
+    assert_eq!(response_status(&member_profile), 200);
+    let member_profile_json: serde_json::Value =
+        serde_json::from_str(response_body(&member_profile)).unwrap();
+    let member_user_id = member_profile_json["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let guild_body = json!({ "name": "Moderation Log Guild" }).to_string();
+    let guild_res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_slug = guild_json["data"]["slug"].as_str().unwrap().to_string();
+
+    let invite_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/invites"),
+        &json!({ "type": "reusable" }).to_string(),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&invite_res), 201);
+    let invite_json: serde_json::Value = serde_json::from_str(response_body(&invite_res)).unwrap();
+    let invite_code = invite_json["data"]["code"].as_str().unwrap().to_string();
+
+    let join_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/invites/{invite_code}/join"),
+        "{}",
+        &member_token,
+    )
+    .await;
+    assert_eq!(response_status(&join_res), 200);
+
+    let mute_body = json!({
+        "target_user_id": member_user_id.as_str(),
+        "reason": "audit trail seed",
+        "duration_seconds": 3600,
+    })
+    .to_string();
+    let mute_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/moderation/mutes"),
+        &mute_body,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&mute_res), 201);
+
+    let owner_log = http_response_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/moderation/log?limit=10&order=desc"),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&owner_log), 200);
+    let owner_log_json: serde_json::Value =
+        serde_json::from_str(response_body(&owner_log)).unwrap();
+    let entries = owner_log_json["data"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    assert_eq!(entries[0]["action_type"], json!("mute"));
+    assert_eq!(entries[0]["target_user_id"], json!(member_user_id.as_str()));
+    assert_eq!(entries[0]["reason"], json!("audit trail seed"));
+    assert!(owner_log_json.get("cursor").is_some());
+
+    let member_log = http_response_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/moderation/log"),
+        &member_token,
+    )
+    .await;
+    assert_eq!(response_status(&member_log), 403);
+}
+
+#[tokio::test]
 async fn websocket_voice_join_rejects_text_channels_and_invalid_payloads() {
     use serde_json::json;
 

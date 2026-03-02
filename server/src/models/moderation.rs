@@ -1,9 +1,12 @@
 use crate::{AppError, db::DbPool};
+use sqlx::QueryBuilder;
 
 pub const MODERATION_ACTION_TYPE_MUTE: &str = "mute";
 pub const MODERATION_ACTION_TYPE_KICK: &str = "kick";
 pub const MODERATION_ACTION_TYPE_BAN: &str = "ban";
 pub const MODERATION_ACTION_TYPE_VOICE_KICK: &str = "voice_kick";
+pub const MODERATION_ACTION_TYPE_MESSAGE_DELETE: &str = "message_delete";
+pub const MODERATION_ACTION_TYPE_WARN: &str = "warn";
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ModerationActionRecord {
@@ -18,6 +21,40 @@ pub struct ModerationActionRecord {
     pub is_active: i64,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModerationLogCursor {
+    pub created_at: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModerationLogSortOrder {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ModerationLogRow {
+    pub id: String,
+    pub action_type: String,
+    pub reason: String,
+    pub created_at: String,
+    pub actor_user_id: String,
+    pub actor_username: String,
+    pub actor_display_name: Option<String>,
+    pub actor_avatar_color: Option<String>,
+    pub target_user_id: String,
+    pub target_username: String,
+    pub target_display_name: Option<String>,
+    pub target_avatar_color: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModerationLogPage {
+    pub entries: Vec<ModerationLogRow>,
+    pub has_more: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -210,6 +247,144 @@ pub async fn deactivate_active_mutes_for_target(
     .map_err(|err| AppError::Internal(err.to_string()))?;
 
     Ok(rows_affected)
+}
+
+pub async fn list_moderation_log_page_by_guild_id(
+    pool: &DbPool,
+    guild_id: &str,
+    action_type: Option<&str>,
+    cursor: Option<&ModerationLogCursor>,
+    limit: i64,
+    order: ModerationLogSortOrder,
+) -> Result<ModerationLogPage, AppError> {
+    let normalized_limit = limit.clamp(1, 200);
+    let fetch_limit = normalized_limit + 1;
+    let order_sql = match order {
+        ModerationLogSortOrder::Asc => "ASC",
+        ModerationLogSortOrder::Desc => "DESC",
+    };
+
+    let mut entries = match pool {
+        DbPool::Postgres(pool) => {
+            let mut query = QueryBuilder::<sqlx::Postgres>::new(
+                "SELECT
+                    ma.id,
+                    ma.action_type,
+                    ma.reason,
+                    ma.created_at,
+                    ma.actor_user_id,
+                    actor.username AS actor_username,
+                    actor.display_name AS actor_display_name,
+                    actor.avatar_color AS actor_avatar_color,
+                    ma.target_user_id,
+                    target.username AS target_username,
+                    target.display_name AS target_display_name,
+                    target.avatar_color AS target_avatar_color
+                 FROM moderation_actions ma
+                 JOIN users actor ON actor.id = ma.actor_user_id
+                 JOIN users target ON target.id = ma.target_user_id
+                 WHERE ma.guild_id = ",
+            );
+            query.push_bind(guild_id);
+            if let Some(action_type) = action_type {
+                query.push(" AND ma.action_type = ");
+                query.push_bind(action_type);
+            }
+            if let Some(cursor) = cursor {
+                match order {
+                    ModerationLogSortOrder::Desc => {
+                        query.push(" AND (ma.created_at < ");
+                        query.push_bind(&cursor.created_at);
+                        query.push(" OR (ma.created_at = ");
+                        query.push_bind(&cursor.created_at);
+                        query.push(" AND ma.id < ");
+                        query.push_bind(&cursor.id);
+                        query.push("))");
+                    }
+                    ModerationLogSortOrder::Asc => {
+                        query.push(" AND (ma.created_at > ");
+                        query.push_bind(&cursor.created_at);
+                        query.push(" OR (ma.created_at = ");
+                        query.push_bind(&cursor.created_at);
+                        query.push(" AND ma.id > ");
+                        query.push_bind(&cursor.id);
+                        query.push("))");
+                    }
+                }
+            }
+            query.push(" ORDER BY ma.created_at ");
+            query.push(order_sql);
+            query.push(", ma.id ");
+            query.push(order_sql);
+            query.push(" LIMIT ");
+            query.push_bind(fetch_limit);
+            query.build_query_as().fetch_all(pool).await
+        }
+        DbPool::Sqlite(pool) => {
+            let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                "SELECT
+                    ma.id,
+                    ma.action_type,
+                    ma.reason,
+                    ma.created_at,
+                    ma.actor_user_id,
+                    actor.username AS actor_username,
+                    actor.display_name AS actor_display_name,
+                    actor.avatar_color AS actor_avatar_color,
+                    ma.target_user_id,
+                    target.username AS target_username,
+                    target.display_name AS target_display_name,
+                    target.avatar_color AS target_avatar_color
+                 FROM moderation_actions ma
+                 JOIN users actor ON actor.id = ma.actor_user_id
+                 JOIN users target ON target.id = ma.target_user_id
+                 WHERE ma.guild_id = ",
+            );
+            query.push_bind(guild_id);
+            if let Some(action_type) = action_type {
+                query.push(" AND ma.action_type = ");
+                query.push_bind(action_type);
+            }
+            if let Some(cursor) = cursor {
+                match order {
+                    ModerationLogSortOrder::Desc => {
+                        query.push(" AND (ma.created_at < ");
+                        query.push_bind(&cursor.created_at);
+                        query.push(" OR (ma.created_at = ");
+                        query.push_bind(&cursor.created_at);
+                        query.push(" AND ma.id < ");
+                        query.push_bind(&cursor.id);
+                        query.push("))");
+                    }
+                    ModerationLogSortOrder::Asc => {
+                        query.push(" AND (ma.created_at > ");
+                        query.push_bind(&cursor.created_at);
+                        query.push(" OR (ma.created_at = ");
+                        query.push_bind(&cursor.created_at);
+                        query.push(" AND ma.id > ");
+                        query.push_bind(&cursor.id);
+                        query.push("))");
+                    }
+                }
+            }
+            query.push(" ORDER BY ma.created_at ");
+            query.push(order_sql);
+            query.push(", ma.id ");
+            query.push(order_sql);
+            query.push(" LIMIT ");
+            query.push_bind(fetch_limit);
+            query.build_query_as().fetch_all(pool).await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    let page_limit = usize::try_from(normalized_limit).unwrap_or(200);
+    let has_more = entries.len() > page_limit;
+    if has_more {
+        entries.truncate(page_limit);
+    }
+
+    Ok(ModerationLogPage { entries, has_more })
 }
 
 async fn postgres_actor_outranks_target_member_in_tx(

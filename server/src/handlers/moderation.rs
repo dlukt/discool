@@ -1,7 +1,8 @@
 use axum::{
     Json,
     extract::rejection::JsonRejection,
-    extract::{Path, State},
+    extract::rejection::QueryRejection,
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -13,6 +14,7 @@ use crate::{
     middleware::auth::AuthenticatedUser,
     services::moderation_service::{
         self, CreateBanInput, CreateKickInput, CreateMuteInput, CreateVoiceKickInput,
+        ListModerationLogInput,
     },
     ws::{protocol::ServerOp, registry},
 };
@@ -45,6 +47,18 @@ pub struct CreateBanRequest {
     pub target_user_id: Option<String>,
     pub reason: Option<String>,
     pub delete_message_window: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListModerationLogQuery {
+    #[serde(default)]
+    pub limit: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub order: Option<String>,
+    #[serde(default)]
+    pub action_type: Option<String>,
 }
 
 pub async fn create_mute(
@@ -139,6 +153,33 @@ pub async fn list_bans(
 ) -> Result<Response, AppError> {
     let bans = moderation_service::list_bans(&state.pool, &user.user_id, &guild_slug).await?;
     Ok((StatusCode::OK, Json(json!({ "data": bans }))).into_response())
+}
+
+pub async fn list_moderation_log(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(guild_slug): Path<String>,
+    query: Result<Query<ListModerationLogQuery>, QueryRejection>,
+) -> Result<Response, AppError> {
+    let Query(query) =
+        query.map_err(|_| AppError::ValidationError("Invalid query parameters".to_string()))?;
+    let page = moderation_service::list_moderation_log(
+        &state.pool,
+        &user.user_id,
+        &guild_slug,
+        ListModerationLogInput {
+            limit: query.limit,
+            cursor: query.cursor,
+            order: query.order,
+            action_type: query.action_type,
+        },
+    )
+    .await?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "data": page.entries, "cursor": page.cursor })),
+    )
+        .into_response())
 }
 
 pub async fn delete_ban(
@@ -834,5 +875,108 @@ mod tests {
             .unwrap();
         let removed: Value = serde_json::from_slice(&delete_body).unwrap();
         assert_eq!(removed["data"]["id"], Value::String(ban_id));
+    }
+
+    #[tokio::test]
+    async fn list_moderation_log_returns_data_envelope_with_cursor() {
+        let state = test_state().await;
+        seed_guild_fixture(&state).await;
+        match &state.pool {
+            crate::db::DbPool::Postgres(pool) => {
+                sqlx::query(
+                    "UPDATE roles
+                     SET permissions_bitflag = $1
+                     WHERE id = $2",
+                )
+                .bind(
+                    (crate::permissions::MUTE_MEMBERS
+                        | crate::permissions::KICK_MEMBERS
+                        | crate::permissions::BAN_MEMBERS
+                        | crate::permissions::VIEW_MOD_LOG) as i64,
+                )
+                .bind("role-mod")
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            crate::db::DbPool::Sqlite(pool) => {
+                sqlx::query(
+                    "UPDATE roles
+                     SET permissions_bitflag = ?1
+                     WHERE id = ?2",
+                )
+                .bind(
+                    (crate::permissions::MUTE_MEMBERS
+                        | crate::permissions::KICK_MEMBERS
+                        | crate::permissions::BAN_MEMBERS
+                        | crate::permissions::VIEW_MOD_LOG) as i64,
+                )
+                .bind("role-mod")
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+        crate::permissions::invalidate_guild_permission_cache("guild-id");
+        crate::models::moderation::insert_moderation_action(
+            &state.pool,
+            "moderation-log-entry-1",
+            crate::models::moderation::MODERATION_ACTION_TYPE_KICK,
+            "guild-id",
+            "mod-user-id",
+            "target-user-id",
+            "serious breach",
+            None,
+            None,
+            false,
+            "2026-03-01T00:00:00Z",
+            "2026-03-01T00:00:00Z",
+        )
+        .await
+        .unwrap();
+
+        let response = list_moderation_log(
+            State(state),
+            mod_user(),
+            Path("test-guild".to_string()),
+            Ok(Query(ListModerationLogQuery {
+                limit: Some("10".to_string()),
+                cursor: None,
+                order: Some("desc".to_string()),
+                action_type: None,
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert!(payload.get("data").is_some());
+        assert_eq!(
+            payload["data"][0]["action_type"],
+            Value::String("kick".to_string())
+        );
+        assert!(payload.get("cursor").is_some());
+    }
+
+    #[tokio::test]
+    async fn list_moderation_log_rejects_invalid_query_parameters() {
+        let state = test_state().await;
+        seed_guild_fixture(&state).await;
+        let err = list_moderation_log(
+            State(state),
+            mod_user(),
+            Path("test-guild".to_string()),
+            Ok(Query(ListModerationLogQuery {
+                limit: Some("10".to_string()),
+                cursor: None,
+                order: Some("invalid".to_string()),
+                action_type: None,
+            })),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::ValidationError(_)));
     }
 }

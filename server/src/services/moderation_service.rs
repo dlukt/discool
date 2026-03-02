@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use uuid::Uuid;
@@ -19,6 +20,8 @@ use crate::{
 
 const MAX_MUTE_REASON_CHARS: usize = 500;
 const MAX_MUTE_DURATION_SECONDS: i64 = 315_360_000; // 10 years
+const DEFAULT_MODERATION_LOG_LIMIT: i64 = 50;
+const MAX_MODERATION_LOG_LIMIT: i64 = 200;
 
 #[derive(Debug, Clone)]
 pub struct CreateMuteInput {
@@ -45,6 +48,14 @@ pub struct CreateBanInput {
     pub target_user_id: String,
     pub reason: String,
     pub delete_message_window: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListModerationLogInput {
+    pub limit: Option<String>,
+    pub cursor: Option<String>,
+    pub order: Option<String>,
+    pub action_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,6 +148,30 @@ pub struct UnbanActionResponse {
     pub unbanned_by_user_id: String,
     pub unbanned_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModerationLogEntryResponse {
+    pub id: String,
+    pub action_type: String,
+    pub reason: String,
+    pub created_at: String,
+    pub actor_user_id: String,
+    pub actor_username: String,
+    pub actor_display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor_avatar_color: Option<String>,
+    pub target_user_id: String,
+    pub target_username: String,
+    pub target_display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_avatar_color: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListModerationLogResult {
+    pub entries: Vec<ModerationLogEntryResponse>,
+    pub cursor: Option<String>,
 }
 
 pub async fn create_mute(
@@ -493,6 +528,82 @@ pub async fn list_bans(
         .collect())
 }
 
+pub async fn list_moderation_log(
+    pool: &DbPool,
+    actor_user_id: &str,
+    guild_slug: &str,
+    input: ListModerationLogInput,
+) -> Result<ListModerationLogResult, AppError> {
+    let actor_user_id = normalize_id(actor_user_id, "actor_user_id")?;
+    let guild_slug = normalize_slug(guild_slug, "guild_slug")?;
+    let limit = normalize_moderation_log_limit(input.limit.as_deref())?;
+    let order = normalize_moderation_log_order(input.order.as_deref())?;
+    let action_type = normalize_moderation_log_action_type(input.action_type.as_deref())?;
+    let cursor = decode_moderation_log_cursor(input.cursor.as_deref())?;
+
+    let guild = guild::find_guild_by_slug(pool, &guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    permissions::require_guild_permission(
+        pool,
+        &guild,
+        &actor_user_id,
+        permissions::VIEW_MOD_LOG,
+        "VIEW_MOD_LOG",
+    )
+    .await?;
+
+    let page = moderation::list_moderation_log_page_by_guild_id(
+        pool,
+        &guild.id,
+        action_type.as_deref(),
+        cursor.as_ref(),
+        limit,
+        order,
+    )
+    .await?;
+    let next_cursor = if page.has_more {
+        page.entries.last().map(|entry| {
+            encode_moderation_log_cursor(&moderation::ModerationLogCursor {
+                created_at: entry.created_at.clone(),
+                id: entry.id.clone(),
+            })
+        })
+    } else {
+        None
+    };
+
+    let entries = page
+        .entries
+        .into_iter()
+        .map(|entry| ModerationLogEntryResponse {
+            id: entry.id,
+            action_type: entry.action_type,
+            reason: entry.reason,
+            created_at: entry.created_at,
+            actor_user_id: entry.actor_user_id,
+            actor_username: entry.actor_username.clone(),
+            actor_display_name: profile_display_name(
+                entry.actor_display_name.as_deref(),
+                &entry.actor_username,
+            ),
+            actor_avatar_color: entry.actor_avatar_color,
+            target_user_id: entry.target_user_id,
+            target_username: entry.target_username.clone(),
+            target_display_name: profile_display_name(
+                entry.target_display_name.as_deref(),
+                &entry.target_username,
+            ),
+            target_avatar_color: entry.target_avatar_color,
+        })
+        .collect();
+
+    Ok(ListModerationLogResult {
+        entries,
+        cursor: next_cursor,
+    })
+}
+
 pub async fn unban(
     pool: &DbPool,
     actor_user_id: &str,
@@ -707,6 +818,108 @@ fn normalize_delete_message_window(value: &str) -> Result<(&'static str, Option<
             "delete_message_window must be one of: none, 1h, 24h, 7d".to_string(),
         )),
     }
+}
+
+fn normalize_moderation_log_limit(raw: Option<&str>) -> Result<i64, AppError> {
+    let Some(raw) = raw else {
+        return Ok(DEFAULT_MODERATION_LOG_LIMIT);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_MODERATION_LOG_LIMIT);
+    }
+    let parsed = trimmed
+        .parse::<i64>()
+        .map_err(|_| AppError::ValidationError("limit must be a valid integer".to_string()))?;
+    Ok(parsed.clamp(1, MAX_MODERATION_LOG_LIMIT))
+}
+
+fn normalize_moderation_log_order(
+    raw: Option<&str>,
+) -> Result<moderation::ModerationLogSortOrder, AppError> {
+    let Some(raw) = raw else {
+        return Ok(moderation::ModerationLogSortOrder::Desc);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(moderation::ModerationLogSortOrder::Desc);
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "asc" => Ok(moderation::ModerationLogSortOrder::Asc),
+        "desc" => Ok(moderation::ModerationLogSortOrder::Desc),
+        _ => Err(AppError::ValidationError(
+            "order must be one of: asc, desc".to_string(),
+        )),
+    }
+}
+
+fn normalize_moderation_log_action_type(raw: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    match normalized.as_str() {
+        moderation::MODERATION_ACTION_TYPE_MUTE
+        | moderation::MODERATION_ACTION_TYPE_KICK
+        | moderation::MODERATION_ACTION_TYPE_BAN
+        | moderation::MODERATION_ACTION_TYPE_VOICE_KICK
+        | moderation::MODERATION_ACTION_TYPE_MESSAGE_DELETE
+        | moderation::MODERATION_ACTION_TYPE_WARN => Ok(Some(normalized)),
+        _ => Err(AppError::ValidationError(
+            "action_type must be one of: mute, kick, ban, voice_kick, message_delete, warn"
+                .to_string(),
+        )),
+    }
+}
+
+fn decode_moderation_log_cursor(
+    value: Option<&str>,
+) -> Result<Option<moderation::ModerationLogCursor>, AppError> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    decode_moderation_log_cursor_value(trimmed).map(Some)
+}
+
+fn decode_moderation_log_cursor_value(
+    encoded: &str,
+) -> Result<moderation::ModerationLogCursor, AppError> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| AppError::ValidationError("cursor is invalid".to_string()))?;
+    let decoded_str = std::str::from_utf8(&decoded)
+        .map_err(|_| AppError::ValidationError("cursor is invalid".to_string()))?;
+    let (created_at, id) = decoded_str
+        .split_once('|')
+        .ok_or_else(|| AppError::ValidationError("cursor is invalid".to_string()))?;
+    if id.trim().is_empty() {
+        return Err(AppError::ValidationError("cursor is invalid".to_string()));
+    }
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .map_err(|_| AppError::ValidationError("cursor is invalid".to_string()))?;
+    Ok(moderation::ModerationLogCursor {
+        created_at: created_at.to_string(),
+        id: id.to_string(),
+    })
+}
+
+fn encode_moderation_log_cursor(cursor: &moderation::ModerationLogCursor) -> String {
+    URL_SAFE_NO_PAD.encode(format!("{}|{}", cursor.created_at, cursor.id))
+}
+
+fn profile_display_name(display_name: Option<&str>, username: &str) -> String {
+    display_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(username)
+        .to_string()
 }
 
 async fn delete_recent_messages_for_banned_user(
@@ -1025,6 +1238,28 @@ mod tests {
         .unwrap();
     }
 
+    async fn grant_view_mod_log_permission(pool: &DbPool) {
+        let DbPool::Sqlite(sqlite_pool) = pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+        sqlx::query(
+            "UPDATE roles
+             SET permissions_bitflag = ?1
+             WHERE id = ?2",
+        )
+        .bind(
+            (permissions::MUTE_MEMBERS
+                | permissions::KICK_MEMBERS
+                | permissions::BAN_MEMBERS
+                | permissions::VIEW_MOD_LOG) as i64,
+        )
+        .bind("role-moderator")
+        .execute(sqlite_pool)
+        .await
+        .unwrap();
+        permissions::invalidate_guild_permission_cache("guild-id");
+    }
+
     #[test]
     fn normalize_reason_requires_non_empty_reason() {
         assert!(normalize_reason("   ").is_err());
@@ -1033,6 +1268,43 @@ mod tests {
             normalize_reason("  valid reason  ").unwrap(),
             "valid reason"
         );
+    }
+
+    #[test]
+    fn moderation_log_input_normalizers_validate_supported_values() {
+        assert_eq!(normalize_moderation_log_limit(None).unwrap(), 50);
+        assert_eq!(normalize_moderation_log_limit(Some("")).unwrap(), 50);
+        assert_eq!(normalize_moderation_log_limit(Some("0")).unwrap(), 1);
+        assert_eq!(normalize_moderation_log_limit(Some("500")).unwrap(), 200);
+        assert!(normalize_moderation_log_limit(Some("abc")).is_err());
+
+        assert_eq!(
+            normalize_moderation_log_order(None).unwrap(),
+            moderation::ModerationLogSortOrder::Desc
+        );
+        assert_eq!(
+            normalize_moderation_log_order(Some("ASC")).unwrap(),
+            moderation::ModerationLogSortOrder::Asc
+        );
+        assert!(normalize_moderation_log_order(Some("sideways")).is_err());
+
+        assert_eq!(
+            normalize_moderation_log_action_type(Some("voice_kick")).unwrap(),
+            Some("voice_kick".to_string())
+        );
+        assert!(normalize_moderation_log_action_type(Some("unknown")).is_err());
+    }
+
+    #[test]
+    fn moderation_log_cursor_round_trip_and_validation() {
+        let cursor = moderation::ModerationLogCursor {
+            created_at: "2026-03-01T00:00:00Z".to_string(),
+            id: "moderation-action-id".to_string(),
+        };
+        let encoded = encode_moderation_log_cursor(&cursor);
+        let decoded = decode_moderation_log_cursor_value(&encoded).unwrap();
+        assert_eq!(decoded, cursor);
+        assert!(decode_moderation_log_cursor_value("bad").is_err());
     }
 
     #[tokio::test]
@@ -1888,6 +2160,134 @@ mod tests {
 
         let bans_after = list_bans(&pool, "mod-user-id", "test-guild").await.unwrap();
         assert!(bans_after.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_moderation_log_requires_permission_and_supports_query_controls() {
+        let pool = setup_service_pool().await;
+        for (id, action_type, created_at) in [
+            (
+                "log-001",
+                moderation::MODERATION_ACTION_TYPE_MUTE,
+                "2026-03-01T00:00:01Z",
+            ),
+            (
+                "log-002",
+                moderation::MODERATION_ACTION_TYPE_KICK,
+                "2026-03-01T00:00:02Z",
+            ),
+            (
+                "log-003",
+                moderation::MODERATION_ACTION_TYPE_WARN,
+                "2026-03-01T00:00:03Z",
+            ),
+        ] {
+            moderation::insert_moderation_action(
+                &pool,
+                id,
+                action_type,
+                "guild-id",
+                "mod-user-id",
+                "target-user-id",
+                "reason",
+                None,
+                None,
+                false,
+                created_at,
+                created_at,
+            )
+            .await
+            .unwrap();
+        }
+
+        let forbidden = list_moderation_log(
+            &pool,
+            "peer-user-id",
+            "test-guild",
+            ListModerationLogInput {
+                limit: Some("2".to_string()),
+                cursor: None,
+                order: Some("desc".to_string()),
+                action_type: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(forbidden, AppError::Forbidden(_)));
+
+        grant_view_mod_log_permission(&pool).await;
+
+        let first_page = list_moderation_log(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            ListModerationLogInput {
+                limit: Some("2".to_string()),
+                cursor: None,
+                order: Some("desc".to_string()),
+                action_type: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(first_page.entries.len(), 2);
+        assert_eq!(first_page.entries[0].id, "log-003");
+        assert_eq!(first_page.entries[1].id, "log-002");
+        assert!(first_page.cursor.is_some());
+
+        let second_page = list_moderation_log(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            ListModerationLogInput {
+                limit: Some("2".to_string()),
+                cursor: first_page.cursor.clone(),
+                order: Some("desc".to_string()),
+                action_type: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(second_page.entries.len(), 1);
+        assert_eq!(second_page.entries[0].id, "log-001");
+
+        let filtered = list_moderation_log(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            ListModerationLogInput {
+                limit: Some("5".to_string()),
+                cursor: None,
+                order: Some("desc".to_string()),
+                action_type: Some("kick".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(filtered.entries.len(), 1);
+        assert_eq!(filtered.entries[0].id, "log-002");
+
+        let ascending = list_moderation_log(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            ListModerationLogInput {
+                limit: Some("5".to_string()),
+                cursor: None,
+                order: Some("asc".to_string()),
+                action_type: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ascending
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["log-001", "log-002", "log-003"]
+        );
     }
 
     #[tokio::test]

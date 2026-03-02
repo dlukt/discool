@@ -1,5 +1,6 @@
 <script lang="ts">
 // biome-ignore-all lint/correctness/noUnusedVariables: Svelte template usage isn't detected reliably.
+// biome-ignore-all lint/correctness/noUnusedImports: Svelte template usage isn't detected reliably.
 import { ApiError } from '$lib/api'
 
 import { guildState } from '$lib/features/guild/guildStore.svelte'
@@ -14,6 +15,7 @@ import type {
 } from '$lib/features/guild/types'
 import { blockState } from '$lib/features/identity/blockStore.svelte'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
+import ModLogPanel from '$lib/features/moderation/ModLogPanel.svelte'
 import {
   type BanDeleteMessageWindow,
   createBan,
@@ -31,6 +33,7 @@ type ModerationPermission =
   | 'MUTE_MEMBERS'
   | 'KICK_MEMBERS'
   | 'BAN_MEMBERS'
+  | 'VIEW_MOD_LOG'
   | 'MANAGE_MESSAGES'
 
 type MuteDurationPreset = '1h' | '24h' | '7d' | 'custom' | 'permanent'
@@ -50,6 +53,8 @@ type MemberGroup = {
   idleCount: number
   offlineCount: number
 }
+
+type MemberSidebarPanel = 'members' | 'mod-log'
 
 type VirtualRow = {
   id: string
@@ -112,6 +117,7 @@ let roleOverridesByMember = $state<Record<string, string[]>>({})
 let scrollTop = $state(0)
 let viewportHeight = $state(240)
 let listViewport = $state<HTMLDivElement | null>(null)
+let activePanel = $state<MemberSidebarPanel>('members')
 
 let memberRoleData = $derived(guildState.memberRoleDataForGuild(activeGuild))
 let members = $derived(memberRoleData.members)
@@ -150,6 +156,7 @@ let viewerPermissionBitflag = $derived(
 let moderationActions = $derived(
   MODERATION_ACTIONS.filter((action) => viewerHasPermission(action.permission)),
 )
+let canViewModerationLog = $derived(viewerHasPermission('VIEW_MOD_LOG'))
 
 let groupedMembers = $derived.by(() => {
   const grouped = new Map<string, MemberGroup>()
@@ -435,6 +442,17 @@ function openMemberPopover(member: GuildMember): void {
 function closeMemberPopover(): void {
   selectedMemberId = null
   assignPanelMemberId = null
+}
+
+function setActivePanel(panel: MemberSidebarPanel): void {
+  activePanel = panel
+  if (panel === 'members') return
+  closeMemberPopover()
+  closeMuteDialog()
+  closeKickDialog()
+  closeBanDialog()
+  errorMessage = null
+  statusMessage = null
 }
 
 function toggleAssignPanel(member: GuildMember): void {
@@ -816,6 +834,7 @@ $effect(() => {
   resetBanDialogState()
   roleOverridesByMember = {}
   scrollTop = 0
+  activePanel = 'members'
   const guildSlug = activeGuild
 
   void guildState
@@ -842,6 +861,11 @@ $effect(() => {
 $effect(() => {
   viewportHeight = listViewport?.clientHeight || 240
 })
+
+$effect(() => {
+  if (canViewModerationLog || activePanel !== 'mod-log') return
+  activePanel = 'members'
+})
 </script>
 
 <aside class="flex h-full min-h-0 flex-col bg-card p-4" data-testid="member-list" aria-label="Member list">
@@ -867,7 +891,38 @@ $effect(() => {
     </p>
   {/if}
 
-  {#if loading && membersWithPresence.length === 0}
+  {#if canViewModerationLog}
+    <div class="mb-3 grid grid-cols-2 gap-2" data-testid="member-list-panel-tabs">
+      <button
+        type="button"
+        class={`rounded-md border px-2 py-1.5 text-xs font-medium ${
+          activePanel === 'members'
+            ? 'border-border bg-muted text-foreground'
+            : 'border-border/60 text-muted-foreground hover:bg-muted/70'
+        }`}
+        onclick={() => setActivePanel('members')}
+        data-testid="member-list-tab-members"
+      >
+        Members
+      </button>
+      <button
+        type="button"
+        class={`rounded-md border px-2 py-1.5 text-xs font-medium ${
+          activePanel === 'mod-log'
+            ? 'border-border bg-muted text-foreground'
+            : 'border-border/60 text-muted-foreground hover:bg-muted/70'
+        }`}
+        onclick={() => setActivePanel('mod-log')}
+        data-testid="member-list-tab-mod-log"
+      >
+        Moderation log
+      </button>
+    </div>
+  {/if}
+
+  {#if activePanel === 'mod-log'}
+    <ModLogPanel activeGuild={activeGuild} />
+  {:else if loading && membersWithPresence.length === 0}
     <p class="text-xs text-muted-foreground">Loading members…</p>
   {:else if membersWithPresence.length === 0}
     <p class="text-xs text-muted-foreground">No members found.</p>

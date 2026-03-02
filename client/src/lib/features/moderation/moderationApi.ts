@@ -1,4 +1,4 @@
-import { ApiError, apiFetch } from '$lib/api'
+import { ApiError, apiFetch, apiFetchCursorList } from '$lib/api'
 
 export type CreateMuteInput = {
   targetUserId: string
@@ -81,6 +81,42 @@ export type BanAction = {
   updatedAt: string
 }
 
+export type ModerationLogOrder = 'asc' | 'desc'
+export type ModerationLogActionType =
+  | 'mute'
+  | 'kick'
+  | 'ban'
+  | 'voice_kick'
+  | 'message_delete'
+  | 'warn'
+
+export type FetchModerationLogInput = {
+  limit?: number
+  cursor?: string | null
+  order?: ModerationLogOrder
+  actionType?: ModerationLogActionType | null
+}
+
+export type ModerationLogEntry = {
+  id: string
+  actionType: ModerationLogActionType
+  reason: string
+  createdAt: string
+  actorUserId: string
+  actorUsername: string
+  actorDisplayName: string
+  actorAvatarColor: string | null
+  targetUserId: string
+  targetUsername: string
+  targetDisplayName: string
+  targetAvatarColor: string | null
+}
+
+export type ModerationLogPage = {
+  entries: ModerationLogEntry[]
+  cursor: string | null
+}
+
 type CreateMuteWire = {
   target_user_id: string
   reason: string
@@ -158,6 +194,21 @@ type BanActionWire = {
   deleted_messages_count: number
   created_at: string
   updated_at: string
+}
+
+type ModerationLogEntryWire = {
+  id: string
+  action_type: ModerationLogActionType
+  reason: string
+  created_at: string
+  actor_user_id: string
+  actor_username: string
+  actor_display_name: string
+  actor_avatar_color?: string
+  target_user_id: string
+  target_username: string
+  target_display_name: string
+  target_avatar_color?: string
 }
 
 function normalizePathPart(value: string, field: string): string {
@@ -287,6 +338,25 @@ function toBanAction(wire: BanActionWire): BanAction {
   }
 }
 
+function toModerationLogEntry(
+  wire: ModerationLogEntryWire,
+): ModerationLogEntry {
+  return {
+    id: wire.id,
+    actionType: wire.action_type,
+    reason: wire.reason,
+    createdAt: wire.created_at,
+    actorUserId: wire.actor_user_id,
+    actorUsername: wire.actor_username,
+    actorDisplayName: wire.actor_display_name,
+    actorAvatarColor: wire.actor_avatar_color ?? null,
+    targetUserId: wire.target_user_id,
+    targetUsername: wire.target_username,
+    targetDisplayName: wire.target_display_name,
+    targetAvatarColor: wire.target_avatar_color ?? null,
+  }
+}
+
 function muteCreatePath(guildSlug: string): string {
   const guild = normalizePathPart(guildSlug, 'guildSlug')
   return `/api/v1/guilds/${guild}/moderation/mutes`
@@ -310,6 +380,53 @@ function banCreatePath(guildSlug: string): string {
 function voiceKickCreatePath(guildSlug: string): string {
   const guild = normalizePathPart(guildSlug, 'guildSlug')
   return `/api/v1/guilds/${guild}/moderation/voice-kicks`
+}
+
+function moderationLogPath(
+  guildSlug: string,
+  input: FetchModerationLogInput,
+): string {
+  const guild = normalizePathPart(guildSlug, 'guildSlug')
+  const params = new URLSearchParams()
+
+  if (input.limit !== undefined) {
+    if (!Number.isFinite(input.limit)) {
+      throw new ApiError('VALIDATION_ERROR', 'limit must be finite')
+    }
+    const normalizedLimit = Math.trunc(input.limit)
+    if (normalizedLimit <= 0) {
+      throw new ApiError('VALIDATION_ERROR', 'limit must be greater than zero')
+    }
+    params.set('limit', String(normalizedLimit))
+  }
+
+  if (input.cursor !== undefined && input.cursor !== null) {
+    const normalizedCursor = input.cursor.trim()
+    if (normalizedCursor) {
+      params.set('cursor', normalizedCursor)
+    }
+  }
+
+  if (input.order !== undefined) {
+    if (input.order !== 'asc' && input.order !== 'desc') {
+      throw new ApiError('VALIDATION_ERROR', 'order must be one of: asc, desc')
+    }
+    params.set('order', input.order)
+  }
+
+  if (input.actionType !== undefined && input.actionType !== null) {
+    const actionType = input.actionType.trim()
+    if (!actionType) {
+      throw new ApiError('VALIDATION_ERROR', 'actionType must not be empty')
+    }
+    params.set('action_type', actionType)
+  }
+
+  const query = params.toString()
+  if (!query) {
+    return `/api/v1/guilds/${guild}/moderation/log`
+  }
+  return `/api/v1/guilds/${guild}/moderation/log?${query}`
 }
 
 export async function createMute(
@@ -397,4 +514,16 @@ export async function createBan(
     body: JSON.stringify(payload),
   })
   return toBanAction(wire)
+}
+
+export async function fetchModerationLog(
+  guildSlug: string,
+  input: FetchModerationLogInput = {},
+): Promise<ModerationLogPage> {
+  const path = moderationLogPath(guildSlug, input)
+  const page = await apiFetchCursorList<ModerationLogEntryWire[]>(path)
+  return {
+    entries: page.data.map(toModerationLogEntry),
+    cursor: page.cursor,
+  }
 }

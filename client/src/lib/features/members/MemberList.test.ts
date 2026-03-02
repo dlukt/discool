@@ -161,6 +161,10 @@ const moderationApi = vi.hoisted(() => ({
       updatedAt: '2026-03-01T00:00:00.000Z',
     }),
   ),
+  fetchModerationLog: vi.fn(async () => ({
+    entries: [],
+    cursor: null,
+  })),
 }))
 
 const presenceState = vi.hoisted(() => ({
@@ -338,6 +342,7 @@ describe('MemberList', () => {
     moderationApi.createMute.mockClear()
     moderationApi.createKick.mockClear()
     moderationApi.createBan.mockClear()
+    moderationApi.fetchModerationLog.mockClear()
   })
 
   it('groups by highest role, sorts online first, and renders status dots', async () => {
@@ -458,6 +463,48 @@ describe('MemberList', () => {
     })
 
     window.removeEventListener('discool:open-dm-intent', dmIntentHandler)
+  })
+
+  it('shows moderation-log panel tab only when VIEW_MOD_LOG is available', async () => {
+    memberDataByGuild.lobby.roles = memberDataByGuild.lobby.roles.map((role) =>
+      role.id === 'role-manager'
+        ? {
+            ...role,
+            permissionsBitflag: role.permissionsBitflag | (1 << 8), // VIEW_MOD_LOG
+          }
+        : role,
+    )
+
+    const { getByTestId } = render(MemberList, {
+      activeGuild: 'lobby',
+    })
+
+    await waitFor(() => {
+      expect(guildState.loadMembers).toHaveBeenCalledWith('lobby', true)
+    })
+
+    expect(getByTestId('member-list-tab-mod-log')).toBeInTheDocument()
+    await fireEvent.click(getByTestId('member-list-tab-mod-log'))
+
+    expect(getByTestId('mod-log-panel')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(moderationApi.fetchModerationLog).toHaveBeenCalledWith('lobby', {
+        limit: 50,
+        cursor: null,
+        order: 'desc',
+        actionType: null,
+      })
+    })
+  })
+
+  it('hides moderation-log panel tab when VIEW_MOD_LOG is unavailable', async () => {
+    const { queryByTestId } = render(MemberList, {
+      activeGuild: 'lobby',
+    })
+    await waitFor(() => {
+      expect(guildState.loadMembers).toHaveBeenCalledWith('lobby', true)
+    })
+    expect(queryByTestId('member-list-tab-mod-log')).not.toBeInTheDocument()
   })
 
   it('submits kick with required reason and refreshes guild visibility', async () => {
