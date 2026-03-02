@@ -1,4 +1,5 @@
 use crate::{AppError, db::DbPool};
+use sqlx::QueryBuilder;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Message {
@@ -252,6 +253,118 @@ pub async fn delete_message_by_id_channel_and_author(
     .map_err(|err| AppError::Internal(err.to_string()))?;
 
     Ok(rows == 1)
+}
+
+pub async fn list_message_ids_by_guild_and_author_since(
+    pool: &DbPool,
+    guild_id: &str,
+    author_user_id: &str,
+    created_at_since: Option<&str>,
+) -> Result<Vec<String>, AppError> {
+    let message_ids = match pool {
+        DbPool::Postgres(pool) => match created_at_since {
+            Some(since) => {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT id
+                 FROM messages
+                 WHERE guild_id = $1
+                   AND author_user_id = $2
+                   AND created_at >= $3",
+                )
+                .bind(guild_id)
+                .bind(author_user_id)
+                .bind(since)
+                .fetch_all(pool)
+                .await
+            }
+            None => {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT id
+                 FROM messages
+                 WHERE guild_id = $1
+                   AND author_user_id = $2",
+                )
+                .bind(guild_id)
+                .bind(author_user_id)
+                .fetch_all(pool)
+                .await
+            }
+        },
+        DbPool::Sqlite(pool) => match created_at_since {
+            Some(since) => {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT id
+                 FROM messages
+                 WHERE guild_id = ?1
+                   AND author_user_id = ?2
+                   AND created_at >= ?3",
+                )
+                .bind(guild_id)
+                .bind(author_user_id)
+                .bind(since)
+                .fetch_all(pool)
+                .await
+            }
+            None => {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT id
+                 FROM messages
+                 WHERE guild_id = ?1
+                   AND author_user_id = ?2",
+                )
+                .bind(guild_id)
+                .bind(author_user_id)
+                .fetch_all(pool)
+                .await
+            }
+        },
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(message_ids)
+}
+
+pub async fn delete_messages_by_ids(
+    pool: &DbPool,
+    message_ids: &[String],
+) -> Result<u64, AppError> {
+    if message_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let rows = match pool {
+        DbPool::Postgres(pool) => {
+            let mut query_builder =
+                QueryBuilder::<sqlx::Postgres>::new("DELETE FROM messages WHERE id IN (");
+            let mut separated = query_builder.separated(", ");
+            for message_id in message_ids {
+                separated.push_bind(message_id);
+            }
+            query_builder.push(")");
+            query_builder
+                .build()
+                .execute(pool)
+                .await
+                .map(|result| result.rows_affected())
+        }
+        DbPool::Sqlite(pool) => {
+            let mut query_builder =
+                QueryBuilder::<sqlx::Sqlite>::new("DELETE FROM messages WHERE id IN (");
+            let mut separated = query_builder.separated(", ");
+            for message_id in message_ids {
+                separated.push_bind(message_id);
+            }
+            query_builder.push(")");
+            query_builder
+                .build()
+                .execute(pool)
+                .await
+                .map(|result| result.rows_affected())
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(rows)
 }
 
 pub async fn list_messages_by_channel_id(

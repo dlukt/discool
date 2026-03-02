@@ -79,6 +79,28 @@ export type UpdateGuildMemberRolesInput = {
   roleIds: string[]
 }
 
+export type GuildBan = {
+  id: string
+  targetUserId: string
+  targetUsername: string
+  targetDisplayName?: string
+  actorUserId: string
+  actorUsername: string
+  actorDisplayName?: string
+  reason: string
+  deleteMessagesWindowSeconds?: number
+  createdAt: string
+}
+
+export type UnbanGuildBanResult = {
+  id: string
+  guildSlug: string
+  targetUserId: string
+  unbannedByUserId: string
+  unbannedAt: string
+  updatedAt: string
+}
+
 export type InviteType = 'reusable' | 'single_use'
 
 export type GuildInvite = {
@@ -203,6 +225,28 @@ export type GuildMemberRoleDataWire = {
 
 export type UpdateGuildMemberRolesInputWire = {
   role_ids: string[]
+}
+
+export type GuildBanWire = {
+  id: string
+  target_user_id: string
+  target_username: string
+  target_display_name?: string
+  actor_user_id: string
+  actor_username: string
+  actor_display_name?: string
+  reason: string
+  delete_messages_window_seconds?: number
+  created_at: string
+}
+
+export type UnbanGuildBanResultWire = {
+  id: string
+  guild_slug: string
+  target_user_id: string
+  unbanned_by_user_id: string
+  unbanned_at: string
+  updated_at: string
 }
 
 export type GuildInviteWire = {
@@ -374,6 +418,34 @@ export function toUpdateGuildMemberRolesInputWire(
 ): UpdateGuildMemberRolesInputWire {
   return {
     role_ids: input.roleIds,
+  }
+}
+
+export function toGuildBan(wire: GuildBanWire): GuildBan {
+  return {
+    id: wire.id,
+    targetUserId: wire.target_user_id,
+    targetUsername: wire.target_username,
+    targetDisplayName: wire.target_display_name,
+    actorUserId: wire.actor_user_id,
+    actorUsername: wire.actor_username,
+    actorDisplayName: wire.actor_display_name,
+    reason: wire.reason,
+    deleteMessagesWindowSeconds: wire.delete_messages_window_seconds,
+    createdAt: wire.created_at,
+  }
+}
+
+export function toUnbanGuildBanResult(
+  wire: UnbanGuildBanResultWire,
+): UnbanGuildBanResult {
+  return {
+    id: wire.id,
+    guildSlug: wire.guild_slug,
+    targetUserId: wire.target_user_id,
+    unbannedByUserId: wire.unbanned_by_user_id,
+    unbannedAt: wire.unbanned_at,
+    updatedAt: wire.updated_at,
   }
 }
 

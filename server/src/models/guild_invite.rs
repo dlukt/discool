@@ -295,6 +295,24 @@ pub async fn join_guild_via_invite(
                 return Ok(None);
             };
 
+            let banned = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM guild_bans
+                    WHERE guild_id = $1
+                      AND target_user_id = $2
+                      AND is_active = 1
+                )",
+            )
+            .bind(&invite.guild_id)
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?;
+            if banned {
+                return Ok(None);
+            }
+
             let already_member = sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS(
                     SELECT 1
@@ -414,6 +432,25 @@ pub async fn join_guild_via_invite(
             let Some(invite) = invite else {
                 return Ok(None);
             };
+
+            let banned = sqlx::query_scalar::<_, i64>(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM guild_bans
+                    WHERE guild_id = ?1
+                      AND target_user_id = ?2
+                      AND is_active = 1
+                )",
+            )
+            .bind(&invite.guild_id)
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?
+                != 0;
+            if banned {
+                return Ok(None);
+            }
 
             let already_member = sqlx::query_scalar::<_, i64>(
                 "SELECT EXISTS(

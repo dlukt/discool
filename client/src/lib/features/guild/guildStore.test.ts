@@ -29,10 +29,12 @@ vi.mock('./guildApi', () => ({
   createGuild: vi.fn(),
   createRole: vi.fn(),
   deleteRole: vi.fn(),
+  listBans: vi.fn(async () => []),
   listGuilds: listGuildsApi,
   listMembers: vi.fn(),
   listRoles: vi.fn(),
   reorderRoles: vi.fn(),
+  unban: vi.fn(),
   updateGuild: vi.fn(),
   updateMemberRoles: vi.fn(),
   updateRole: vi.fn(),
@@ -76,6 +78,17 @@ describe('guildState websocket updates', () => {
       assignableRoleIds: [],
       canManageRoles: false,
     }
+    guildState.bansByGuild.lobby = [
+      {
+        id: 'ban-1',
+        targetUserId: 'user-target',
+        targetUsername: 'target',
+        actorUserId: 'owner',
+        actorUsername: 'owner',
+        reason: 'reason',
+        createdAt: '2026-03-01T00:00:00.000Z',
+      },
+    ]
 
     emitEnvelope({
       op: 'guild_update',
@@ -85,6 +98,7 @@ describe('guildState websocket updates', () => {
 
     expect(listGuildsApi).toHaveBeenCalledTimes(1)
     expect(guildState.memberRoleDataByGuild.lobby).toBeUndefined()
+    expect(guildState.bansByGuild.lobby).toBeUndefined()
   })
 
   it('ignores non-guild-update websocket envelopes', async () => {

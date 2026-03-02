@@ -10,7 +10,7 @@ import {
   hasGuildPermission,
   toggleGuildPermission,
 } from './permissions'
-import type { GuildRole } from './types'
+import type { GuildBan, GuildRole } from './types'
 
 const MAX_ICON_BYTES = 2 * 1024 * 1024
 const allowedIconTypes = new Set(['image/png', 'image/jpeg', 'image/webp'])
@@ -25,11 +25,13 @@ let { open, guildSlug, onClose }: Props = $props()
 let guild = $derived(guildState.bySlug(guildSlug))
 let canEditGuild = $derived(Boolean(guild?.isOwner))
 let roles = $derived(guildState.rolesForGuild(guildSlug))
+let bans = $derived(guildState.bansForGuild(guildSlug))
 let roleDragPreview = $state<GuildRole[] | null>(null)
 let roleList = $derived(roleDragPreview ?? roles)
 
 let initializedForSlug = $state<string | null>(null)
 let rolesInitializedForSlug = $state<string | null>(null)
+let bansInitializedForSlug = $state<string | null>(null)
 let name = $state('')
 let description = $state('')
 let selectedIcon = $state<File | null>(null)
@@ -43,6 +45,9 @@ let rolesErrorMessage = $state<string | null>(null)
 let rolesStatusMessage = $state<string | null>(null)
 let draggedRoleId = $state<string | null>(null)
 let roleReorderSubmitting = $state(false)
+let bansErrorMessage = $state<string | null>(null)
+let bansStatusMessage = $state<string | null>(null)
+let unbanSubmittingBanId = $state<string | null>(null)
 
 let createRoleDialogOpen = $state(false)
 let createRoleName = $state('')
@@ -162,10 +167,25 @@ $effect(() => {
 })
 
 $effect(() => {
+  if (!open || !guild || !canEditGuild) return
+  if (bansInitializedForSlug === guild.slug) return
+  bansInitializedForSlug = guild.slug
+  bansErrorMessage = null
+  bansStatusMessage = null
+  void guildState.loadBans(guild.slug).catch((err: unknown) => {
+    bansErrorMessage = messageFromError(err, 'Failed to load ban list.')
+  })
+})
+
+$effect(() => {
   if (open) return
   initializedForSlug = null
   rolesInitializedForSlug = null
+  bansInitializedForSlug = null
   resetRoleDialogs()
+  bansErrorMessage = null
+  bansStatusMessage = null
+  unbanSubmittingBanId = null
 })
 
 function onNameBlur() {
@@ -520,6 +540,45 @@ function handleRoleDragEnd() {
   draggedRoleId = null
 }
 
+function formatBanTimestamp(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+  return date.toLocaleString()
+}
+
+function banTargetLabel(ban: GuildBan): string {
+  return ban.targetDisplayName ?? `@${ban.targetUsername}`
+}
+
+function banActorLabel(ban: GuildBan): string {
+  return ban.actorDisplayName ?? `@${ban.actorUsername}`
+}
+
+async function confirmUnban(ban: GuildBan) {
+  if (!guild || !canEditGuild || unbanSubmittingBanId) return
+  if (typeof window !== 'undefined') {
+    const confirmed = window.confirm(
+      `Unban ${banTargetLabel(ban)}? They will be allowed to rejoin with new invites.`,
+    )
+    if (!confirmed) return
+  }
+
+  unbanSubmittingBanId = ban.id
+  bansErrorMessage = null
+  bansStatusMessage = null
+  try {
+    await guildState.unban(guild.slug, ban.id)
+    await guildState.loadBans(guild.slug, true)
+    bansStatusMessage = `${banTargetLabel(ban)} was unbanned.`
+  } catch (err) {
+    bansErrorMessage = messageFromError(err, 'Failed to unban user.')
+  } finally {
+    unbanSubmittingBanId = null
+  }
+}
+
 async function handleClose() {
   await onClose?.()
 }
@@ -727,6 +786,63 @@ async function handleClose() {
                       </button>
                     {/if}
                   </div>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
+
+        <section class="mt-6 border-t border-border pt-5" aria-labelledby="guild-ban-list-heading">
+          <div class="mb-3">
+            <h3 id="guild-ban-list-heading" class="text-base font-semibold">Ban list</h3>
+            <p class="text-sm text-muted-foreground">
+              Active guild bans can be reviewed here and revoked when needed.
+            </p>
+          </div>
+
+          {#if bansStatusMessage}
+            <p class="mb-3 rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-300">
+              {bansStatusMessage}
+            </p>
+          {/if}
+          {#if bansErrorMessage}
+            <p class="mb-3 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive" role="alert">
+              {bansErrorMessage}
+            </p>
+          {/if}
+
+          {#if bans.length === 0}
+            <p class="rounded-md border border-border bg-background p-3 text-sm text-muted-foreground">
+              No active bans.
+            </p>
+          {:else}
+            <ul class="space-y-2">
+              {#each bans as ban (ban.id)}
+                <li class="flex items-start justify-between gap-3 rounded-md border border-border bg-background p-3">
+                  <div class="min-w-0 space-y-1">
+                    <p class="text-sm font-medium text-foreground">
+                      {banTargetLabel(ban)} <span class="text-xs text-muted-foreground">(@{ban.targetUsername})</span>
+                    </p>
+                    <p class="text-xs text-muted-foreground">
+                      Reason: {ban.reason}
+                    </p>
+                    <p class="text-xs text-muted-foreground">
+                      Banned by {banActorLabel(ban)} on {formatBanTimestamp(ban.createdAt)}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    class="rounded-md bg-destructive px-3 py-1 text-xs font-medium text-destructive-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                    onclick={() => void confirmUnban(ban)}
+                    disabled={unbanSubmittingBanId !== null}
+                    aria-label={`Unban user ${ban.targetUsername}`}
+                  >
+                    {#if unbanSubmittingBanId === ban.id}
+                      Unbanning...
+                    {:else}
+                      Unban
+                    {/if}
+                  </button>
                 </li>
               {/each}
             </ul>

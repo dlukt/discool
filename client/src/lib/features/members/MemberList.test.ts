@@ -139,6 +139,28 @@ const moderationApi = vi.hoisted(() => ({
       updatedAt: '2026-03-01T00:00:00.000Z',
     }),
   ),
+  createBan: vi.fn(
+    async (
+      _guildSlug: string,
+      _input: {
+        targetUserId: string
+        reason: string
+        deleteMessageWindow: 'none' | '1h' | '24h' | '7d'
+      },
+    ) => ({
+      id: 'moderation-action-ban-1',
+      banId: 'ban-1',
+      guildSlug: 'lobby',
+      actorUserId: 'user-viewer',
+      targetUserId: 'user-default',
+      reason: 'repeat abuse',
+      deleteMessageWindow: '7d' as const,
+      deleteMessagesWindowSeconds: 7 * 24 * 60 * 60,
+      deletedMessagesCount: 3,
+      createdAt: '2026-03-01T00:00:00.000Z',
+      updatedAt: '2026-03-01T00:00:00.000Z',
+    }),
+  ),
 }))
 
 const presenceState = vi.hoisted(() => ({
@@ -315,6 +337,7 @@ describe('MemberList', () => {
     guildState.loadGuilds.mockClear()
     moderationApi.createMute.mockClear()
     moderationApi.createKick.mockClear()
+    moderationApi.createBan.mockClear()
   })
 
   it('groups by highest role, sorts online first, and renders status dots', async () => {
@@ -472,6 +495,59 @@ describe('MemberList', () => {
       expect(guildState.loadGuilds).toHaveBeenCalledWith(true)
     })
     expect(getByText('User kicked from guild')).toBeInTheDocument()
+  })
+
+  it('submits ban with required reason and delete window mapping', async () => {
+    memberDataByGuild.lobby.roles = memberDataByGuild.lobby.roles.map((role) =>
+      role.id === 'role-manager'
+        ? {
+            ...role,
+            permissionsBitflag: role.permissionsBitflag | (1 << 3), // BAN_MEMBERS
+          }
+        : role,
+    )
+
+    const { getByTestId, getByRole, getByText } = render(MemberList, {
+      activeGuild: 'lobby',
+    })
+
+    await waitFor(() => {
+      expect(guildState.loadMembers).toHaveBeenCalledWith('lobby', true)
+    })
+
+    await fireEvent.keyDown(getByTestId('member-row-user-default'), {
+      key: 'ContextMenu',
+    })
+    await fireEvent.click(getByRole('button', { name: 'Ban member' }))
+
+    expect(
+      getByRole('dialog', { name: 'Ban General User' }),
+    ).toBeInTheDocument()
+
+    await fireEvent.click(getByTestId('ban-submit-button'))
+    expect(getByText('Reason is required.')).toBeInTheDocument()
+
+    await fireEvent.input(getByTestId('ban-reason-input'), {
+      target: { value: 'repeat abuse' },
+    })
+    await fireEvent.change(getByTestId('ban-delete-window-select'), {
+      target: { value: '7d' },
+    })
+    const submitButton = getByTestId('ban-submit-button')
+    expect(submitButton.className).toContain('bg-destructive')
+    await fireEvent.click(submitButton)
+
+    await waitFor(() => {
+      expect(moderationApi.createBan).toHaveBeenCalledWith('lobby', {
+        targetUserId: 'user-default',
+        reason: 'repeat abuse',
+        deleteMessageWindow: '7d',
+      })
+    })
+    await waitFor(() => {
+      expect(guildState.loadGuilds).toHaveBeenCalledWith(true)
+    })
+    expect(getByText('User banned from guild')).toBeInTheDocument()
   })
 
   it('hides blocked members and supports blocking from context actions', async () => {

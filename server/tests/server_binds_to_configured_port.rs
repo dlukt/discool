@@ -3928,6 +3928,125 @@ async fn invite_resolution_and_join_flow_supports_membership_reads_and_single_us
 }
 
 #[tokio::test]
+async fn invite_join_rejects_banned_identity_without_consuming_single_use_invite() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "owner-ban-join", [97u8; 32]).await;
+    let member_token = register_and_authenticate(&addr, "member-ban-join", [98u8; 32]).await;
+
+    let member_profile =
+        http_response_with_bearer(&addr, "/api/v1/users/me/profile", &member_token).await;
+    assert_eq!(response_status(&member_profile), 200);
+    let member_profile_body: serde_json::Value =
+        serde_json::from_str(response_body(&member_profile)).unwrap();
+    let member_user_id = member_profile_body["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let guild_body = json!({ "name": "Ban Rejoin Guild" }).to_string();
+    let res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&res), 201);
+    let guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = guild["data"]["slug"].as_str().unwrap().to_string();
+
+    let initial_invite_body = json!({ "type": "single_use" }).to_string();
+    let initial_invite = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/invites"),
+        &initial_invite_body,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&initial_invite), 201);
+    let initial_invite_payload: serde_json::Value =
+        serde_json::from_str(response_body(&initial_invite)).unwrap();
+    let initial_invite_code = initial_invite_payload["data"]["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let join_initial = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/invites/{initial_invite_code}/join"),
+        "{}",
+        &member_token,
+    )
+    .await;
+    assert_eq!(response_status(&join_initial), 200);
+
+    let ban_body = json!({
+        "target_user_id": member_user_id,
+        "reason": "ban evasion",
+        "delete_message_window": "none"
+    })
+    .to_string();
+    let ban_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/moderation/bans"),
+        &ban_body,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&ban_res), 201);
+
+    let rejoin_invite_body = json!({ "type": "single_use" }).to_string();
+    let rejoin_invite = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/invites"),
+        &rejoin_invite_body,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&rejoin_invite), 201);
+    let rejoin_invite_payload: serde_json::Value =
+        serde_json::from_str(response_body(&rejoin_invite)).unwrap();
+    let rejoin_invite_code = rejoin_invite_payload["data"]["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let denied_rejoin = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/invites/{rejoin_invite_code}/join"),
+        "{}",
+        &member_token,
+    )
+    .await;
+    assert_eq!(response_status(&denied_rejoin), 422);
+    let denied_payload: serde_json::Value =
+        serde_json::from_str(response_body(&denied_rejoin)).unwrap();
+    assert_eq!(
+        denied_payload["error"]["message"],
+        json!("You are banned from this guild")
+    );
+
+    let list_invites = http_response_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/invites"),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&list_invites), 200);
+    let listed_invites: serde_json::Value =
+        serde_json::from_str(response_body(&list_invites)).unwrap();
+    let active_invites = listed_invites["data"].as_array().unwrap();
+    let rejoin_invite_entry = active_invites
+        .iter()
+        .find(|entry| entry["code"] == json!(rejoin_invite_code))
+        .expect("rejoin invite should still exist and be active");
+    assert_eq!(rejoin_invite_entry["uses_remaining"], json!(1));
+}
+
+#[tokio::test]
 async fn invite_endpoints_return_exact_invalid_message_for_unknown_codes() {
     use serde_json::json;
 

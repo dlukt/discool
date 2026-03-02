@@ -11,7 +11,7 @@ use serde_json::json;
 use crate::{
     AppError, AppState,
     middleware::auth::AuthenticatedUser,
-    services::moderation_service::{self, CreateKickInput, CreateMuteInput},
+    services::moderation_service::{self, CreateBanInput, CreateKickInput, CreateMuteInput},
     ws::{protocol::ServerOp, registry},
 };
 
@@ -29,6 +29,13 @@ pub struct CreateMuteRequest {
 pub struct CreateKickRequest {
     pub target_user_id: Option<String>,
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateBanRequest {
+    pub target_user_id: Option<String>,
+    pub reason: Option<String>,
+    pub delete_message_window: Option<String>,
 }
 
 pub async fn create_mute(
@@ -56,8 +63,67 @@ pub async fn create_kick(
     let input = to_create_kick_input(req)?;
     let created =
         moderation_service::create_kick(&state.pool, &user.user_id, &guild_slug, input).await?;
-    emit_kick_guild_updates(&guild_slug, &created.actor_user_id, &created.target_user_id);
+    emit_guild_member_update(
+        &guild_slug,
+        &created.actor_user_id,
+        &created.target_user_id,
+        "kick",
+        true,
+    );
     Ok((StatusCode::CREATED, Json(json!({ "data": created }))).into_response())
+}
+
+pub async fn create_ban(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(guild_slug): Path<String>,
+    payload: Result<Json<CreateBanRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+    let input = to_create_ban_input(req)?;
+    let created = moderation_service::create_ban(
+        &state.pool,
+        &state.config.attachments,
+        &user.user_id,
+        &guild_slug,
+        input,
+    )
+    .await?;
+    emit_guild_member_update(
+        &guild_slug,
+        &created.actor_user_id,
+        &created.target_user_id,
+        "ban",
+        true,
+    );
+    Ok((StatusCode::CREATED, Json(json!({ "data": created }))).into_response())
+}
+
+pub async fn list_bans(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(guild_slug): Path<String>,
+) -> Result<Response, AppError> {
+    let bans = moderation_service::list_bans(&state.pool, &user.user_id, &guild_slug).await?;
+    Ok((StatusCode::OK, Json(json!({ "data": bans }))).into_response())
+}
+
+pub async fn delete_ban(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path((guild_slug, ban_id)): Path<(String, String)>,
+) -> Result<Response, AppError> {
+    let removed =
+        moderation_service::unban(&state.pool, &user.user_id, &guild_slug, &ban_id).await?;
+    emit_guild_member_update(
+        &guild_slug,
+        &removed.unbanned_by_user_id,
+        &removed.target_user_id,
+        "unban",
+        false,
+    );
+    Ok((StatusCode::OK, Json(json!({ "data": removed }))).into_response())
 }
 
 pub async fn get_my_mute_status(
@@ -118,10 +184,46 @@ fn to_create_kick_input(req: CreateKickRequest) -> Result<CreateKickInput, AppEr
     })
 }
 
-fn emit_kick_guild_updates(guild_slug: &str, actor_user_id: &str, target_user_id: &str) {
+fn to_create_ban_input(req: CreateBanRequest) -> Result<CreateBanInput, AppError> {
+    let target_user_id = req.target_user_id.as_deref().unwrap_or("").trim();
+    if target_user_id.is_empty() {
+        return Err(AppError::ValidationError(
+            "target_user_id is required".to_string(),
+        ));
+    }
+    let reason = req.reason.as_deref().unwrap_or("").trim();
+    if reason.is_empty() {
+        return Err(AppError::ValidationError("reason is required".to_string()));
+    }
+    let delete_message_window = req.delete_message_window.as_deref().unwrap_or("").trim();
+    if delete_message_window.is_empty() {
+        return Err(AppError::ValidationError(
+            "delete_message_window is required".to_string(),
+        ));
+    }
+
+    Ok(CreateBanInput {
+        target_user_id: target_user_id.to_string(),
+        reason: reason.to_string(),
+        delete_message_window: delete_message_window.to_string(),
+    })
+}
+
+fn emit_guild_member_update(
+    guild_slug: &str,
+    actor_user_id: &str,
+    target_user_id: &str,
+    action_type: &str,
+    unsubscribe_target: bool,
+) {
+    let event = if action_type == "unban" {
+        "ban_updated"
+    } else {
+        "member_removed"
+    };
     let target_users = vec![actor_user_id.to_string(), target_user_id.to_string()];
     for connection in registry::user_connection_targets(&target_users) {
-        if connection.user_id == target_user_id {
+        if unsubscribe_target && connection.user_id == target_user_id {
             registry::unsubscribe(&connection.connection_id, guild_slug, None);
         }
         registry::send_event(
@@ -129,8 +231,8 @@ fn emit_kick_guild_updates(guild_slug: &str, actor_user_id: &str, target_user_id
             ServerOp::GuildUpdate,
             &json!({
                 "guild_slug": guild_slug,
-                "event": "member_removed",
-                "action_type": "kick",
+                "event": event,
+                "action_type": action_type,
                 "target_user_id": target_user_id,
             }),
         );
@@ -254,7 +356,9 @@ mod tests {
                     .bind("#3366ff")
                     .bind(10_i64)
                     .bind(
-                        (crate::permissions::MUTE_MEMBERS | crate::permissions::KICK_MEMBERS)
+                        (crate::permissions::MUTE_MEMBERS
+                            | crate::permissions::KICK_MEMBERS
+                            | crate::permissions::BAN_MEMBERS)
                             as i64,
                     )
                     .bind(0_i64)
@@ -351,7 +455,9 @@ mod tests {
                     .bind("#3366ff")
                     .bind(10_i64)
                     .bind(
-                        (crate::permissions::MUTE_MEMBERS | crate::permissions::KICK_MEMBERS)
+                        (crate::permissions::MUTE_MEMBERS
+                            | crate::permissions::KICK_MEMBERS
+                            | crate::permissions::BAN_MEMBERS)
                             as i64,
                     )
                     .bind(0_i64)
@@ -426,6 +532,30 @@ mod tests {
         assert!(matches!(missing_reason, Err(AppError::ValidationError(_))));
     }
 
+    #[test]
+    fn to_create_ban_input_validates_required_fields() {
+        let missing_target = to_create_ban_input(CreateBanRequest {
+            target_user_id: None,
+            reason: Some("reason".to_string()),
+            delete_message_window: Some("none".to_string()),
+        });
+        assert!(matches!(missing_target, Err(AppError::ValidationError(_))));
+
+        let missing_reason = to_create_ban_input(CreateBanRequest {
+            target_user_id: Some("target".to_string()),
+            reason: Some("   ".to_string()),
+            delete_message_window: Some("none".to_string()),
+        });
+        assert!(matches!(missing_reason, Err(AppError::ValidationError(_))));
+
+        let missing_window = to_create_ban_input(CreateBanRequest {
+            target_user_id: Some("target".to_string()),
+            reason: Some("reason".to_string()),
+            delete_message_window: Some("  ".to_string()),
+        });
+        assert!(matches!(missing_window, Err(AppError::ValidationError(_))));
+    }
+
     #[tokio::test]
     async fn create_mute_returns_data_envelope() {
         let state = test_state().await;
@@ -486,5 +616,68 @@ mod tests {
             payload["data"]["reason"],
             Value::String("serious breach".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn create_ban_and_manage_ban_list_with_data_envelopes() {
+        let state = test_state().await;
+        seed_guild_fixture(&state).await;
+        let create_response = create_ban(
+            State(state.clone()),
+            mod_user(),
+            Path("test-guild".to_string()),
+            Ok(Json(CreateBanRequest {
+                target_user_id: Some("target-user-id".to_string()),
+                reason: Some("serious breach".to_string()),
+                delete_message_window: Some("24h".to_string()),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        let create_body = to_bytes(create_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: Value = serde_json::from_slice(&create_body).unwrap();
+        assert!(created.get("data").is_some());
+        assert_eq!(
+            created["data"]["target_user_id"],
+            Value::String("target-user-id".to_string())
+        );
+        assert_eq!(
+            created["data"]["delete_message_window"],
+            Value::String("24h".to_string())
+        );
+        let ban_id = created["data"]["ban_id"].as_str().unwrap().to_string();
+
+        let list_response = list_bans(
+            State(state.clone()),
+            mod_user(),
+            Path("test-guild".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body = to_bytes(list_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let listed: Value = serde_json::from_slice(&list_body).unwrap();
+        assert_eq!(listed["data"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["data"][0]["id"], Value::String(ban_id.clone()));
+
+        let delete_response = delete_ban(
+            State(state),
+            mod_user(),
+            Path(("test-guild".to_string(), ban_id.clone())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(delete_response.status(), StatusCode::OK);
+        let delete_body = to_bytes(delete_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let removed: Value = serde_json::from_slice(&delete_body).unwrap();
+        assert_eq!(removed["data"]["id"], Value::String(ban_id));
     }
 }

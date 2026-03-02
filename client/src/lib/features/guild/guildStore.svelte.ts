@@ -8,10 +8,12 @@ import {
   createGuild as createGuildApi,
   createRole as createRoleApi,
   deleteRole as deleteRoleApi,
+  listBans as listBansApi,
   listGuilds as listGuildsApi,
   listMembers as listMembersApi,
   listRoles as listRolesApi,
   reorderRoles as reorderRolesApi,
+  unban as unbanApi,
   updateGuild as updateGuildApi,
   updateMemberRoles as updateMemberRolesApi,
   updateRole as updateRoleApi,
@@ -22,9 +24,11 @@ import type {
   CreateGuildRoleInput,
   DeleteGuildRoleResult,
   Guild,
+  GuildBan,
   GuildMember,
   GuildMemberRoleData,
   GuildRole,
+  UnbanGuildBanResult,
   UpdateGuildInput,
   UpdateGuildMemberRolesInput,
   UpdateGuildRoleInput,
@@ -139,6 +143,7 @@ export const guildState = $state({
   guilds: [] as Guild[],
   rolesByGuild: {} as Record<string, GuildRole[]>,
   memberRoleDataByGuild: {} as Record<string, GuildMemberRoleData>,
+  bansByGuild: {} as Record<string, GuildBan[]>,
   loading: false,
   saving: false,
   loaded: false,
@@ -264,6 +269,24 @@ export const guildState = $state({
     }
   },
 
+  loadBans: async (guildSlug: string, force = false): Promise<GuildBan[]> => {
+    if (!guildSlug) return []
+    if (guildState.bansByGuild[guildSlug] && !force) {
+      return guildState.bansByGuild[guildSlug]
+    }
+
+    guildState.error = null
+    try {
+      const bans = await listBansApi(guildSlug)
+      guildState.bansByGuild[guildSlug] = [...bans]
+      return guildState.bansByGuild[guildSlug]
+    } catch (err) {
+      guildState.error =
+        err instanceof Error ? err.message : 'Failed to load bans'
+      throw err
+    }
+  },
+
   createRole: async (
     guildSlug: string,
     input: CreateGuildRoleInput,
@@ -382,6 +405,28 @@ export const guildState = $state({
     }
   },
 
+  unban: async (
+    guildSlug: string,
+    banId: string,
+  ): Promise<UnbanGuildBanResult> => {
+    guildState.saving = true
+    guildState.error = null
+    try {
+      const result = await unbanApi(guildSlug, banId)
+      const existing = guildState.bansByGuild[guildSlug] ?? []
+      guildState.bansByGuild[guildSlug] = existing.filter(
+        (ban) => ban.id !== result.id,
+      )
+      return result
+    } catch (err) {
+      guildState.error =
+        err instanceof Error ? err.message : 'Failed to unban member'
+      throw err
+    } finally {
+      guildState.saving = false
+    }
+  },
+
   memberRoleDataForGuild: (guildSlug: string): GuildMemberRoleData => {
     const existing = guildState.memberRoleDataByGuild[guildSlug]
     if (existing) {
@@ -404,6 +449,10 @@ export const guildState = $state({
     guildState.memberRoleDataByGuild[guildSlug]?.members.find(
       (member) => member.userId === userId,
     ) ?? null,
+
+  bansForGuild: (guildSlug: string): GuildBan[] => [
+    ...(guildState.bansByGuild[guildSlug] ?? []),
+  ],
 
   bySlug: (guildSlug: string): Guild | null =>
     guildState.guilds.find((guild) => guild.slug === guildSlug) ?? null,
@@ -430,6 +479,7 @@ export const guildState = $state({
     guildState.loaded = false
     guildState.rolesByGuild = {}
     guildState.memberRoleDataByGuild = {}
+    guildState.bansByGuild = {}
     guildState.error = null
   },
 })
@@ -438,5 +488,6 @@ wsClient.subscribe((envelope) => {
   const guildSlug = parseGuildUpdateGuildSlug(envelope)
   if (!guildSlug) return
   delete guildState.memberRoleDataByGuild[guildSlug]
+  delete guildState.bansByGuild[guildSlug]
   void guildState.loadGuilds(true).catch(() => {})
 })

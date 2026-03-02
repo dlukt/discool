@@ -9,10 +9,12 @@ import {
   createInvite,
   getInviteMetadata,
   joinGuildByInvite,
+  listBans,
   listGuilds,
   listInvites,
   listMembers,
   revokeInvite,
+  unban,
   updateMemberRoles,
 } from './guildApi'
 
@@ -312,6 +314,73 @@ describe('guildApi member role assignment', () => {
         method: 'PATCH',
         body: JSON.stringify({ role_ids: ['role-helper'] }),
       },
+    )
+  })
+})
+
+describe('guildApi bans', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('listBans maps ban list payload', async () => {
+    vi.mocked(apiFetch).mockResolvedValue([
+      {
+        id: 'ban-1',
+        target_user_id: 'user-target',
+        target_username: 'target-user',
+        target_display_name: 'Target User',
+        actor_user_id: 'user-owner',
+        actor_username: 'owner',
+        actor_display_name: 'Owner',
+        reason: 'repeat abuse',
+        delete_messages_window_seconds: 86400,
+        created_at: '2026-03-01T00:00:00.000Z',
+      },
+    ])
+
+    await expect(listBans('makers')).resolves.toEqual([
+      {
+        id: 'ban-1',
+        targetUserId: 'user-target',
+        targetUsername: 'target-user',
+        targetDisplayName: 'Target User',
+        actorUserId: 'user-owner',
+        actorUsername: 'owner',
+        actorDisplayName: 'Owner',
+        reason: 'repeat abuse',
+        deleteMessagesWindowSeconds: 86400,
+        createdAt: '2026-03-01T00:00:00.000Z',
+      },
+    ])
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/guilds/makers/moderation/bans',
+    )
+  })
+
+  it('unban calls delete endpoint and maps response', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      id: 'ban-1',
+      guild_slug: 'makers',
+      target_user_id: 'user-target',
+      unbanned_by_user_id: 'user-owner',
+      unbanned_at: '2026-03-02T00:00:00.000Z',
+      updated_at: '2026-03-02T00:00:00.000Z',
+    })
+
+    await expect(unban('makers', 'ban-1')).resolves.toEqual({
+      id: 'ban-1',
+      guildSlug: 'makers',
+      targetUserId: 'user-target',
+      unbannedByUserId: 'user-owner',
+      unbannedAt: '2026-03-02T00:00:00.000Z',
+      updatedAt: '2026-03-02T00:00:00.000Z',
+    })
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/guilds/makers/moderation/bans/ban-1',
+      { method: 'DELETE' },
     )
   })
 })

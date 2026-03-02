@@ -4,6 +4,7 @@ pub mod channel_permission_override;
 pub mod dm_channel;
 pub mod dm_message;
 pub mod guild;
+pub mod guild_ban;
 pub mod guild_invite;
 pub mod guild_member;
 pub mod message;

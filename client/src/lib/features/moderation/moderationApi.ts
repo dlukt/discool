@@ -12,6 +12,14 @@ export type CreateKickInput = {
   reason: string
 }
 
+export type BanDeleteMessageWindow = 'none' | '1h' | '24h' | '7d'
+
+export type CreateBanInput = {
+  targetUserId: string
+  reason: string
+  deleteMessageWindow: BanDeleteMessageWindow
+}
+
 export type MuteAction = {
   id: string
   guildSlug: string
@@ -38,6 +46,20 @@ export type KickAction = {
   actorUserId: string
   targetUserId: string
   reason: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type BanAction = {
+  id: string
+  banId: string
+  guildSlug: string
+  actorUserId: string
+  targetUserId: string
+  reason: string
+  deleteMessageWindow: BanDeleteMessageWindow
+  deleteMessagesWindowSeconds: number | null
+  deletedMessagesCount: number
   createdAt: string
   updatedAt: string
 }
@@ -80,6 +102,26 @@ type KickActionWire = {
   actor_user_id: string
   target_user_id: string
   reason: string
+  created_at: string
+  updated_at: string
+}
+
+type CreateBanWire = {
+  target_user_id: string
+  reason: string
+  delete_message_window: BanDeleteMessageWindow
+}
+
+type BanActionWire = {
+  id: string
+  ban_id: string
+  guild_slug: string
+  actor_user_id: string
+  target_user_id: string
+  reason: string
+  delete_message_window: BanDeleteMessageWindow
+  delete_messages_window_seconds?: number
+  deleted_messages_count: number
   created_at: string
   updated_at: string
 }
@@ -163,6 +205,41 @@ function toKickAction(wire: KickActionWire): KickAction {
   }
 }
 
+function normalizeDeleteMessageWindow(value: string): BanDeleteMessageWindow {
+  const normalized = value.trim().toLowerCase()
+  if (
+    normalized === 'none' ||
+    normalized === '1h' ||
+    normalized === '24h' ||
+    normalized === '7d'
+  ) {
+    return normalized
+  }
+  throw new ApiError(
+    'VALIDATION_ERROR',
+    'deleteMessageWindow must be one of: none, 1h, 24h, 7d',
+  )
+}
+
+function toBanAction(wire: BanActionWire): BanAction {
+  return {
+    id: wire.id,
+    banId: wire.ban_id,
+    guildSlug: wire.guild_slug,
+    actorUserId: wire.actor_user_id,
+    targetUserId: wire.target_user_id,
+    reason: wire.reason,
+    deleteMessageWindow: wire.delete_message_window,
+    deleteMessagesWindowSeconds:
+      typeof wire.delete_messages_window_seconds === 'number'
+        ? wire.delete_messages_window_seconds
+        : null,
+    deletedMessagesCount: wire.deleted_messages_count,
+    createdAt: wire.created_at,
+    updatedAt: wire.updated_at,
+  }
+}
+
 function muteCreatePath(guildSlug: string): string {
   const guild = normalizePathPart(guildSlug, 'guildSlug')
   return `/api/v1/guilds/${guild}/moderation/mutes`
@@ -176,6 +253,11 @@ function muteStatusPath(guildSlug: string): string {
 function kickCreatePath(guildSlug: string): string {
   const guild = normalizePathPart(guildSlug, 'guildSlug')
   return `/api/v1/guilds/${guild}/moderation/kicks`
+}
+
+function banCreatePath(guildSlug: string): string {
+  const guild = normalizePathPart(guildSlug, 'guildSlug')
+  return `/api/v1/guilds/${guild}/moderation/bans`
 }
 
 export async function createMute(
@@ -226,4 +308,22 @@ export async function createKick(
     body: JSON.stringify(payload),
   })
   return toKickAction(wire)
+}
+
+export async function createBan(
+  guildSlug: string,
+  input: CreateBanInput,
+): Promise<BanAction> {
+  const payload: CreateBanWire = {
+    target_user_id: normalizeRequiredText(input.targetUserId, 'targetUserId'),
+    reason: normalizeRequiredText(input.reason, 'reason'),
+    delete_message_window: normalizeDeleteMessageWindow(
+      input.deleteMessageWindow,
+    ),
+  }
+  const wire = await apiFetch<BanActionWire>(banCreatePath(guildSlug), {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  return toBanAction(wire)
 }

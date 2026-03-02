@@ -6,12 +6,14 @@ use uuid::Uuid;
 use crate::models::{guild_member, role};
 use crate::{
     AppError,
+    config::AttachmentConfig,
     db::DbPool,
     models::{
         guild::{self, Guild},
-        moderation,
+        guild_ban, message, message_attachment, moderation,
     },
     permissions,
+    services::file_storage_service::FileStorageProvider,
 };
 
 const MAX_MUTE_REASON_CHARS: usize = 500;
@@ -28,6 +30,13 @@ pub struct CreateMuteInput {
 pub struct CreateKickInput {
     pub target_user_id: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateBanInput {
+    pub target_user_id: String,
+    pub reason: String,
+    pub delete_message_window: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,6 +73,49 @@ pub struct KickActionResponse {
     pub target_user_id: String,
     pub reason: String,
     pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BanActionResponse {
+    pub id: String,
+    pub ban_id: String,
+    pub guild_slug: String,
+    pub actor_user_id: String,
+    pub target_user_id: String,
+    pub reason: String,
+    pub delete_message_window: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete_messages_window_seconds: Option<i64>,
+    pub deleted_messages_count: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GuildBanResponse {
+    pub id: String,
+    pub target_user_id: String,
+    pub target_username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_display_name: Option<String>,
+    pub actor_user_id: String,
+    pub actor_username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor_display_name: Option<String>,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete_messages_window_seconds: Option<i64>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UnbanActionResponse {
+    pub id: String,
+    pub guild_slug: String,
+    pub target_user_id: String,
+    pub unbanned_by_user_id: String,
+    pub unbanned_at: String,
     pub updated_at: String,
 }
 
@@ -199,6 +251,184 @@ pub async fn create_kick(
         reason,
         created_at: now_str.clone(),
         updated_at: now_str,
+    })
+}
+
+pub async fn create_ban(
+    pool: &DbPool,
+    attachment_config: &AttachmentConfig,
+    actor_user_id: &str,
+    guild_slug: &str,
+    input: CreateBanInput,
+) -> Result<BanActionResponse, AppError> {
+    let actor_user_id = normalize_id(actor_user_id, "actor_user_id")?;
+    let guild_slug = normalize_slug(guild_slug, "guild_slug")?;
+    let target_user_id = normalize_id(&input.target_user_id, "target_user_id")?;
+    if actor_user_id == target_user_id {
+        return Err(AppError::ValidationError("Cannot ban yourself".to_string()));
+    }
+    let reason = normalize_reason(&input.reason)?;
+    let (delete_message_window, delete_messages_window_seconds) =
+        normalize_delete_message_window(&input.delete_message_window)?;
+
+    let guild = guild::find_guild_by_slug(pool, &guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    permissions::require_guild_permission(
+        pool,
+        &guild,
+        &actor_user_id,
+        permissions::BAN_MEMBERS,
+        "BAN_MEMBERS",
+    )
+    .await?;
+
+    if target_user_id == guild.owner_id {
+        return Err(AppError::Forbidden(
+            "Cannot ban the guild owner".to_string(),
+        ));
+    }
+
+    let now = Utc::now();
+    let now_str = now.to_rfc3339();
+    let id = Uuid::new_v4().to_string();
+    let ban_id = Uuid::new_v4().to_string();
+    moderation::apply_ban_action(
+        pool,
+        &id,
+        &ban_id,
+        &guild.id,
+        &actor_user_id,
+        &target_user_id,
+        &reason,
+        delete_messages_window_seconds,
+        &now_str,
+    )
+    .await?;
+
+    let deleted_messages_count = match delete_messages_window_seconds {
+        Some(seconds) => {
+            let delete_since = (now - Duration::seconds(seconds)).to_rfc3339();
+            match delete_recent_messages_for_banned_user(
+                pool,
+                attachment_config,
+                &guild.id,
+                &target_user_id,
+                &delete_since,
+            )
+            .await
+            {
+                Ok(count) => count,
+                Err(err) => {
+                    tracing::warn!(
+                        error = ?err,
+                        guild_id = %guild.id,
+                        target_user_id = %target_user_id,
+                        "Ban committed but recent-message cleanup failed"
+                    );
+                    0
+                }
+            }
+        }
+        None => 0,
+    };
+
+    Ok(BanActionResponse {
+        id,
+        ban_id,
+        guild_slug: guild.slug,
+        actor_user_id,
+        target_user_id,
+        reason,
+        delete_message_window: delete_message_window.to_string(),
+        delete_messages_window_seconds,
+        deleted_messages_count,
+        created_at: now_str.clone(),
+        updated_at: now_str,
+    })
+}
+
+pub async fn list_bans(
+    pool: &DbPool,
+    actor_user_id: &str,
+    guild_slug: &str,
+) -> Result<Vec<GuildBanResponse>, AppError> {
+    let actor_user_id = normalize_id(actor_user_id, "actor_user_id")?;
+    let guild_slug = normalize_slug(guild_slug, "guild_slug")?;
+
+    let guild = guild::find_guild_by_slug(pool, &guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    permissions::require_guild_permission(
+        pool,
+        &guild,
+        &actor_user_id,
+        permissions::BAN_MEMBERS,
+        "BAN_MEMBERS",
+    )
+    .await?;
+
+    let bans = guild_ban::list_active_guild_bans_for_guild(pool, &guild.id).await?;
+    Ok(bans
+        .into_iter()
+        .map(|ban| GuildBanResponse {
+            id: ban.id,
+            target_user_id: ban.target_user_id,
+            target_username: ban.target_username,
+            target_display_name: ban.target_display_name,
+            actor_user_id: ban.actor_user_id,
+            actor_username: ban.actor_username,
+            actor_display_name: ban.actor_display_name,
+            reason: ban.reason,
+            delete_messages_window_seconds: ban.delete_messages_window_seconds,
+            created_at: ban.created_at,
+        })
+        .collect())
+}
+
+pub async fn unban(
+    pool: &DbPool,
+    actor_user_id: &str,
+    guild_slug: &str,
+    ban_id: &str,
+) -> Result<UnbanActionResponse, AppError> {
+    let actor_user_id = normalize_id(actor_user_id, "actor_user_id")?;
+    let guild_slug = normalize_slug(guild_slug, "guild_slug")?;
+    let ban_id = normalize_id(ban_id, "ban_id")?;
+
+    let guild = guild::find_guild_by_slug(pool, &guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    permissions::require_guild_permission(
+        pool,
+        &guild,
+        &actor_user_id,
+        permissions::BAN_MEMBERS,
+        "BAN_MEMBERS",
+    )
+    .await?;
+
+    let now_str = Utc::now().to_rfc3339();
+    let rows =
+        guild_ban::deactivate_guild_ban_by_id(pool, &guild.id, &ban_id, &actor_user_id, &now_str)
+            .await?;
+    if rows == 0 {
+        return Err(AppError::NotFound);
+    }
+
+    let updated = guild_ban::find_guild_ban_by_id(pool, &guild.id, &ban_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    Ok(UnbanActionResponse {
+        id: updated.id,
+        guild_slug: guild.slug,
+        target_user_id: updated.target_user_id,
+        unbanned_by_user_id: updated
+            .unbanned_by_user_id
+            .unwrap_or_else(|| actor_user_id.clone()),
+        unbanned_at: updated.unbanned_at.unwrap_or(now_str),
+        updated_at: updated.updated_at,
     })
 }
 
@@ -360,6 +590,63 @@ fn normalize_duration_seconds(value: Option<i64>) -> Result<Option<i64>, AppErro
     Ok(Some(duration_seconds))
 }
 
+fn normalize_delete_message_window(value: &str) -> Result<(&'static str, Option<i64>), AppError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Ok(("none", None)),
+        "1h" => Ok(("1h", Some(60 * 60))),
+        "24h" => Ok(("24h", Some(24 * 60 * 60))),
+        "7d" => Ok(("7d", Some(7 * 24 * 60 * 60))),
+        _ => Err(AppError::ValidationError(
+            "delete_message_window must be one of: none, 1h, 24h, 7d".to_string(),
+        )),
+    }
+}
+
+async fn delete_recent_messages_for_banned_user(
+    pool: &DbPool,
+    attachment_config: &AttachmentConfig,
+    guild_id: &str,
+    target_user_id: &str,
+    created_at_since: &str,
+) -> Result<i64, AppError> {
+    let message_ids = message::list_message_ids_by_guild_and_author_since(
+        pool,
+        guild_id,
+        target_user_id,
+        Some(created_at_since),
+    )
+    .await?;
+    if message_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let attachments =
+        message_attachment::list_message_attachments_by_message_ids(pool, &message_ids).await?;
+    let deleted_rows = message::delete_messages_by_ids(pool, &message_ids).await?;
+    if deleted_rows == 0 {
+        return Ok(0);
+    }
+
+    let storage = FileStorageProvider::local(attachment_config.upload_dir.clone());
+    for attachment_group in attachments.values() {
+        for attachment in attachment_group {
+            if let Err(err) = storage.delete(&attachment.storage_key).await {
+                tracing::warn!(
+                    error = ?err,
+                    target_user_id = %target_user_id,
+                    message_id = %attachment.message_id,
+                    attachment_id = %attachment.id,
+                    storage_key = %attachment.storage_key,
+                    "Failed to delete attachment file after ban message cleanup"
+                );
+            }
+        }
+    }
+
+    i64::try_from(deleted_rows)
+        .map_err(|_| AppError::Internal("Deleted message count overflow".to_string()))
+}
+
 fn mute_send_error_message(record: &moderation::ModerationActionRecord) -> String {
     match record.expires_at.as_deref() {
         Some(expires_at) => format!("You are muted in this guild until {expires_at}"),
@@ -494,7 +781,10 @@ mod tests {
         .bind("Moderator")
         .bind("#3366ff")
         .bind(10_i64)
-        .bind((permissions::MUTE_MEMBERS | permissions::KICK_MEMBERS) as i64)
+        .bind(
+            (permissions::MUTE_MEMBERS | permissions::KICK_MEMBERS | permissions::BAN_MEMBERS)
+                as i64,
+        )
         .bind(0_i64)
         .bind(now)
         .bind(now)
@@ -913,6 +1203,400 @@ mod tests {
                 .await
                 .unwrap();
         assert!(maybe_kick_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_ban_enforces_permission_hierarchy_and_target_guards() {
+        let pool = setup_service_pool().await;
+        let attachment_config = crate::config::AttachmentConfig::default();
+
+        let missing_permission = create_ban(
+            &pool,
+            &attachment_config,
+            "peer-user-id",
+            "test-guild",
+            CreateBanInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "reason".to_string(),
+                delete_message_window: "none".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(missing_permission, AppError::Forbidden(_)));
+
+        let hierarchy_error = create_ban(
+            &pool,
+            &attachment_config,
+            "mod-user-id",
+            "test-guild",
+            CreateBanInput {
+                target_user_id: "high-target-user-id".to_string(),
+                reason: "reason".to_string(),
+                delete_message_window: "none".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(hierarchy_error, AppError::Forbidden(_)));
+
+        let self_error = create_ban(
+            &pool,
+            &attachment_config,
+            "mod-user-id",
+            "test-guild",
+            CreateBanInput {
+                target_user_id: "mod-user-id".to_string(),
+                reason: "reason".to_string(),
+                delete_message_window: "none".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(self_error, AppError::ValidationError(_)));
+
+        let owner_error = create_ban(
+            &pool,
+            &attachment_config,
+            "mod-user-id",
+            "test-guild",
+            CreateBanInput {
+                target_user_id: "owner-user-id".to_string(),
+                reason: "reason".to_string(),
+                delete_message_window: "none".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(owner_error, AppError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn create_ban_removes_member_and_records_ban_and_audit_action() {
+        let pool = setup_service_pool().await;
+        let attachment_config = crate::config::AttachmentConfig::default();
+        moderation::insert_moderation_action(
+            &pool,
+            "mute-before-ban",
+            moderation::MODERATION_ACTION_TYPE_MUTE,
+            "guild-id",
+            "mod-user-id",
+            "target-user-id",
+            "active mute",
+            Some(3600),
+            Some("2030-01-01T00:00:00Z"),
+            true,
+            "2026-03-01T00:00:00Z",
+            "2026-03-01T00:00:00Z",
+        )
+        .await
+        .unwrap();
+
+        let created = create_ban(
+            &pool,
+            &attachment_config,
+            "mod-user-id",
+            "test-guild",
+            CreateBanInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "serious breach".to_string(),
+                delete_message_window: "none".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(created.target_user_id, "target-user-id");
+        assert_eq!(created.delete_message_window, "none");
+        assert_eq!(created.deleted_messages_count, 0);
+        assert!(
+            !guild_member::is_guild_member(&pool, "guild-id", "target-user-id")
+                .await
+                .unwrap()
+        );
+        assert!(
+            role::list_assigned_role_ids(&pool, "guild-id", "target-user-id")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let DbPool::Sqlite(sqlite_pool) = &pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+        let stored_ban = sqlx::query_as::<_, guild_ban::GuildBanRecord>(
+            "SELECT id,
+                    guild_id,
+                    target_user_id,
+                    actor_user_id,
+                    reason,
+                    delete_messages_window_seconds,
+                    is_active,
+                    created_at,
+                    updated_at,
+                    unbanned_by_user_id,
+                    unbanned_at
+             FROM guild_bans
+             WHERE id = ?1",
+        )
+        .bind(&created.ban_id)
+        .fetch_one(sqlite_pool)
+        .await
+        .unwrap();
+        assert_eq!(stored_ban.target_user_id, "target-user-id");
+        assert_eq!(stored_ban.reason, "serious breach");
+        assert_eq!(stored_ban.delete_messages_window_seconds, None);
+        assert_eq!(stored_ban.is_active, 1);
+
+        let action_type = sqlx::query_scalar::<_, String>(
+            "SELECT action_type FROM moderation_actions WHERE id = ?1",
+        )
+        .bind(&created.id)
+        .fetch_one(sqlite_pool)
+        .await
+        .unwrap();
+        let is_active =
+            sqlx::query_scalar::<_, i64>("SELECT is_active FROM moderation_actions WHERE id = ?1")
+                .bind(&created.id)
+                .fetch_one(sqlite_pool)
+                .await
+                .unwrap();
+        assert_eq!(action_type, moderation::MODERATION_ACTION_TYPE_BAN);
+        assert_eq!(is_active, 0);
+
+        assert!(
+            moderation::find_latest_active_mute_for_target(&pool, "guild-id", "target-user-id")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn create_ban_delete_window_removes_recent_messages_and_attachments() {
+        let pool = setup_service_pool().await;
+        let upload_dir =
+            std::env::temp_dir().join(format!("discool-ban-cleanup-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&upload_dir).unwrap();
+        let attachment_config = crate::config::AttachmentConfig {
+            upload_dir: upload_dir.to_string_lossy().to_string(),
+            max_size_bytes: 10 * 1024 * 1024,
+        };
+
+        let DbPool::Sqlite(sqlite_pool) = &pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+        sqlx::query(
+            "INSERT INTO channels (id, guild_id, slug, name, channel_type, position, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind("channel-general")
+        .bind("guild-id")
+        .bind("general")
+        .bind("general")
+        .bind("text")
+        .bind(0_i64)
+        .bind("2026-03-01T00:00:00Z")
+        .bind("2026-03-01T00:00:00Z")
+        .execute(sqlite_pool)
+        .await
+        .unwrap();
+
+        let recent_timestamp = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO messages (id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind("message-recent")
+        .bind("guild-id")
+        .bind("channel-general")
+        .bind("target-user-id")
+        .bind("recent")
+        .bind(0_i64)
+        .bind(&recent_timestamp)
+        .bind(&recent_timestamp)
+        .execute(sqlite_pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO messages (id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind("message-old")
+        .bind("guild-id")
+        .bind("channel-general")
+        .bind("target-user-id")
+        .bind("old")
+        .bind(0_i64)
+        .bind("2020-01-01T00:00:00Z")
+        .bind("2020-01-01T00:00:00Z")
+        .execute(sqlite_pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO message_attachments (id, message_id, storage_key, original_filename, mime_type, size_bytes, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .bind("attachment-recent")
+        .bind("message-recent")
+        .bind("ban-cleanup.png")
+        .bind("ban-cleanup.png")
+        .bind("image/png")
+        .bind(3_i64)
+        .bind(&recent_timestamp)
+        .execute(sqlite_pool)
+        .await
+        .unwrap();
+
+        std::fs::write(upload_dir.join("ban-cleanup.png"), b"png").unwrap();
+
+        let created = create_ban(
+            &pool,
+            &attachment_config,
+            "mod-user-id",
+            "test-guild",
+            CreateBanInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "clean recent".to_string(),
+                delete_message_window: "24h".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(created.delete_message_window, "24h");
+        assert_eq!(created.delete_messages_window_seconds, Some(24 * 60 * 60));
+        assert_eq!(created.deleted_messages_count, 1);
+
+        let remaining_messages =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages WHERE author_user_id = ?1")
+                .bind("target-user-id")
+                .fetch_one(sqlite_pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining_messages, 1);
+
+        let remaining_attachment =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM message_attachments WHERE id = ?1")
+                .bind("attachment-recent")
+                .fetch_one(sqlite_pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining_attachment, 0);
+        assert!(!upload_dir.join("ban-cleanup.png").exists());
+
+        let _ = std::fs::remove_dir_all(&upload_dir);
+    }
+
+    #[tokio::test]
+    async fn create_ban_succeeds_when_message_cleanup_fails_after_commit() {
+        let pool = setup_service_pool().await;
+        let attachment_config = crate::config::AttachmentConfig::default();
+
+        let DbPool::Sqlite(sqlite_pool) = &pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+        sqlx::query("DROP TABLE messages")
+            .execute(sqlite_pool)
+            .await
+            .unwrap();
+
+        let created = create_ban(
+            &pool,
+            &attachment_config,
+            "mod-user-id",
+            "test-guild",
+            CreateBanInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "ban despite cleanup failure".to_string(),
+                delete_message_window: "24h".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(created.deleted_messages_count, 0);
+        let stored_ban =
+            guild_ban::find_active_guild_ban_for_target(&pool, "guild-id", "target-user-id")
+                .await
+                .unwrap();
+        assert!(stored_ban.is_some());
+    }
+
+    #[tokio::test]
+    async fn apply_ban_action_rolls_back_when_membership_delete_fails() {
+        let pool = setup_service_pool().await;
+        guild_member::remove_guild_member(&pool, "guild-id", "target-user-id")
+            .await
+            .unwrap();
+
+        let err = moderation::apply_ban_action(
+            &pool,
+            "failed-ban-action",
+            "failed-ban-record",
+            "guild-id",
+            "mod-user-id",
+            "target-user-id",
+            "reason",
+            None,
+            "2026-03-01T01:00:00Z",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::ValidationError(_)));
+
+        let DbPool::Sqlite(sqlite_pool) = &pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+        let moderation_action_exists =
+            sqlx::query_scalar::<_, String>("SELECT id FROM moderation_actions WHERE id = ?1")
+                .bind("failed-ban-action")
+                .fetch_optional(sqlite_pool)
+                .await
+                .unwrap();
+        assert!(moderation_action_exists.is_none());
+
+        let ban_exists = sqlx::query_scalar::<_, String>("SELECT id FROM guild_bans WHERE id = ?1")
+            .bind("failed-ban-record")
+            .fetch_optional(sqlite_pool)
+            .await
+            .unwrap();
+        assert!(ban_exists.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_bans_and_unban_round_trip() {
+        let pool = setup_service_pool().await;
+        let attachment_config = crate::config::AttachmentConfig::default();
+        let created = create_ban(
+            &pool,
+            &attachment_config,
+            "mod-user-id",
+            "test-guild",
+            CreateBanInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "cleanup".to_string(),
+                delete_message_window: "none".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let bans = list_bans(&pool, "mod-user-id", "test-guild").await.unwrap();
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans[0].id, created.ban_id);
+        assert_eq!(bans[0].target_user_id, "target-user-id");
+
+        let unbanned = unban(&pool, "mod-user-id", "test-guild", &created.ban_id)
+            .await
+            .unwrap();
+        assert_eq!(unbanned.id, created.ban_id);
+        assert_eq!(unbanned.target_user_id, "target-user-id");
+
+        let bans_after = list_bans(&pool, "mod-user-id", "test-guild").await.unwrap();
+        assert!(bans_after.is_empty());
     }
 
     #[tokio::test]

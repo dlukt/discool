@@ -14,7 +14,12 @@ import type {
 } from '$lib/features/guild/types'
 import { blockState } from '$lib/features/identity/blockStore.svelte'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
-import { createKick, createMute } from '$lib/features/moderation/moderationApi'
+import {
+  type BanDeleteMessageWindow,
+  createBan,
+  createKick,
+  createMute,
+} from '$lib/features/moderation/moderationApi'
 import { toastState } from '$lib/feedback/toastStore.svelte'
 import { presenceState } from './presenceStore.svelte'
 
@@ -29,6 +34,7 @@ type ModerationPermission =
   | 'MANAGE_MESSAGES'
 
 type MuteDurationPreset = '1h' | '24h' | '7d' | 'custom' | 'permanent'
+type BanDeletePreset = BanDeleteMessageWindow
 
 type MemberWithPresence = GuildMember & {
   presenceStatus: PresenceStatus
@@ -98,6 +104,10 @@ let muteSubmitting = $state(false)
 let kickDialogMemberId = $state<string | null>(null)
 let kickReason = $state('')
 let kickSubmitting = $state(false)
+let banDialogMemberId = $state<string | null>(null)
+let banReason = $state('')
+let banDeleteWindow = $state<BanDeletePreset>('none')
+let banSubmitting = $state(false)
 let roleOverridesByMember = $state<Record<string, string[]>>({})
 let scrollTop = $state(0)
 let viewportHeight = $state(240)
@@ -238,6 +248,13 @@ let kickDialogMember = $derived(
   kickDialogMemberId
     ? (membersWithPresence.find(
         (member) => member.userId === kickDialogMemberId,
+      ) ?? null)
+    : null,
+)
+let banDialogMember = $derived(
+  banDialogMemberId
+    ? (membersWithPresence.find(
+        (member) => member.userId === banDialogMemberId,
       ) ?? null)
     : null,
 )
@@ -578,6 +595,28 @@ function closeKickDialog(): void {
   resetKickDialogState()
 }
 
+function resetBanDialogState(): void {
+  banReason = ''
+  banDeleteWindow = 'none'
+  banSubmitting = false
+}
+
+function openBanDialog(member: GuildMember): void {
+  if (member.userId === currentUserId) {
+    errorMessage = 'Cannot ban yourself.'
+    return
+  }
+  banDialogMemberId = member.userId
+  resetBanDialogState()
+  errorMessage = null
+  statusMessage = null
+}
+
+function closeBanDialog(): void {
+  banDialogMemberId = null
+  resetBanDialogState()
+}
+
 function durationSecondsForPreset(preset: MuteDurationPreset): number | null {
   if (preset === '1h') return 60 * 60
   if (preset === '24h') return 24 * 60 * 60
@@ -687,6 +726,41 @@ async function submitKick(): Promise<void> {
   }
 }
 
+async function submitBan(): Promise<void> {
+  if (banSubmitting || !banDialogMember) return
+  const trimmedReason = banReason.trim()
+  if (!trimmedReason) {
+    errorMessage = 'Reason is required.'
+    return
+  }
+  if (trimmedReason.length > MAX_MUTE_REASON_CHARS) {
+    errorMessage = `Reason must be ${MAX_MUTE_REASON_CHARS} characters or less.`
+    return
+  }
+
+  banSubmitting = true
+  errorMessage = null
+  try {
+    await createBan(activeGuild, {
+      targetUserId: banDialogMember.userId,
+      reason: trimmedReason,
+      deleteMessageWindow: banDeleteWindow,
+    })
+    const successMessage = 'User banned from guild'
+    statusMessage = successMessage
+    toastState.show({ variant: 'success', message: successMessage })
+    closeBanDialog()
+    await Promise.all([
+      guildState.loadMembers(activeGuild, true),
+      guildState.loadGuilds(true),
+    ])
+  } catch (err) {
+    errorMessage = messageFromError(err, 'Failed to ban member.')
+  } finally {
+    banSubmitting = false
+  }
+}
+
 async function toggleBlockForMember(member: GuildMember): Promise<void> {
   if (pendingBlockUserId || !currentUserId || member.userId === currentUserId) {
     return
@@ -738,6 +812,8 @@ $effect(() => {
   resetMuteDialogState()
   kickDialogMemberId = null
   resetKickDialogState()
+  banDialogMemberId = null
+  resetBanDialogState()
   roleOverridesByMember = {}
   scrollTop = 0
   const guildSlug = activeGuild
@@ -953,6 +1029,15 @@ $effect(() => {
                 >
                   Kick member
                 </button>
+              {:else if action.permission === 'BAN_MEMBERS'}
+                <button
+                  type="button"
+                  class="rounded-md border border-border px-2 py-1 text-xs hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+                  onclick={() => openBanDialog(selectedMember)}
+                  disabled={selectedMember.userId === currentUserId}
+                >
+                  Ban member
+                </button>
               {:else}
                 <button
                   type="button"
@@ -1145,6 +1230,83 @@ $effect(() => {
             data-testid="kick-submit-button"
           >
             {kickSubmitting ? 'Kicking...' : 'Kick member'}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if banDialogMember}
+  <div
+    class="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4"
+    role="presentation"
+  >
+    <div
+      class="w-full max-w-md rounded-md border border-border bg-card p-4 shadow-xl"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Ban ${banDialogMember.displayName}`}
+      data-testid="ban-dialog"
+    >
+      <header class="mb-3 flex items-center justify-between gap-2">
+        <h3 class="text-sm font-semibold text-foreground">
+          Ban {banDialogMember.displayName}
+        </h3>
+        <button
+          type="button"
+          class="rounded-md bg-muted px-2 py-1 text-xs hover:opacity-90"
+          onclick={closeBanDialog}
+        >
+          Close
+        </button>
+      </header>
+
+      <div class="space-y-3">
+        <p class="text-xs text-muted-foreground">
+          This permanently removes {banDialogMember.displayName} and blocks rejoin while the ban
+          is active.
+        </p>
+        <label class="block space-y-1 text-xs text-muted-foreground">
+          <span class="font-medium text-foreground">Delete recent messages</span>
+          <select
+            class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            bind:value={banDeleteWindow}
+            data-testid="ban-delete-window-select"
+          >
+            <option value="none">None</option>
+            <option value="1h">1 hour</option>
+            <option value="24h">24 hours</option>
+            <option value="7d">7 days</option>
+          </select>
+        </label>
+        <label class="block space-y-1 text-xs text-muted-foreground">
+          <span class="font-medium text-foreground">Reason</span>
+          <textarea
+            class="min-h-[84px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            maxlength={MAX_MUTE_REASON_CHARS}
+            bind:value={banReason}
+            data-testid="ban-reason-input"
+          ></textarea>
+        </label>
+
+        <div class="flex justify-end gap-2">
+          <button
+            type="button"
+            class="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-muted"
+            onclick={closeBanDialog}
+            disabled={banSubmitting}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+            onclick={() => void submitBan()}
+            disabled={banSubmitting}
+            data-testid="ban-submit-button"
+          >
+            {banSubmitting ? 'Banning...' : 'Ban member'}
           </button>
         </div>
       </div>

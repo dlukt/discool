@@ -7,6 +7,9 @@ const { guildState } = vi.hoisted(() => {
     updateGuild: vi.fn(),
     loadRoles: vi.fn(),
     rolesForGuild: vi.fn(),
+    loadBans: vi.fn(),
+    bansForGuild: vi.fn(),
+    unban: vi.fn(),
     createRole: vi.fn(),
     updateRole: vi.fn(),
     deleteRole: vi.fn(),
@@ -86,6 +89,23 @@ function ownerRoles() {
   ]
 }
 
+function ownerBans() {
+  return [
+    {
+      id: 'ban-1',
+      targetUserId: 'user-target',
+      targetUsername: 'target-user',
+      targetDisplayName: 'Target User',
+      actorUserId: 'owner-user',
+      actorUsername: 'owner',
+      actorDisplayName: 'Guild Owner',
+      reason: 'repeat abuse',
+      deleteMessagesWindowSeconds: 86400,
+      createdAt: '2026-03-01T00:00:00.000Z',
+    },
+  ]
+}
+
 function buildDragDataTransfer(sourceId: string) {
   return {
     setData: vi.fn(),
@@ -114,6 +134,18 @@ describe('GuildSettings', () => {
     guildState.rolesForGuild.mockImplementation((slug: string) =>
       slug === 'makers-hub' ? ownerRoles() : [],
     )
+    guildState.loadBans.mockResolvedValue(ownerBans())
+    guildState.bansForGuild.mockImplementation((slug: string) =>
+      slug === 'makers-hub' ? ownerBans() : [],
+    )
+    guildState.unban.mockResolvedValue({
+      id: 'ban-1',
+      guildSlug: 'makers-hub',
+      targetUserId: 'user-target',
+      unbannedByUserId: 'owner-user',
+      unbannedAt: '2026-03-02T00:00:00.000Z',
+      updatedAt: '2026-03-02T00:00:00.000Z',
+    })
     guildState.createRole.mockResolvedValue(ownerRoles()[1])
     guildState.updateRole.mockResolvedValue({
       ...ownerRoles()[1],
@@ -300,6 +332,32 @@ describe('GuildSettings', () => {
       ),
     ).toBeInTheDocument()
     expect(within(dialog).getByLabelText('Manage guild')).toBeDisabled()
+  })
+
+  it('renders ban list and supports unban flow', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { getByText, getByLabelText } = render(GuildSettings, {
+      open: true,
+      guildSlug: 'makers-hub',
+    })
+
+    await waitFor(() => {
+      expect(guildState.loadBans).toHaveBeenCalledWith('makers-hub')
+    })
+
+    expect(getByText('Target User')).toBeInTheDocument()
+    expect(getByText('Reason: repeat abuse')).toBeInTheDocument()
+
+    await fireEvent.click(getByLabelText('Unban user target-user'))
+
+    await waitFor(() => {
+      expect(guildState.unban).toHaveBeenCalledWith('makers-hub', 'ban-1')
+    })
+    await waitFor(() => {
+      expect(guildState.loadBans).toHaveBeenCalledWith('makers-hub', true)
+    })
+    expect(getByText('Target User was unbanned.')).toBeInTheDocument()
+    confirmSpy.mockRestore()
   })
 
   it('supports drag reorder for custom roles and keeps system roles fixed', async () => {

@@ -7,6 +7,8 @@ import {
   type DeleteGuildRoleResult,
   type DeleteGuildRoleResultWire,
   type Guild,
+  type GuildBan,
+  type GuildBanWire,
   type GuildInvite,
   type GuildInviteWire,
   type GuildMember,
@@ -28,6 +30,7 @@ import {
   toCreateGuildRoleInputWire,
   toDeleteGuildRoleResult,
   toGuild,
+  toGuildBan,
   toGuildInvite,
   toGuildMember,
   toGuildMemberRoleData,
@@ -36,9 +39,12 @@ import {
   toJoinGuildByInviteResult,
   toReorderGuildRolesInputWire,
   toRevokeGuildInviteResult,
+  toUnbanGuildBanResult,
   toUpdateGuildInputWire,
   toUpdateGuildMemberRolesInputWire,
   toUpdateGuildRoleInputWire,
+  type UnbanGuildBanResult,
+  type UnbanGuildBanResultWire,
   type UpdateGuildInput,
   type UpdateGuildMemberRolesInput,
   type UpdateGuildRoleInput,
@@ -158,6 +164,24 @@ export function updateMemberRoles(
       body: JSON.stringify(toUpdateGuildMemberRolesInputWire(input)),
     },
   ).then(toGuildMember)
+}
+
+export function listBans(guildSlug: string): Promise<GuildBan[]> {
+  return apiFetch<GuildBanWire[]>(
+    `/api/v1/guilds/${encodeURIComponent(guildSlug)}/moderation/bans`,
+  ).then((bans) => bans.map(toGuildBan))
+}
+
+export function unban(
+  guildSlug: string,
+  banId: string,
+): Promise<UnbanGuildBanResult> {
+  return apiFetch<UnbanGuildBanResultWire>(
+    `/api/v1/guilds/${encodeURIComponent(guildSlug)}/moderation/bans/${encodeURIComponent(banId)}`,
+    {
+      method: 'DELETE',
+    },
+  ).then(toUnbanGuildBanResult)
 }
 
 export function listInvites(guildSlug: string): Promise<GuildInvite[]> {

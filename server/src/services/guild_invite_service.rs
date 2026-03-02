@@ -7,6 +7,7 @@ use crate::{
     db::DbPool,
     models::{
         guild::{self, Guild},
+        guild_ban,
         guild_invite::{self, GuildInviteWithCreator},
     },
     permissions,
@@ -14,6 +15,7 @@ use crate::{
 
 const MAX_INVITE_CODE_ATTEMPTS: usize = 50;
 pub const INVALID_INVITE_MESSAGE: &str = "This invite link is invalid or has expired";
+pub const BANNED_INVITE_MESSAGE: &str = "You are banned from this guild";
 
 #[derive(Debug, Clone)]
 pub struct CreateGuildInviteInput {
@@ -164,18 +166,32 @@ pub async fn join_guild_by_invite(
     user_id: &str,
     code: &str,
 ) -> Result<JoinGuildByInviteResponse, AppError> {
-    let joined = guild_invite::join_guild_via_invite(pool, code, user_id, &Utc::now().to_rfc3339())
-        .await?
-        .ok_or_else(|| AppError::ValidationError(INVALID_INVITE_MESSAGE.to_string()))?;
+    let joined =
+        guild_invite::join_guild_via_invite(pool, code, user_id, &Utc::now().to_rfc3339()).await?;
+    if let Some(joined) = joined {
+        return Ok(JoinGuildByInviteResponse {
+            guild_slug: joined.guild_slug.clone(),
+            guild_name: joined.guild_name,
+            guild_icon_url: icon_url_for_guild(
+                &joined.guild_slug,
+                joined.icon_storage_key.as_deref(),
+            ),
+            default_channel_slug: joined.default_channel_slug,
+            already_member: joined.already_member,
+            welcome_screen: default_welcome_screen(),
+        });
+    }
+    if let Some(invite) = guild_invite::find_active_invite_with_guild_by_code(pool, code).await?
+        && guild_ban::find_active_guild_ban_for_target(pool, &invite.guild_id, user_id)
+            .await?
+            .is_some()
+    {
+        return Err(AppError::ValidationError(BANNED_INVITE_MESSAGE.to_string()));
+    }
 
-    Ok(JoinGuildByInviteResponse {
-        guild_slug: joined.guild_slug.clone(),
-        guild_name: joined.guild_name,
-        guild_icon_url: icon_url_for_guild(&joined.guild_slug, joined.icon_storage_key.as_deref()),
-        default_channel_slug: joined.default_channel_slug,
-        already_member: joined.already_member,
-        welcome_screen: default_welcome_screen(),
-    })
+    Err(AppError::ValidationError(
+        INVALID_INVITE_MESSAGE.to_string(),
+    ))
 }
 
 fn to_invite_response(record: GuildInviteWithCreator) -> GuildInviteResponse {
