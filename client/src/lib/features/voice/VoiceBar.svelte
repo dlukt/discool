@@ -48,6 +48,20 @@ let qualityClass = $derived.by(() => {
   return 'bg-destructive'
 })
 
+let reconnectAnimationClass = $derived(
+  connectionState === 'retrying' ? 'motion-safe:animate-pulse' : '',
+)
+
+let reconnectStatusLabel = $derived.by(() => {
+  if (connectionState === 'retrying') return 'Reconnecting...'
+  if (connectionState === 'failed') return 'Connection lost'
+  return null
+})
+
+let reconnectStatusTone = $derived(
+  connectionState === 'failed' ? 'text-destructive' : 'text-muted-foreground',
+)
+
 let voiceControlAnnouncement = $derived.by(() => {
   if (connectionState !== 'connected') return 'Voice disconnected.'
   if (isDeafened) return 'Voice controls updated. Deafened and muted.'
@@ -75,7 +89,7 @@ let voiceControlAnnouncement = $derived.by(() => {
     </div>
     <div class="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
       <span
-        class={`h-2.5 w-2.5 rounded-full ${qualityClass}`}
+        class={`h-2.5 w-2.5 rounded-full ${qualityClass} ${reconnectAnimationClass}`}
         data-testid="voice-bar-quality-dot"
         data-quality={quality}
       ></span>
@@ -120,6 +134,15 @@ let voiceControlAnnouncement = $derived.by(() => {
       </button>
     </div>
   </div>
+  {#if reconnectStatusLabel}
+    <p
+      class={`mt-2 text-xs ${reconnectStatusTone}`}
+      data-testid="voice-bar-status"
+      aria-live={connectionState === 'failed' ? 'assertive' : 'polite'}
+    >
+      {reconnectStatusLabel}
+    </p>
+  {/if}
   <p class="sr-only" aria-live="polite" data-testid="voice-bar-live">
     {voiceControlAnnouncement}
   </p>

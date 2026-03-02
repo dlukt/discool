@@ -118,7 +118,7 @@ development_status:
   7-3-voice-channel-participants-display: done
   7-4-individual-volume-control: done
   7-5-voice-channel-switching: done
-  7-6-voice-auto-reconnect: backlog
+  7-6-voice-auto-reconnect: done
   7-7-mobile-voice-controls: backlog
   epic-7-retrospective: optional
 

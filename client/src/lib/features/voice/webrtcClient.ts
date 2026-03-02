@@ -152,10 +152,19 @@ export class VoiceWebRtcClient {
     }
   }
 
+  requestIceRestart(): void {
+    if (!this.peerConnection) return
+    if (this.peerConnection.signalingState === 'closed') return
+    const restartIce = this.peerConnection.restartIce
+    if (typeof restartIce !== 'function') return
+    restartIce.call(this.peerConnection)
+  }
+
   close(): void {
     if (this.peerConnection) {
       this.peerConnection.onicecandidate = null
       this.peerConnection.onconnectionstatechange = null
+      this.peerConnection.oniceconnectionstatechange = null
       this.peerConnection.ontrack = null
       this.peerConnection.close()
       this.peerConnection = null
@@ -176,6 +185,14 @@ export class VoiceWebRtcClient {
     const connection = new RTCPeerConnection()
     connection.onconnectionstatechange = () => {
       onPeerState(connection.connectionState)
+    }
+    connection.oniceconnectionstatechange = () => {
+      if (
+        connection.iceConnectionState === 'failed' ||
+        connection.iceConnectionState === 'disconnected'
+      ) {
+        onPeerState(connection.iceConnectionState)
+      }
     }
     connection.onicecandidate = (event) => {
       const candidate = event.candidate

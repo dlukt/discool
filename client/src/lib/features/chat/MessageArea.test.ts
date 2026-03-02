@@ -292,6 +292,7 @@ vi.mock('$lib/feedback/toastStore.svelte', () => ({
 }))
 
 vi.mock('$lib/features/voice/voiceStore.svelte', () => ({
+  VOICE_CONNECTION_LOST_MESSAGE: 'Connection lost',
   voiceState,
 }))
 
@@ -1087,6 +1088,56 @@ describe('MessageArea', () => {
     expect(voiceState.toggleMute).toHaveBeenCalledTimes(1)
     expect(voiceState.toggleDeafen).toHaveBeenCalledTimes(1)
     expect(voiceState.disconnect).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps VoiceBar visible with reconnecting and connection-lost states', async () => {
+    voiceState.statusForChannel.mockReturnValue('retrying')
+    voiceState.statusMessageForChannel.mockReturnValue('Reconnecting...')
+    const { getByTestId, rerender } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    expect(getByTestId('voice-bar')).toBeInTheDocument()
+    expect(getByTestId('voice-bar-status')).toHaveTextContent('Reconnecting...')
+
+    voiceState.statusForChannel.mockReturnValue('failed')
+    voiceState.statusMessageForChannel.mockReturnValue('Connection lost')
+    await rerender({
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    expect(getByTestId('voice-bar')).toBeInTheDocument()
+    expect(getByTestId('voice-bar-status')).toHaveTextContent('Connection lost')
+  })
+
+  it('keeps VoiceBar hidden for non-reconnect failed voice joins', () => {
+    voiceState.statusForChannel.mockReturnValue('failed')
+    voiceState.statusMessageForChannel.mockReturnValue(
+      'Voice connection failed. Check your network.',
+    )
+    const { getByTestId, queryByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    expect(queryByTestId('voice-bar')).not.toBeInTheDocument()
+    expect(getByTestId('voice-connection-status')).toHaveTextContent(
+      'Voice connection failed. Check your network.',
+    )
   })
 
   it('updates VoiceBar channel label when active channel changes', async () => {

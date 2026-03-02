@@ -61,6 +61,31 @@ describe('VoiceBar', () => {
       'data-quality',
       'yellow',
     )
+    expect(view.queryByTestId('voice-bar-status')).not.toBeInTheDocument()
+
+    await view.rerender({
+      guildName: 'lobby',
+      channelName: 'voice-room',
+      connectionState: 'retrying',
+      isMuted: false,
+      isDeafened: false,
+      isParticipantsOpen: false,
+      onToggleParticipants: vi.fn(),
+      onToggleMute: vi.fn(),
+      onToggleDeafen: vi.fn(),
+      onDisconnect: vi.fn(),
+    })
+
+    expect(view.getByTestId('voice-bar-quality-dot')).toHaveAttribute(
+      'data-quality',
+      'yellow',
+    )
+    expect(view.getByTestId('voice-bar-quality-dot')).toHaveClass(
+      'motion-safe:animate-pulse',
+    )
+    expect(view.getByTestId('voice-bar-status')).toHaveTextContent(
+      'Reconnecting...',
+    )
 
     await view.rerender({
       guildName: 'lobby',
@@ -78,6 +103,9 @@ describe('VoiceBar', () => {
     expect(view.getByTestId('voice-bar-quality-dot')).toHaveAttribute(
       'data-quality',
       'red',
+    )
+    expect(view.getByTestId('voice-bar-status')).toHaveTextContent(
+      'Connection lost',
     )
   })
 

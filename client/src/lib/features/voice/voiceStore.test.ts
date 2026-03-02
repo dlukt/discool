@@ -52,7 +52,9 @@ vi.mock('./participantVolumeStore.svelte', () => ({
 }))
 
 import {
+  VOICE_CONNECTION_LOST_MESSAGE,
   VOICE_FAILED_MESSAGE,
+  VOICE_RECONNECTING_MESSAGE,
   VOICE_RETRY_MESSAGE,
   voiceState,
 } from './voiceStore.svelte'
@@ -430,7 +432,7 @@ describe('voiceState', () => {
     expect(leaveCalls).toHaveLength(1)
   })
 
-  it('handles disconnected connection-state event without re-sending leave', () => {
+  it('starts reconnect lifecycle when connection-state becomes disconnected', () => {
     voiceState.activateVoiceChannel('lobby', 'voice-room')
     voiceState.status = 'connected'
     emitEnvelope({
@@ -463,13 +465,79 @@ describe('voiceState', () => {
       },
     })
 
+    expect(voiceState.status).toBe('retrying')
+    expect(voiceState.statusMessage).toBe(VOICE_RECONNECTING_MESSAGE)
+    expect(voiceState.activeGuildSlug).toBe('lobby')
+    expect(voiceState.activeChannelSlug).toBe('voice-room')
+    expect(voiceState.participantCountForChannel('lobby', 'voice-room')).toBe(0)
+    expect(wsSend.mock.calls.slice(0, 2)).toEqual([
+      [
+        'c_voice_leave',
+        {
+          guild_slug: 'lobby',
+          channel_slug: 'voice-room',
+        },
+      ],
+      [
+        'c_voice_join',
+        {
+          guild_slug: 'lobby',
+          channel_slug: 'voice-room',
+        },
+      ],
+    ])
+  })
+
+  it('restores connected state when reconnect succeeds within fast-recovery window', () => {
+    voiceState.activateVoiceChannel('lobby', 'voice-room')
+    voiceState.status = 'connected'
+
+    emitEnvelope({
+      op: 'voice_connection_state',
+      d: {
+        guild_slug: 'lobby',
+        channel_slug: 'voice-room',
+        state: 'disconnected',
+      },
+    })
+
+    vi.advanceTimersByTime(1_000)
+    emitEnvelope({
+      op: 'voice_connection_state',
+      d: {
+        guild_slug: 'lobby',
+        channel_slug: 'voice-room',
+        state: 'connected',
+      },
+    })
+
+    expect(voiceState.status).toBe('connected')
+    expect(voiceState.statusMessage).toBeNull()
+    expect(voiceState.activeGuildSlug).toBe('lobby')
+    expect(voiceState.activeChannelSlug).toBe('voice-room')
+    expect(voiceState.joinLatencyMs).toBeNull()
+  })
+
+  it('shows connection-lost copy after 5 seconds and terminally disconnects at 30 seconds', () => {
+    voiceState.activateVoiceChannel('lobby', 'voice-room')
+    voiceState.status = 'connected'
+
+    emitEnvelope({
+      op: 'voice_connection_state',
+      d: {
+        guild_slug: 'lobby',
+        channel_slug: 'voice-room',
+        state: 'disconnected',
+      },
+    })
+
+    vi.advanceTimersByTime(6_000)
+    expect(voiceState.status).toBe('failed')
+    expect(voiceState.statusMessage).toBe(VOICE_CONNECTION_LOST_MESSAGE)
+
+    vi.advanceTimersByTime(30_000)
     expect(voiceState.status).toBe('idle')
     expect(voiceState.activeGuildSlug).toBeNull()
     expect(voiceState.activeChannelSlug).toBeNull()
-    expect(voiceState.participantCountForChannel('lobby', 'voice-room')).toBe(0)
-    const leaveCalls = wsSend.mock.calls.filter(
-      (call) => call[0] === 'c_voice_leave',
-    )
-    expect(leaveCalls).toHaveLength(0)
   })
 })

@@ -13,7 +13,10 @@ import { identityState } from '$lib/features/identity/identityStore.svelte'
 import ProfileSettingsView from '$lib/features/identity/ProfileSettingsView.svelte'
 import VoiceBar from '$lib/features/voice/VoiceBar.svelte'
 import VoicePanel from '$lib/features/voice/VoicePanel.svelte'
-import { voiceState } from '$lib/features/voice/voiceStore.svelte'
+import {
+  VOICE_CONNECTION_LOST_MESSAGE,
+  voiceState,
+} from '$lib/features/voice/voiceStore.svelte'
 import { toastState } from '$lib/feedback/toastStore.svelte'
 import {
   connectionStatusText,
@@ -106,7 +109,11 @@ let voiceConnectionState = $derived(
 )
 let participantsOpen = $state(false)
 let showVoiceBar = $derived(
-  isChannelMode && voiceConnectionState === 'connected',
+  isChannelMode &&
+    (voiceConnectionState === 'connected' ||
+      voiceConnectionState === 'retrying' ||
+      (voiceConnectionState === 'failed' &&
+        voiceStatusMessage === VOICE_CONNECTION_LOST_MESSAGE)),
 )
 let activeVoiceParticipants = $derived(
   isChannelMode ? voiceState.activeChannelParticipants() : [],

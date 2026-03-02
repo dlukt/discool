@@ -4948,6 +4948,144 @@ async fn websocket_voice_switch_rebroadcasts_leave_and_join_snapshots() {
 }
 
 #[tokio::test]
+async fn websocket_voice_rejoin_rebroadcasts_leave_and_join_snapshots() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "voice-rejoin-owner", [204u8; 32]).await;
+    let guild_body = json!({ "name": "Voice Rejoin Guild" }).to_string();
+    let guild_res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_slug = guild_json["data"]["slug"].as_str().unwrap().to_string();
+
+    let create_voice_channel = json!({
+        "name": "Voice Rejoin",
+        "channel_type": "voice",
+    })
+    .to_string();
+    let create_voice_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/channels"),
+        &create_voice_channel,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&create_voice_res), 201);
+    let voice_json: serde_json::Value =
+        serde_json::from_str(response_body(&create_voice_res)).unwrap();
+    let voice_slug = voice_json["data"]["slug"].as_str().unwrap().to_string();
+
+    let (mut stream, response) = websocket_connect(&addr, "/ws", Some(&owner_token)).await;
+    assert_eq!(response_status(&response), 101);
+    let _ = websocket_read_json_with_op(&mut stream, "hello", 1_500).await;
+    websocket_send_text_frame(
+        &mut stream,
+        &json!({
+            "op": "c_subscribe",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_slug.as_str(),
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let _ = websocket_read_json_with_op(&mut stream, "channel_update", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut stream,
+        &json!({
+            "op": "c_voice_join",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_slug.as_str(),
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let _ = websocket_read_json_with_op(&mut stream, "voice_connection_state", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut stream, "voice_offer", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut stream, "voice_ice_candidate", 1_500).await;
+    let joined_snapshot = websocket_read_json_with_op(&mut stream, "voice_state_update", 1_500)
+        .await
+        .expect("voice join should emit participant snapshot");
+    assert_eq!(joined_snapshot["d"]["participant_count"], json!(1));
+
+    websocket_send_text_frame(
+        &mut stream,
+        &json!({
+            "op": "c_voice_leave",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_slug.as_str(),
+            }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let disconnected = websocket_read_json_with_op(&mut stream, "voice_connection_state", 1_500)
+        .await
+        .expect("voice leave should emit disconnected state");
+    assert_eq!(disconnected["d"]["state"], json!("disconnected"));
+    assert_eq!(
+        disconnected["d"]["channel_slug"],
+        json!(voice_slug.as_str())
+    );
+
+    let left_snapshot = websocket_read_json_with_op(&mut stream, "voice_state_update", 1_500)
+        .await
+        .expect("voice leave should rebroadcast empty participant snapshot");
+    assert_eq!(
+        left_snapshot["d"]["channel_slug"],
+        json!(voice_slug.as_str())
+    );
+    assert_eq!(left_snapshot["d"]["participant_count"], json!(0));
+
+    websocket_send_text_frame(
+        &mut stream,
+        &json!({
+            "op": "c_voice_join",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_slug.as_str(),
+            }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let reconnecting = websocket_read_json_with_op(&mut stream, "voice_connection_state", 1_500)
+        .await
+        .expect("voice rejoin should emit connecting state");
+    assert_eq!(reconnecting["d"]["state"], json!("connecting"));
+    assert_eq!(
+        reconnecting["d"]["channel_slug"],
+        json!(voice_slug.as_str())
+    );
+
+    let _ = websocket_read_json_with_op(&mut stream, "voice_offer", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut stream, "voice_ice_candidate", 1_500).await;
+    let rejoin_snapshot = websocket_read_json_with_op(&mut stream, "voice_state_update", 1_500)
+        .await
+        .expect("voice rejoin should rebroadcast participant snapshot");
+    assert_eq!(
+        rejoin_snapshot["d"]["channel_slug"],
+        json!(voice_slug.as_str())
+    );
+    assert_eq!(rejoin_snapshot["d"]["participant_count"], json!(1));
+}
+
+#[tokio::test]
 async fn websocket_voice_join_rejects_text_channels_and_invalid_payloads() {
     use serde_json::json;
 

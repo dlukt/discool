@@ -26,11 +26,15 @@ import { VoiceWebRtcClient } from './webrtcClient'
 export const VOICE_RETRY_MESSAGE = 'Could not connect to voice. Retrying...'
 export const VOICE_FAILED_MESSAGE =
   'Voice connection failed. Check your network.'
+export const VOICE_RECONNECTING_MESSAGE = 'Reconnecting...'
+export const VOICE_CONNECTION_LOST_MESSAGE = 'Connection lost'
 
 const JOIN_TIMEOUT_MS = 2_000
 const RETRY_INITIAL_MS = 400
 const RETRY_MAX_MS = 1_600
 const RETRY_MAX_ATTEMPTS = 2
+const RECONNECT_FAST_RECOVERY_MS = 5_000
+const RECONNECT_TERMINAL_TIMEOUT_MS = 30_000
 
 type VoiceChannelSnapshot = {
   participantCount: number
@@ -291,6 +295,8 @@ function clearActiveChannelState(sendLeave = true): void {
     voiceState.activeGuildSlug === null &&
     voiceState.activeChannelSlug === null &&
     voiceState.attempt === 0 &&
+    voiceState.reconnectStartedAt === null &&
+    voiceState.reconnectLeaveSent === false &&
     voiceState.joinStartedAt === null &&
     voiceState.connectedAt === null &&
     voiceState.joinLatencyMs === null &&
@@ -315,6 +321,8 @@ function clearActiveChannelState(sendLeave = true): void {
   voiceState.activeGuildSlug = null
   voiceState.activeChannelSlug = null
   voiceState.attempt = 0
+  voiceState.reconnectStartedAt = null
+  voiceState.reconnectLeaveSent = false
   voiceState.joinStartedAt = null
   voiceState.connectedAt = null
   voiceState.joinLatencyMs = null
@@ -325,6 +333,26 @@ function clearActiveChannelState(sendLeave = true): void {
 function retryDelayForAttempt(attempt: number): number {
   const exponent = Math.max(0, attempt - 1)
   return Math.min(RETRY_INITIAL_MS * 2 ** exponent, RETRY_MAX_MS)
+}
+
+function reconnectElapsedMs(): number {
+  if (voiceState.reconnectStartedAt === null) return 0
+  return Math.max(0, Date.now() - voiceState.reconnectStartedAt)
+}
+
+function applyReconnectStatus(context: VoiceJoinContext): boolean {
+  if (!matchesActiveContext(context)) return false
+  const elapsed = reconnectElapsedMs()
+  if (elapsed >= RECONNECT_TERMINAL_TIMEOUT_MS) {
+    clearActiveChannelState(false)
+    return false
+  }
+  if (elapsed >= RECONNECT_FAST_RECOVERY_MS) {
+    setStatus('failed', VOICE_CONNECTION_LOST_MESSAGE)
+    return true
+  }
+  setStatus('retrying', VOICE_RECONNECTING_MESSAGE)
+  return true
 }
 
 function setStatus(
@@ -340,6 +368,8 @@ function markConnectedIfActive(context: VoiceJoinContext): void {
   if (!matchesActiveContext(context)) return
   clearRetryTimer()
   clearJoinTimeoutTimer()
+  voiceState.reconnectStartedAt = null
+  voiceState.reconnectLeaveSent = false
   setStatus('connected', null)
   const connectedAt = Date.now()
   voiceState.connectedAt = connectedAt
@@ -356,6 +386,8 @@ function markFailed(context: VoiceJoinContext): void {
   if (!matchesActiveContext(context)) return
   clearRetryTimer()
   clearJoinTimeoutTimer()
+  voiceState.reconnectStartedAt = null
+  voiceState.reconnectLeaveSent = false
   voiceClient.close()
   setStatus('failed', VOICE_FAILED_MESSAGE)
   toastState.show({ variant: 'error', message: VOICE_FAILED_MESSAGE })
@@ -363,6 +395,16 @@ function markFailed(context: VoiceJoinContext): void {
 
 function scheduleRetry(context: VoiceJoinContext): void {
   if (!matchesActiveContext(context)) return
+  if (voiceState.reconnectStartedAt !== null) {
+    if (!applyReconnectStatus(context)) return
+    const delay = retryDelayForAttempt(voiceState.attempt)
+    clearRetryTimer()
+    retryTimer = setTimeout(() => {
+      retryTimer = null
+      beginJoinAttempt(context, true, true)
+    }, delay)
+    return
+  }
   if (voiceState.attempt >= RETRY_MAX_ATTEMPTS) {
     markFailed(context)
     return
@@ -380,25 +422,56 @@ function handleJoinFailure(
   context: VoiceJoinContext | null = activeContext(),
 ): void {
   if (!context || !matchesActiveContext(context)) return
-  if (voiceState.status === 'connected') return
+  if (voiceState.status === 'connected') {
+    beginReconnectLifecycle(context)
+    return
+  }
   scheduleRetry(context)
 }
 
-function beginJoinAttempt(context: VoiceJoinContext, isRetry: boolean): void {
+function beginReconnectLifecycle(context: VoiceJoinContext): void {
   if (!matchesActiveContext(context)) return
+  if (voiceState.reconnectStartedAt !== null) return
+  voiceState.reconnectStartedAt = Date.now()
+  voiceState.reconnectLeaveSent = false
+  voiceState.attempt = 0
+  voiceState.joinStartedAt = null
+  voiceState.connectedAt = null
+  voiceState.joinLatencyMs = null
+  voiceClient.requestIceRestart()
+  beginJoinAttempt(context, true, true)
+}
+
+function beginJoinAttempt(
+  context: VoiceJoinContext,
+  isRetry: boolean,
+  isReconnect = false,
+): void {
+  if (!matchesActiveContext(context)) return
+
+  if (isReconnect) {
+    if (!applyReconnectStatus(context)) return
+    if (!voiceState.reconnectLeaveSent) {
+      sendLeaveSignal(context)
+      removeChannelSnapshot(context)
+      voiceState.reconnectLeaveSent = true
+    }
+  }
 
   clearJoinTimeoutTimer()
   voiceClient.close()
-  if (voiceState.attempt === 0) {
+  if (!isReconnect && voiceState.attempt === 0) {
     voiceState.joinStartedAt = Date.now()
     voiceState.joinLatencyMs = null
     voiceState.connectedAt = null
   }
   voiceState.attempt += 1
-  setStatus(
-    isRetry ? 'retrying' : 'connecting',
-    isRetry ? VOICE_RETRY_MESSAGE : null,
-  )
+  if (!isReconnect) {
+    setStatus(
+      isRetry ? 'retrying' : 'connecting',
+      isRetry ? VOICE_RETRY_MESSAGE : null,
+    )
+  }
 
   const sent = wsClient.send('c_voice_join', {
     guild_slug: context.guildSlug,
@@ -566,10 +639,20 @@ function handleVoiceConnectionState(payload: VoiceConnectionStateWire): void {
   if (!context || !matchesActiveContext(context)) return
   const state = payload.state
   if (state === 'connected') {
+    if (voiceState.reconnectStartedAt !== null) {
+      markConnectedIfActive(context)
+    }
     return
   }
   if (state === 'disconnected') {
     removeChannelSnapshot(context)
+    if (voiceState.reconnectStartedAt !== null) {
+      return
+    }
+    if (voiceState.status === 'connected') {
+      beginReconnectLifecycle(context)
+      return
+    }
     clearActiveChannelState(false)
     return
   }
@@ -598,7 +681,11 @@ function handleVoiceWsError(envelope: WsEnvelope): void {
     return
   }
   if (errorContext && !matchesActiveContext(errorContext)) return
-  if (voiceState.status === 'connecting' || voiceState.status === 'retrying') {
+  if (
+    voiceState.status === 'connecting' ||
+    voiceState.status === 'retrying' ||
+    voiceState.reconnectStartedAt !== null
+  ) {
     handleJoinFailure(errorContext ?? activeContext())
   }
 }
@@ -638,6 +725,8 @@ export const voiceState = $state({
   joinStartedAt: null as number | null,
   connectedAt: null as number | null,
   joinLatencyMs: null as number | null,
+  reconnectStartedAt: null as number | null,
+  reconnectLeaveSent: false,
   channelSnapshots: {} as Record<string, VoiceChannelSnapshot>,
   participantVolumeOwnerUserId: null as string | null,
   participantVolumesLoading: false,
@@ -771,7 +860,8 @@ export const voiceState = $state({
       voiceState.activeChannelSlug === normalizedChannel &&
       (voiceState.status === 'connecting' ||
         voiceState.status === 'retrying' ||
-        voiceState.status === 'connected')
+        voiceState.status === 'connected' ||
+        voiceState.status === 'failed')
     ) {
       return
     }
@@ -792,6 +882,8 @@ export const voiceState = $state({
     voiceState.activeGuildSlug = normalizedGuild
     voiceState.activeChannelSlug = normalizedChannel
     voiceState.attempt = 0
+    voiceState.reconnectStartedAt = null
+    voiceState.reconnectLeaveSent = false
     voiceState.joinStartedAt = null
     voiceState.connectedAt = null
     voiceState.joinLatencyMs = null
