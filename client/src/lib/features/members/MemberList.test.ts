@@ -98,6 +98,31 @@ const { guildState, memberDataByGuild, presenceStatuses, identityState } =
     return { guildState, memberDataByGuild, presenceStatuses, identityState }
   })
 
+const moderationApi = vi.hoisted(() => ({
+  createMute: vi.fn(
+    async (
+      _guildSlug: string,
+      _input: {
+        targetUserId: string
+        reason: string
+        durationSeconds?: number | null
+        isPermanent?: boolean
+      },
+    ) => ({
+      id: 'mute-1',
+      guildSlug: 'lobby',
+      actorUserId: 'user-viewer',
+      targetUserId: 'user-default',
+      reason: 'cooldown',
+      durationSeconds: 3600,
+      expiresAt: '2026-03-02T00:00:00.000Z',
+      isPermanent: false,
+      createdAt: '2026-03-01T00:00:00.000Z',
+      updatedAt: '2026-03-01T00:00:00.000Z',
+    }),
+  ),
+}))
+
 const presenceState = vi.hoisted(() => ({
   version: 0,
   seedFromMembers: vi.fn(
@@ -155,6 +180,8 @@ vi.mock('$lib/features/identity/blockStore.svelte', () => ({
 vi.mock('./presenceStore.svelte', () => ({
   presenceState,
 }))
+
+vi.mock('$lib/features/moderation/moderationApi', () => moderationApi)
 
 import MemberList from './MemberList.svelte'
 
@@ -267,6 +294,7 @@ describe('MemberList', () => {
       token: 'token-123',
       user: { id: 'user-viewer' },
     }
+    moderationApi.createMute.mockClear()
   })
 
   it('groups by highest role, sorts online first, and renders status dots', async () => {
@@ -349,9 +377,7 @@ describe('MemberList', () => {
       key: 'ContextMenu',
     })
 
-    expect(
-      getByRole('button', { name: 'Mute member (coming soon)' }),
-    ).toBeInTheDocument()
+    expect(getByRole('button', { name: 'Mute member' })).toBeInTheDocument()
     expect(
       getByRole('button', { name: 'Kick member (coming soon)' }),
     ).toBeInTheDocument()
@@ -361,6 +387,24 @@ describe('MemberList', () => {
     expect(
       queryByRole('button', { name: 'Ban member (coming soon)' }),
     ).not.toBeInTheDocument()
+
+    await fireEvent.click(getByRole('button', { name: 'Mute member' }))
+    expect(
+      getByRole('dialog', { name: 'Mute General User' }),
+    ).toBeInTheDocument()
+    await fireEvent.input(getByTestId('mute-reason-input'), {
+      target: { value: 'cooldown' },
+    })
+    await fireEvent.click(getByTestId('mute-submit-button'))
+
+    await waitFor(() => {
+      expect(moderationApi.createMute).toHaveBeenCalledWith('lobby', {
+        targetUserId: 'user-default',
+        reason: 'cooldown',
+        isPermanent: false,
+        durationSeconds: 24 * 60 * 60,
+      })
+    })
 
     await fireEvent.click(getByRole('button', { name: 'Send DM' }))
 

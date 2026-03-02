@@ -10,6 +10,8 @@ const {
   timelineByChannel,
   historyByChannel,
   messageState,
+  muteStatusState,
+  muteStatusesByGuild,
   identityState,
   guildState,
 } = vi.hoisted(() => {
@@ -215,6 +217,39 @@ const {
     typingUserIdsForChannel: vi.fn(() => [] as string[]),
   }
 
+  const muteStatusesByGuild: Record<
+    string,
+    {
+      active: boolean
+      isPermanent: boolean
+      expiresAt: string | null
+      reason: string | null
+    }
+  > = {}
+
+  const muteStatusState = {
+    statusForGuild: vi.fn((guildSlug: string) => {
+      return (
+        muteStatusesByGuild[guildSlug] ?? {
+          active: false,
+          isPermanent: false,
+          expiresAt: null,
+          reason: null,
+        }
+      )
+    }),
+    refresh: vi.fn(async (guildSlug: string) => {
+      return (
+        muteStatusesByGuild[guildSlug] ?? {
+          active: false,
+          isPermanent: false,
+          expiresAt: null,
+          reason: null,
+        }
+      )
+    }),
+  }
+
   const identityState = {
     session: {
       user: {
@@ -253,6 +288,8 @@ const {
     historyByChannel,
     dmKey,
     messageState,
+    muteStatusState,
+    muteStatusesByGuild,
     identityState,
     guildState,
   }
@@ -285,6 +322,10 @@ vi.mock('$lib/features/guild/guildStore.svelte', () => ({
 
 vi.mock('./messageStore.svelte', () => ({
   messageState,
+}))
+
+vi.mock('$lib/features/moderation/muteStatusStore.svelte', () => ({
+  muteStatusState,
 }))
 
 vi.mock('$lib/feedback/toastStore.svelte', () => ({
@@ -356,6 +397,9 @@ describe('MessageArea', () => {
     Object.keys(historyByChannel).forEach((key) => {
       delete historyByChannel[key]
     })
+    Object.keys(muteStatusesByGuild).forEach((key) => {
+      delete muteStatusesByGuild[key]
+    })
 
     seedChannelMessages('lobby:general', 0)
     seedChannelMessages('lobby:random', 0)
@@ -426,6 +470,8 @@ describe('MessageArea', () => {
     guildState.memberRoleDataForGuild.mockClear()
     guildState.loadMembers.mockClear()
     guildState.bySlug.mockClear()
+    muteStatusState.statusForGuild.mockClear()
+    muteStatusState.refresh.mockClear()
   })
 
   it('sends on Enter and inserts newline on Shift+Enter', async () => {
@@ -946,6 +992,35 @@ describe('MessageArea', () => {
     expect(getByTestId('attachment-error')).toHaveTextContent(
       PERMISSION_DENIED_MESSAGE,
     )
+  })
+
+  it('shows mute banner and disables composer controls for muted users', async () => {
+    muteStatusesByGuild.lobby = {
+      active: true,
+      isPermanent: false,
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      reason: 'cooldown',
+    }
+
+    const { getByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    expect(getByTestId('mute-status-banner')).toHaveTextContent(
+      'You are muted in this guild until',
+    )
+    expect(getByTestId('mute-status-banner')).toHaveTextContent(
+      'Reason: cooldown',
+    )
+    expect(getByTestId('message-composer-input')).toBeDisabled()
+    expect(getByTestId('message-attachment-button')).toBeDisabled()
+    expect(getByTestId('message-composer-submit')).toBeDisabled()
+    expect(messageState.sendMessage).not.toHaveBeenCalled()
   })
 
   it('requires confirmation before delete operation is sent', async () => {

@@ -14,7 +14,7 @@ use crate::{
     config::AttachmentConfig,
     db::DbPool,
     models::{channel, guild, guild_member},
-    services::{dm_service, message_service, presence_service},
+    services::{dm_service, message_service, moderation_service, presence_service},
     webrtc::{
         signaling::{
             VoiceParticipantPayload, VoiceStateUpdatePayload as ServerVoiceStateUpdatePayload,
@@ -606,7 +606,13 @@ async fn handle_message_reaction_toggle(
     Ok(())
 }
 
-fn handle_typing_start(connection_id: &str, user_id: &str, payload: TypingStartPayload) {
+async fn handle_typing_start(
+    pool: &DbPool,
+    connection_id: &str,
+    user_id: &str,
+    payload: TypingStartPayload,
+) -> Result<(), AppError> {
+    moderation_service::assert_member_can_start_typing(pool, &payload.guild_slug, user_id).await?;
     let event_payload = json!({
         "guild_slug": payload.guild_slug,
         "channel_slug": payload.channel_slug,
@@ -619,6 +625,7 @@ fn handle_typing_start(connection_id: &str, user_id: &str, payload: TypingStartP
         ServerOp::TypingStart,
         &event_payload,
     );
+    Ok(())
 }
 
 fn handle_resume(connection_id: &str, envelope: &ClientEnvelope) {
@@ -1016,7 +1023,13 @@ async fn process_client_message(
         }
         ClientOp::TypingStart => {
             match parse_payload::<TypingStartPayload>(envelope.d, &envelope.op) {
-                Ok(payload) => handle_typing_start(connection_id, user_id, payload),
+                Ok(payload) => {
+                    if let Err(error) =
+                        handle_typing_start(pool, connection_id, user_id, payload).await
+                    {
+                        send_app_error(connection_id, error);
+                    }
+                }
                 Err(error) => send_protocol_error(connection_id, error),
             }
         }

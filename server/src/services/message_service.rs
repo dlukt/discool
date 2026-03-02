@@ -19,6 +19,7 @@ use crate::{
     services::{
         embed_service,
         file_storage_service::{self, FileStorageProvider},
+        moderation_service,
     },
 };
 
@@ -184,6 +185,7 @@ pub async fn create_message(
     let access =
         load_channel_with_send_access(pool, user_id, &input.guild_slug, &input.channel_slug)
             .await?;
+    moderation_service::assert_member_can_send_messages(pool, &access.guild.slug, user_id).await?;
 
     let now = Utc::now().to_rfc3339();
     let message_id = Uuid::new_v4().to_string();
@@ -262,6 +264,7 @@ pub async fn create_attachment_message(
     let access =
         load_channel_with_send_access(pool, user_id, &input.guild_slug, &input.channel_slug)
             .await?;
+    moderation_service::assert_member_can_send_messages(pool, &access.guild.slug, user_id).await?;
     if !permissions::has_permission(access.effective_permissions, permissions::ATTACH_FILES) {
         return Err(AppError::Forbidden(
             "Missing ATTACH_FILES permission in this channel".to_string(),
@@ -1324,6 +1327,7 @@ mod tests {
     use crate::{
         config::DatabaseConfig,
         db::{init_pool, run_migrations},
+        models::moderation,
     };
 
     async fn setup_service_pool() -> DbPool {
@@ -1513,6 +1517,25 @@ mod tests {
         .unwrap();
     }
 
+    async fn insert_active_mute_for_target(pool: &DbPool, target_user_id: &str) {
+        moderation::insert_moderation_action(
+            pool,
+            "mute-message-service-test",
+            moderation::MODERATION_ACTION_TYPE_MUTE,
+            "guild-id",
+            "owner-user-id",
+            target_user_id,
+            "cooldown",
+            Some(3600),
+            Some("2099-01-01T00:00:00Z"),
+            true,
+            "2026-02-28T00:00:00Z",
+            "2026-02-28T00:00:00Z",
+        )
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn normalize_message_content_rejects_empty_and_control_characters() {
         assert!(normalize_message_content("   ").is_err());
@@ -1664,6 +1687,60 @@ mod tests {
         assert_eq!(updated.content, "edited &lt;b&gt;content&lt;/b&gt;");
         assert_eq!(updated.created_at, "2026-02-28T00:00:01Z");
         assert_ne!(updated.updated_at, updated.created_at);
+    }
+
+    #[tokio::test]
+    async fn create_message_rejects_muted_member() {
+        let pool = setup_service_pool().await;
+        insert_active_mute_for_target(&pool, "member-user-id").await;
+
+        let err = create_message(
+            &pool,
+            "member-user-id",
+            CreateMessageInput {
+                guild_slug: "test-guild".to_string(),
+                channel_slug: "general".to_string(),
+                content: "hello".to_string(),
+                client_nonce: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        match err {
+            AppError::Forbidden(message) => {
+                assert!(message.starts_with("You are muted in this guild until "));
+            }
+            _ => panic!("expected forbidden muted error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_attachment_message_rejects_muted_member() {
+        let pool = setup_service_pool().await;
+        insert_active_mute_for_target(&pool, "member-user-id").await;
+
+        let err = create_attachment_message(
+            &pool,
+            &AttachmentConfig::default(),
+            "member-user-id",
+            CreateAttachmentMessageInput {
+                guild_slug: "test-guild".to_string(),
+                channel_slug: "general".to_string(),
+                content: Some("with file".to_string()),
+                client_nonce: None,
+                filename: "report.pdf".to_string(),
+                declared_content_type: Some("application/pdf".to_string()),
+                file_bytes: b"%PDF-1.7\n".to_vec(),
+            },
+        )
+        .await
+        .unwrap_err();
+        match err {
+            AppError::Forbidden(message) => {
+                assert!(message.starts_with("You are muted in this guild until "));
+            }
+            _ => panic!("expected forbidden muted error"),
+        }
     }
 
     #[tokio::test]

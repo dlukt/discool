@@ -11,6 +11,8 @@ import {
 import { blockState } from '$lib/features/identity/blockStore.svelte'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
 import ProfileSettingsView from '$lib/features/identity/ProfileSettingsView.svelte'
+import type { MuteStatus } from '$lib/features/moderation/moderationApi'
+import { muteStatusState } from '$lib/features/moderation/muteStatusStore.svelte'
 import VoiceBar from '$lib/features/voice/VoiceBar.svelte'
 import VoicePanel from '$lib/features/voice/VoicePanel.svelte'
 import {
@@ -69,6 +71,7 @@ const JUMP_TO_PRESENT_THRESHOLD_PX = 320
 const HISTORY_SKELETON_COUNT = 4
 const TYPING_START_THROTTLE_MS = 1_500
 const OPERATION_STATUS_AUTO_CLEAR_MS = 1_500
+const MAX_TIMEOUT_MS = 2_147_483_647
 
 let {
   mode,
@@ -149,6 +152,7 @@ let restoringTimelineKey = $state<string | null>(null)
 let operationStatusText = $state<string | null>(null)
 let operationStatusTone = $state<'default' | 'error'>('default')
 let operationStatusResetTimer: ReturnType<typeof setTimeout> | null = null
+let muteStatusRefreshTimer: ReturnType<typeof setTimeout> | null = null
 
 let channelKey = $derived(
   mode === 'channel'
@@ -340,8 +344,16 @@ let currentMemberPermissionsBitflag = $derived(
     defaultRolePermissionsBitflag,
   ),
 )
+let activeMuteStatus = $derived(
+  isChannelMode ? muteStatusState.statusForGuild(activeGuild) : null,
+)
+let isMuted = $derived(Boolean(activeMuteStatus?.active))
+let muteStatusMessage = $derived(
+  isChannelMode ? buildMuteStatusMessage(activeMuteStatus) : null,
+)
 let canAttachFiles = $derived(
   isChannelMode &&
+    !isMuted &&
     (Boolean(activeGuildRecord?.isOwner) ||
       (attachFilesPermission !== undefined &&
         hasGuildPermission(
@@ -368,6 +380,7 @@ let currentRoleColor = $derived(
 let canSubmitComposer = $derived(
   Boolean(currentSessionUser) &&
     !attachmentUploadInFlight &&
+    !isMuted &&
     (composerEdit
       ? composerValue.trim().length > 0
       : composerValue.trim().length > 0 || selectedAttachment !== null),
@@ -446,6 +459,12 @@ function clearOperationStatusTimer(): void {
   operationStatusResetTimer = null
 }
 
+function clearMuteStatusRefreshTimer(): void {
+  if (muteStatusRefreshTimer === null) return
+  clearTimeout(muteStatusRefreshTimer)
+  muteStatusRefreshTimer = null
+}
+
 function setOperationStatus(
   text: string,
   tone: 'default' | 'error' = 'default',
@@ -465,6 +484,27 @@ function setOperationStatus(
 
 function messageFromError(error: unknown, fallback: string): string {
   return toUserFacingError(error, fallback).message
+}
+
+function formatMuteExpiry(value: string | null): string {
+  if (!value) return 'an unknown time'
+  const parsed = Date.parse(value)
+  if (!Number.isFinite(parsed)) return value
+  return new Date(parsed).toLocaleString()
+}
+
+function buildMuteStatusMessage(status: MuteStatus | null): string | null {
+  if (!status?.active) return null
+  const reason = status.reason?.trim()
+  if (status.isPermanent) {
+    return reason
+      ? `You are muted in this guild permanently. Reason: ${reason}`
+      : 'You are muted in this guild permanently.'
+  }
+  const expiry = formatMuteExpiry(status.expiresAt)
+  return reason
+    ? `You are muted in this guild until ${expiry}. Reason: ${reason}`
+    : `You are muted in this guild until ${expiry}.`
 }
 
 function formatFileSize(sizeBytes: number): string {
@@ -506,6 +546,7 @@ function resetTypingStartThrottle(): void {
 
 function maybeEmitTypingStart(rawValue: string): void {
   if (mode !== 'channel' || composerEdit) return
+  if (isMuted) return
   if (!rawValue.trim()) return
   const nextChannelKey = `${activeGuild}:${activeChannel}`
   if (typingStartChannelKey !== nextChannelKey) {
@@ -560,11 +601,12 @@ function formatSelectionCode(): void {
 }
 
 function openAttachmentPicker(): void {
-  if (!canAttachFiles || attachmentUploadInFlight) return
+  if (!canAttachFiles || attachmentUploadInFlight || isMuted) return
   attachmentInput?.click()
 }
 
 function handleAttachmentInputChange(event: Event): void {
+  if (isMuted) return
   const target = event.currentTarget as HTMLInputElement | null
   const nextFile = target?.files?.[0] ?? null
   if (!nextFile) return
@@ -578,14 +620,16 @@ function eventHasFiles(event: DragEvent): boolean {
 }
 
 function handleTimelineDragEnter(event: DragEvent): void {
-  if (mode !== 'channel' || !canAttachFiles || !eventHasFiles(event)) return
+  if (mode !== 'channel' || !canAttachFiles || isMuted || !eventHasFiles(event))
+    return
   event.preventDefault()
   dragDepth += 1
   dragActive = true
 }
 
 function handleTimelineDragOver(event: DragEvent): void {
-  if (mode !== 'channel' || !canAttachFiles || !eventHasFiles(event)) return
+  if (mode !== 'channel' || !canAttachFiles || isMuted || !eventHasFiles(event))
+    return
   event.preventDefault()
   if (event.dataTransfer) {
     event.dataTransfer.dropEffect = 'copy'
@@ -594,7 +638,8 @@ function handleTimelineDragOver(event: DragEvent): void {
 }
 
 function handleTimelineDragLeave(event: DragEvent): void {
-  if (mode !== 'channel' || !canAttachFiles || !eventHasFiles(event)) return
+  if (mode !== 'channel' || !canAttachFiles || isMuted || !eventHasFiles(event))
+    return
   event.preventDefault()
   dragDepth = Math.max(0, dragDepth - 1)
   if (dragDepth === 0) {
@@ -603,7 +648,7 @@ function handleTimelineDragLeave(event: DragEvent): void {
 }
 
 function handleTimelineDrop(event: DragEvent): void {
-  if (mode !== 'channel' || !canAttachFiles) return
+  if (mode !== 'channel' || !canAttachFiles || isMuted) return
   event.preventDefault()
   dragDepth = 0
   dragActive = false
@@ -616,6 +661,10 @@ async function sendComposerMessage() {
   const author = buildCurrentAuthor()
   if (!author || !isConversationMode) return
   attachmentError = null
+  if (isChannelMode && isMuted && muteStatusMessage) {
+    setOperationStatus(muteStatusMessage, 'error')
+    return
+  }
 
   if (composerEdit && isChannelMode) {
     setOperationStatus('Saving...')
@@ -1025,6 +1074,32 @@ $effect(() => {
 })
 
 $effect(() => {
+  if (!isChannelMode || !activeGuild) return
+  void muteStatusState.refresh(activeGuild).catch(() => {})
+})
+
+$effect(() => {
+  clearMuteStatusRefreshTimer()
+  if (!isChannelMode || !activeGuild) return
+  if (
+    !activeMuteStatus?.active ||
+    activeMuteStatus.isPermanent ||
+    !activeMuteStatus.expiresAt
+  ) {
+    return
+  }
+  const expiresAtMs = Date.parse(activeMuteStatus.expiresAt)
+  if (!Number.isFinite(expiresAtMs)) return
+  const delayMs = Math.max(
+    250,
+    Math.min(MAX_TIMEOUT_MS, Math.round(expiresAtMs - Date.now() + 250)),
+  )
+  muteStatusRefreshTimer = setTimeout(() => {
+    void muteStatusState.refresh(activeGuild).catch(() => {})
+  }, delayMs)
+})
+
+$effect(() => {
   if (!isConversationMode) {
     composerEdit = null
     composerSelection = { start: 0, end: 0 }
@@ -1059,6 +1134,11 @@ $effect(() => {
   if (!exists) {
     composerEdit = null
   }
+})
+
+$effect(() => {
+  if (!isChannelMode || !isMuted) return
+  clearSelectedAttachment()
 })
 
 $effect(() => {
@@ -1228,6 +1308,7 @@ onMount(() => {
   })
   return () => {
     clearOperationStatusTimer()
+    clearMuteStatusRefreshTimer()
     unsubscribeLifecycle()
     unsubscribeEnvelopes()
   }
@@ -1428,6 +1509,14 @@ onMount(() => {
         >
           Message
         </label>
+        {#if isChannelMode && muteStatusMessage}
+          <p
+            class="mb-2 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive"
+            data-testid="mute-status-banner"
+          >
+            {muteStatusMessage}
+          </p>
+        {/if}
         {#if isChannelMode}
           <input
             type="file"
@@ -1519,9 +1608,11 @@ onMount(() => {
               class="inline-flex h-[44px] shrink-0 items-center justify-center rounded-md border border-border bg-background px-3 text-lg text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
               onclick={openAttachmentPicker}
               disabled={!canAttachFiles || attachmentUploadInFlight}
-              title={canAttachFiles
-                ? 'Attach file'
-                : PERMISSION_DENIED_MESSAGE}
+              title={isMuted && muteStatusMessage
+                ? muteStatusMessage
+                : canAttachFiles
+                  ? 'Attach file'
+                  : PERMISSION_DENIED_MESSAGE}
               aria-label="Attach file"
               data-testid="message-attachment-button"
             >
@@ -1532,7 +1623,11 @@ onMount(() => {
             id="message-composer"
             data-testid="message-composer-input"
             class="min-h-[44px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-            placeholder={isChannelMode ? `Message #${activeChannel}` : 'Message'}
+            placeholder={isChannelMode && isMuted
+              ? 'You are muted in this channel'
+              : isChannelMode
+                ? `Message #${activeChannel}`
+                : 'Message'}
             bind:this={composerInput}
             bind:value={composerValue}
             onkeydown={handleComposerKeydown}
@@ -1541,7 +1636,7 @@ onMount(() => {
             onclick={handleComposerSelectionEvent}
             onkeyup={handleComposerSelectionEvent}
             onselect={handleComposerSelectionEvent}
-            disabled={isChannelMode && attachmentUploadInFlight}
+            disabled={isChannelMode && (attachmentUploadInFlight || isMuted)}
           ></textarea>
           <button
             type="button"

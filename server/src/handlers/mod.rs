@@ -23,6 +23,7 @@ mod health;
 mod instance;
 mod invites;
 mod messages;
+mod moderation;
 mod roles;
 mod users;
 mod ws;
@@ -114,6 +115,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/guilds/{guild_slug}/channels/{channel_slug}/messages/attachments/{attachment_id}",
             get(messages::get_message_attachment),
+        )
+        .route(
+            "/guilds/{guild_slug}/moderation/mutes",
+            post(moderation::create_mute),
+        )
+        .route(
+            "/guilds/{guild_slug}/moderation/me/mute-status",
+            get(moderation::get_my_mute_status),
         )
         .route(
             "/guilds/{guild_slug}/channels/{channel_slug}/permission-overrides",

@@ -123,8 +123,8 @@ development_status:
   epic-7-retrospective: optional
 
   # Epic 8: Moderation, Reporting & Data Privacy
-  epic-8: backlog
-  8-1-mute-user-timed-and-permanent: backlog
+  epic-8: in-progress
+  8-1-mute-user-timed-and-permanent: done
   8-2-kick-user-from-guild: backlog
   8-3-ban-user-from-guild: backlog
   8-4-kick-user-from-voice-channel: backlog

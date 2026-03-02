@@ -14,6 +14,8 @@ import type {
 } from '$lib/features/guild/types'
 import { blockState } from '$lib/features/identity/blockStore.svelte'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
+import { createMute } from '$lib/features/moderation/moderationApi'
+import { toastState } from '$lib/feedback/toastStore.svelte'
 import { presenceState } from './presenceStore.svelte'
 
 type Props = {
@@ -25,6 +27,8 @@ type ModerationPermission =
   | 'KICK_MEMBERS'
   | 'BAN_MEMBERS'
   | 'MANAGE_MESSAGES'
+
+type MuteDurationPreset = '1h' | '24h' | '7d' | 'custom' | 'permanent'
 
 type MemberWithPresence = GuildMember & {
   presenceStatus: PresenceStatus
@@ -54,6 +58,7 @@ const GROUP_ROW_HEIGHT = 30
 const MEMBER_ROW_HEIGHT = 56
 const VIRTUAL_OVERSCAN_PX = 240
 const OWNER_ROLE_COLOR = '#f59e0b'
+const MAX_MUTE_REASON_CHARS = 500
 
 const MODERATION_ACTIONS: Array<{
   permission: ModerationPermission
@@ -65,6 +70,17 @@ const MODERATION_ACTIONS: Array<{
   { permission: 'MANAGE_MESSAGES', label: 'Moderate messages' },
 ]
 
+const MUTE_DURATION_PRESET_OPTIONS: Array<{
+  value: MuteDurationPreset
+  label: string
+}> = [
+  { value: '1h', label: '1 hour' },
+  { value: '24h', label: '24 hours' },
+  { value: '7d', label: '7 days' },
+  { value: 'custom', label: 'Custom (minutes)' },
+  { value: 'permanent', label: 'Permanent' },
+]
+
 let { activeGuild }: Props = $props()
 
 let loading = $state(false)
@@ -74,6 +90,11 @@ let selectedMemberId = $state<string | null>(null)
 let assignPanelMemberId = $state<string | null>(null)
 let pendingMemberId = $state<string | null>(null)
 let pendingBlockUserId = $state<string | null>(null)
+let muteDialogMemberId = $state<string | null>(null)
+let muteDurationPreset = $state<MuteDurationPreset>('24h')
+let muteCustomMinutes = $state('60')
+let muteReason = $state('')
+let muteSubmitting = $state(false)
 let roleOverridesByMember = $state<Record<string, string[]>>({})
 let scrollTop = $state(0)
 let viewportHeight = $state(240)
@@ -202,6 +223,13 @@ let selectedMember = $derived(
 )
 let selectedMemberBlocked = $derived(
   selectedMember ? blockState.isBlocked(selectedMember.userId) : false,
+)
+let muteDialogMember = $derived(
+  muteDialogMemberId
+    ? (membersWithPresence.find(
+        (member) => member.userId === muteDialogMemberId,
+      ) ?? null)
+    : null,
 )
 
 function messageFromError(err: unknown, fallback: string): string {
@@ -496,6 +524,104 @@ function triggerModerationAction(label: string, member: GuildMember): void {
   statusMessage = `${label} for ${member.displayName} will be available in Epic 8.`
 }
 
+function resetMuteDialogState(): void {
+  muteDurationPreset = '24h'
+  muteCustomMinutes = '60'
+  muteReason = ''
+  muteSubmitting = false
+}
+
+function openMuteDialog(member: GuildMember): void {
+  if (member.userId === currentUserId) {
+    errorMessage = 'Cannot mute yourself.'
+    return
+  }
+  muteDialogMemberId = member.userId
+  resetMuteDialogState()
+  errorMessage = null
+  statusMessage = null
+}
+
+function closeMuteDialog(): void {
+  muteDialogMemberId = null
+  resetMuteDialogState()
+}
+
+function durationSecondsForPreset(preset: MuteDurationPreset): number | null {
+  if (preset === '1h') return 60 * 60
+  if (preset === '24h') return 24 * 60 * 60
+  if (preset === '7d') return 7 * 24 * 60 * 60
+  return null
+}
+
+function parseCustomDurationSeconds(minutesInput: string): number {
+  const parsed = Number.parseInt(minutesInput.trim(), 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new ApiError(
+      'VALIDATION_ERROR',
+      'Custom duration must be a positive number of minutes.',
+    )
+  }
+  return parsed * 60
+}
+
+function muteSuccessMessage(member: GuildMember, isPermanent: boolean): string {
+  if (isPermanent) {
+    return `${member.displayName} was muted permanently.`
+  }
+  return `${member.displayName} was muted.`
+}
+
+async function submitMute(): Promise<void> {
+  if (muteSubmitting || !muteDialogMember) return
+  const trimmedReason = muteReason.trim()
+  if (!trimmedReason) {
+    errorMessage = 'Reason is required.'
+    return
+  }
+  if (trimmedReason.length > MAX_MUTE_REASON_CHARS) {
+    errorMessage = `Reason must be ${MAX_MUTE_REASON_CHARS} characters or less.`
+    return
+  }
+
+  let isPermanent = muteDurationPreset === 'permanent'
+  let durationSeconds: number | null
+  try {
+    durationSeconds =
+      muteDurationPreset === 'custom'
+        ? parseCustomDurationSeconds(muteCustomMinutes)
+        : durationSecondsForPreset(muteDurationPreset)
+    if (!isPermanent && durationSeconds === null) {
+      durationSeconds = 24 * 60 * 60
+    }
+  } catch (err) {
+    errorMessage = messageFromError(err, 'Invalid mute duration.')
+    return
+  }
+
+  muteSubmitting = true
+  errorMessage = null
+  try {
+    const created = await createMute(activeGuild, {
+      targetUserId: muteDialogMember.userId,
+      reason: trimmedReason,
+      isPermanent,
+      durationSeconds,
+    })
+    const successMessage = muteSuccessMessage(
+      muteDialogMember,
+      created.isPermanent,
+    )
+    statusMessage = successMessage
+    toastState.show({ variant: 'success', message: successMessage })
+    closeMuteDialog()
+  } catch (err) {
+    errorMessage = messageFromError(err, 'Failed to mute member.')
+  } finally {
+    muteSubmitting = false
+  }
+}
+
 async function toggleBlockForMember(member: GuildMember): Promise<void> {
   if (pendingBlockUserId || !currentUserId || member.userId === currentUserId) {
     return
@@ -543,6 +669,8 @@ $effect(() => {
   statusMessage = null
   selectedMemberId = null
   assignPanelMemberId = null
+  muteDialogMemberId = null
+  resetMuteDialogState()
   roleOverridesByMember = {}
   scrollTop = 0
   const guildSlug = activeGuild
@@ -740,13 +868,24 @@ $effect(() => {
             </span>
           {:else}
             {#each moderationActions as action (action.permission)}
-              <button
-                type="button"
-                class="rounded-md border border-border px-2 py-1 text-xs hover:bg-muted"
-                onclick={() => triggerModerationAction(action.label, selectedMember)}
-              >
-                {action.label} (coming soon)
-              </button>
+              {#if action.permission === 'MUTE_MEMBERS'}
+                <button
+                  type="button"
+                  class="rounded-md border border-border px-2 py-1 text-xs hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+                  onclick={() => openMuteDialog(selectedMember)}
+                  disabled={selectedMember.userId === currentUserId}
+                >
+                  Mute member
+                </button>
+              {:else}
+                <button
+                  type="button"
+                  class="rounded-md border border-border px-2 py-1 text-xs hover:bg-muted"
+                  onclick={() => triggerModerationAction(action.label, selectedMember)}
+                >
+                  {action.label} (coming soon)
+                </button>
+              {/if}
             {/each}
           {/if}
         </div>
@@ -786,3 +925,90 @@ $effect(() => {
     {/if}
   {/if}
 </aside>
+
+{#if muteDialogMember}
+  <div
+    class="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4"
+    role="presentation"
+  >
+    <div
+      class="w-full max-w-md rounded-md border border-border bg-card p-4 shadow-xl"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Mute ${muteDialogMember.displayName}`}
+      data-testid="mute-dialog"
+    >
+      <header class="mb-3 flex items-center justify-between gap-2">
+        <h3 class="text-sm font-semibold text-foreground">
+          Mute {muteDialogMember.displayName}
+        </h3>
+        <button
+          type="button"
+          class="rounded-md bg-muted px-2 py-1 text-xs hover:opacity-90"
+          onclick={closeMuteDialog}
+        >
+          Close
+        </button>
+      </header>
+
+      <div class="space-y-3">
+        <label class="block space-y-1 text-xs text-muted-foreground">
+          <span class="font-medium text-foreground">Duration</span>
+          <select
+            class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            bind:value={muteDurationPreset}
+            data-testid="mute-duration-select"
+          >
+            {#each MUTE_DURATION_PRESET_OPTIONS as option (option.value)}
+              <option value={option.value}>{option.label}</option>
+            {/each}
+          </select>
+        </label>
+
+        {#if muteDurationPreset === 'custom'}
+          <label class="block space-y-1 text-xs text-muted-foreground">
+            <span class="font-medium text-foreground">Custom duration (minutes)</span>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              bind:value={muteCustomMinutes}
+              data-testid="mute-custom-minutes-input"
+            />
+          </label>
+        {/if}
+
+        <label class="block space-y-1 text-xs text-muted-foreground">
+          <span class="font-medium text-foreground">Reason</span>
+          <textarea
+            class="min-h-[84px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            maxlength={MAX_MUTE_REASON_CHARS}
+            bind:value={muteReason}
+            data-testid="mute-reason-input"
+          ></textarea>
+        </label>
+
+        <div class="flex justify-end gap-2">
+          <button
+            type="button"
+            class="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-muted"
+            onclick={closeMuteDialog}
+            disabled={muteSubmitting}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+            onclick={() => void submitMute()}
+            disabled={muteSubmitting}
+            data-testid="mute-submit-button"
+          >
+            {muteSubmitting ? 'Muting...' : 'Mute member'}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}

@@ -10,6 +10,7 @@ pub mod message;
 pub mod message_attachment;
 pub mod message_embed;
 pub mod message_reaction;
+pub mod moderation;
 pub mod recovery_email;
 pub mod role;
 pub mod session;
