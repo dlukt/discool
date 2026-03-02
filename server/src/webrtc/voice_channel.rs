@@ -275,6 +275,38 @@ impl VoiceRuntime {
             .collect()
     }
 
+    pub async fn disconnect_user_from_channel(
+        &self,
+        guild_slug: &str,
+        channel_slug: &str,
+        user_id: &str,
+    ) -> Vec<String> {
+        let keys_and_connections = self
+            .sessions
+            .iter()
+            .filter_map(|entry| {
+                let value = entry.value();
+                if value.guild_slug != guild_slug
+                    || value.channel_slug != channel_slug
+                    || value.user_id != user_id
+                {
+                    return None;
+                }
+                let key = entry.key().clone();
+                let connection_id = connection_id_from_session_key(&key)?.to_string();
+                Some((key, connection_id))
+            })
+            .collect::<Vec<_>>();
+
+        let mut disconnected_connections = BTreeSet::new();
+        for (key, connection_id) in keys_and_connections {
+            self.close_session_by_key(&key, &connection_id).await;
+            disconnected_connections.insert(connection_id);
+        }
+
+        disconnected_connections.into_iter().collect()
+    }
+
     pub async fn clear_connection(&self, connection_id: &str) {
         let prefix = format!("{connection_id}:");
         let keys = self
@@ -387,6 +419,13 @@ fn session_key(connection_id: &str, guild_slug: &str, channel_slug: &str) -> Str
     format!("{connection_id}:{guild_slug}:{channel_slug}")
 }
 
+fn connection_id_from_session_key(session_key: &str) -> Option<&str> {
+    session_key
+        .split(':')
+        .next()
+        .filter(|value| !value.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,5 +518,47 @@ mod tests {
         assert!(participants[0].is_muted);
         assert!(participants[0].is_deafened);
         assert!(!participants[0].is_speaking);
+    }
+
+    #[tokio::test]
+    async fn disconnect_user_from_channel_removes_only_target_sessions() {
+        let runtime = VoiceRuntime::new(VoiceConfig::default());
+        runtime
+            .start_signaling("conn-1", "user-1", "guild", "voice-a")
+            .await
+            .expect("first user session should start");
+        runtime
+            .start_signaling("conn-2", "user-1", "guild", "voice-a")
+            .await
+            .expect("second user session should start");
+        runtime
+            .start_signaling("conn-3", "user-2", "guild", "voice-a")
+            .await
+            .expect("other user session should start");
+        runtime
+            .start_signaling("conn-4", "user-1", "guild", "voice-b")
+            .await
+            .expect("other channel session should start");
+
+        let disconnected = runtime
+            .disconnect_user_from_channel("guild", "voice-a", "user-1")
+            .await;
+        assert_eq!(
+            disconnected,
+            vec!["conn-1".to_string(), "conn-2".to_string()]
+        );
+
+        let channel_a_participants = runtime.participants_for_channel("guild", "voice-a");
+        assert_eq!(channel_a_participants.len(), 1);
+        assert_eq!(channel_a_participants[0].user_id, "user-2");
+
+        let channel_b_participants = runtime.participants_for_channel("guild", "voice-b");
+        assert_eq!(channel_b_participants.len(), 1);
+        assert_eq!(channel_b_participants[0].user_id, "user-1");
+
+        let repeated_disconnect = runtime
+            .disconnect_user_from_channel("guild", "voice-a", "user-1")
+            .await;
+        assert!(repeated_disconnect.is_empty());
     }
 }

@@ -125,6 +125,10 @@ pub fn router(state: AppState) -> Router {
             post(moderation::create_kick),
         )
         .route(
+            "/guilds/{guild_slug}/moderation/voice-kicks",
+            post(moderation::create_voice_kick),
+        )
+        .route(
             "/guilds/{guild_slug}/moderation/bans",
             get(moderation::list_bans).post(moderation::create_ban),
         )

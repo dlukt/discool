@@ -13,6 +13,7 @@ type Props = {
     participantUserId: string,
     volumePercent: number,
   ) => void
+  onKickFromVoice?: (participantUserId: string) => void
 }
 
 let {
@@ -21,6 +22,7 @@ let {
   variant = 'default',
   canModerateVoiceParticipants = false,
   onParticipantVolumeChange,
+  onKickFromVoice,
 }: Props = $props()
 
 let occupancyAnnouncement = $derived(
@@ -61,6 +63,7 @@ let isMobileSheetVariant = $derived(variant === 'mobile-sheet')
             {participant}
             showKickPlaceholder={canModerateVoiceParticipants}
             onVolumeChange={onParticipantVolumeChange}
+            {onKickFromVoice}
           />
         {/each}
       </ul>

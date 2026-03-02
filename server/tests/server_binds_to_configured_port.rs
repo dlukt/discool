@@ -5205,6 +5205,238 @@ async fn websocket_voice_rejoin_rebroadcasts_leave_and_join_snapshots() {
 }
 
 #[tokio::test]
+async fn moderation_voice_kick_disconnects_target_and_allows_rejoin() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "voice-kick-owner", [205u8; 32]).await;
+    let target_token = register_and_authenticate(&addr, "voice-kick-target", [206u8; 32]).await;
+
+    let target_profile =
+        http_response_with_bearer(&addr, "/api/v1/users/me/profile", &target_token).await;
+    assert_eq!(response_status(&target_profile), 200);
+    let target_profile_json: serde_json::Value =
+        serde_json::from_str(response_body(&target_profile)).unwrap();
+    let target_user_id = target_profile_json["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let guild_body = json!({ "name": "Voice Kick Guild" }).to_string();
+    let guild_res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_slug = guild_json["data"]["slug"].as_str().unwrap().to_string();
+
+    let invite_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/invites"),
+        &json!({ "type": "reusable" }).to_string(),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&invite_res), 201);
+    let invite_json: serde_json::Value = serde_json::from_str(response_body(&invite_res)).unwrap();
+    let invite_code = invite_json["data"]["code"].as_str().unwrap().to_string();
+
+    let join_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/invites/{invite_code}/join"),
+        "{}",
+        &target_token,
+    )
+    .await;
+    assert_eq!(response_status(&join_res), 200);
+
+    let create_voice_channel = json!({
+        "name": "Kick Room",
+        "channel_type": "voice",
+    })
+    .to_string();
+    let create_voice_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/channels"),
+        &create_voice_channel,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&create_voice_res), 201);
+    let voice_json: serde_json::Value =
+        serde_json::from_str(response_body(&create_voice_res)).unwrap();
+    let voice_slug = voice_json["data"]["slug"].as_str().unwrap().to_string();
+
+    let (mut owner_stream, owner_response) =
+        websocket_connect(&addr, "/ws", Some(&owner_token)).await;
+    assert_eq!(response_status(&owner_response), 101);
+    let _ = websocket_read_json_with_op(&mut owner_stream, "hello", 1_500).await;
+
+    let (mut target_stream, target_response) =
+        websocket_connect(&addr, "/ws", Some(&target_token)).await;
+    assert_eq!(response_status(&target_response), 101);
+    let _ = websocket_read_json_with_op(&mut target_stream, "hello", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_subscribe",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_slug.as_str(),
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let _ = websocket_read_json_with_op(&mut owner_stream, "channel_update", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut target_stream,
+        &json!({
+            "op": "c_subscribe",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_slug.as_str(),
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let _ = websocket_read_json_with_op(&mut target_stream, "channel_update", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_voice_join",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_slug.as_str(),
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let _ = websocket_read_json_with_op(&mut owner_stream, "voice_connection_state", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut owner_stream, "voice_offer", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut owner_stream, "voice_ice_candidate", 1_500).await;
+    let owner_join_snapshot =
+        websocket_read_json_with_op(&mut owner_stream, "voice_state_update", 1_500)
+            .await
+            .expect("owner voice join should emit participant snapshot");
+    assert_eq!(owner_join_snapshot["d"]["participant_count"], json!(1));
+
+    websocket_send_text_frame(
+        &mut target_stream,
+        &json!({
+            "op": "c_voice_join",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_slug.as_str(),
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let _ = websocket_read_json_with_op(&mut target_stream, "voice_connection_state", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut target_stream, "voice_offer", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut target_stream, "voice_ice_candidate", 1_500).await;
+    let target_join_snapshot =
+        websocket_read_json_with_op(&mut target_stream, "voice_state_update", 1_500)
+            .await
+            .expect("target voice join should emit participant snapshot");
+    assert_eq!(target_join_snapshot["d"]["participant_count"], json!(2));
+    let _ = websocket_read_json_with_op(&mut owner_stream, "voice_state_update", 1_500).await;
+
+    let voice_kick_body = json!({
+        "target_user_id": target_user_id.as_str(),
+        "channel_slug": voice_slug.as_str(),
+        "reason": "disruptive behavior",
+    })
+    .to_string();
+    let voice_kick_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/moderation/voice-kicks"),
+        &voice_kick_body,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&voice_kick_res), 201);
+    let voice_kick_json: serde_json::Value =
+        serde_json::from_str(response_body(&voice_kick_res)).unwrap();
+    assert_eq!(
+        voice_kick_json["data"]["target_user_id"],
+        json!(target_user_id)
+    );
+    assert_eq!(
+        voice_kick_json["data"]["channel_slug"],
+        json!(voice_slug.as_str())
+    );
+    assert_eq!(
+        voice_kick_json["data"]["reason"],
+        json!("disruptive behavior")
+    );
+
+    let disconnected =
+        websocket_read_json_with_op(&mut target_stream, "voice_connection_state", 1_500)
+            .await
+            .expect("target should receive disconnected state after voice kick");
+    assert_eq!(disconnected["d"]["state"], json!("disconnected"));
+    assert_eq!(
+        disconnected["d"]["channel_slug"],
+        json!(voice_slug.as_str())
+    );
+
+    let post_kick_snapshot =
+        websocket_read_json_with_op(&mut target_stream, "voice_state_update", 1_500)
+            .await
+            .expect("voice kick should rebroadcast participant snapshot");
+    assert_eq!(post_kick_snapshot["d"]["participant_count"], json!(1));
+
+    let target_guilds = http_response_with_bearer(&addr, "/api/v1/guilds", &target_token).await;
+    assert_eq!(response_status(&target_guilds), 200);
+    let target_guilds_json: serde_json::Value =
+        serde_json::from_str(response_body(&target_guilds)).unwrap();
+    assert!(
+        target_guilds_json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["slug"] == json!(guild_slug.as_str()))
+    );
+
+    websocket_send_text_frame(
+        &mut target_stream,
+        &json!({
+            "op": "c_voice_join",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_slug.as_str(),
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let reconnecting =
+        websocket_read_json_with_op(&mut target_stream, "voice_connection_state", 1_500)
+            .await
+            .expect("kicked user should be able to rejoin voice");
+    assert_eq!(reconnecting["d"]["state"], json!("connecting"));
+    let _ = websocket_read_json_with_op(&mut target_stream, "voice_offer", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut target_stream, "voice_ice_candidate", 1_500).await;
+    let rejoin_snapshot =
+        websocket_read_json_with_op(&mut target_stream, "voice_state_update", 1_500)
+            .await
+            .expect("rejoin should publish updated participant snapshot");
+    assert_eq!(rejoin_snapshot["d"]["participant_count"], json!(2));
+}
+
+#[tokio::test]
 async fn websocket_voice_join_rejects_text_channels_and_invalid_payloads() {
     use serde_json::json;
 

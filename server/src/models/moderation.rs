@@ -3,6 +3,7 @@ use crate::{AppError, db::DbPool};
 pub const MODERATION_ACTION_TYPE_MUTE: &str = "mute";
 pub const MODERATION_ACTION_TYPE_KICK: &str = "kick";
 pub const MODERATION_ACTION_TYPE_BAN: &str = "ban";
+pub const MODERATION_ACTION_TYPE_VOICE_KICK: &str = "voice_kick";
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ModerationActionRecord {

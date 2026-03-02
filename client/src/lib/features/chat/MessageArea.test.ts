@@ -295,6 +295,24 @@ const {
   }
 })
 
+const moderationApi = vi.hoisted(() => ({
+  createVoiceKick: vi.fn(
+    async (
+      _guildSlug: string,
+      _input: { targetUserId: string; channelSlug: string; reason: string },
+    ) => ({
+      id: 'voice-kick-1',
+      guildSlug: 'lobby',
+      channelSlug: 'general',
+      actorUserId: 'user-1',
+      targetUserId: 'user-2',
+      reason: 'disruptive behavior',
+      createdAt: '2026-03-02T00:00:00.000Z',
+      updatedAt: '2026-03-02T00:00:00.000Z',
+    }),
+  ),
+}))
+
 vi.mock('$lib/ws/client', () => ({
   wsClient: {
     getLifecycleState: vi.fn(() => wsLifecycle.value),
@@ -327,6 +345,8 @@ vi.mock('./messageStore.svelte', () => ({
 vi.mock('$lib/features/moderation/muteStatusStore.svelte', () => ({
   muteStatusState,
 }))
+
+vi.mock('$lib/features/moderation/moderationApi', () => moderationApi)
 
 vi.mock('$lib/feedback/toastStore.svelte', () => ({
   toastState,
@@ -472,6 +492,7 @@ describe('MessageArea', () => {
     guildState.bySlug.mockClear()
     muteStatusState.statusForGuild.mockClear()
     muteStatusState.refresh.mockClear()
+    moderationApi.createVoiceKick.mockClear()
   })
 
   it('sends on Enter and inserts newline on Shift+Enter', async () => {
@@ -1341,15 +1362,97 @@ describe('MessageArea', () => {
 
     await fireEvent.click(getByTestId('voice-bar-toggle-participants'))
     await fireEvent.click(getByTestId('voice-participant-toggle-user-2'))
-    expect(
-      getByTestId('voice-participant-kick-placeholder-user-2'),
-    ).toBeInTheDocument()
+    const kickButton = getByTestId('voice-participant-kick-user-2')
+    expect(kickButton).toBeInTheDocument()
+    await fireEvent.click(kickButton)
+    expect(getByTestId('voice-kick-dialog')).toBeInTheDocument()
 
     const slider = getByTestId(
       'voice-participant-volume-slider-user-2',
     ) as HTMLInputElement
     await fireEvent.input(slider, { target: { value: '145' } })
     expect(voiceState.setParticipantVolume).toHaveBeenCalledWith('user-2', 145)
+  })
+
+  it('requires voice-kick reason and shows exact success toast copy', async () => {
+    voiceState.statusForChannel.mockReturnValue('connected')
+    voiceState.activeChannelParticipants.mockReturnValue([
+      {
+        userId: 'user-2',
+        username: 'bob',
+        displayName: 'Bob',
+        avatarColor: '#3366ff',
+        audioStreamId: 'stream-2',
+        isMuted: false,
+        isDeafened: false,
+        isSpeaking: false,
+        volumePercent: 100,
+        volumeScalar: 1,
+      },
+    ])
+    guildState.memberRoleDataForGuild.mockReturnValue({
+      members: [
+        {
+          userId: 'user-1',
+          username: 'alice',
+          displayName: 'Alice',
+          avatarColor: '#3366ff',
+          presenceStatus: 'online',
+          highestRoleColor: '#3366ff',
+          roleIds: ['role-mod'],
+          isOwner: false,
+          canAssignRoles: false,
+        },
+      ],
+      roles: [
+        {
+          id: 'role-mod',
+          permissionsBitflag: 1 << 7,
+          isDefault: false,
+        },
+      ],
+      assignableRoleIds: [],
+      canManageRoles: false,
+    })
+
+    const { getByTestId, getByText, queryByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    await fireEvent.click(getByTestId('voice-bar-toggle-participants'))
+    await fireEvent.click(getByTestId('voice-participant-toggle-user-2'))
+    await fireEvent.click(getByTestId('voice-participant-kick-user-2'))
+
+    expect(getByTestId('voice-kick-dialog')).toBeInTheDocument()
+    await fireEvent.click(getByTestId('voice-kick-submit-button'))
+    expect(getByText('Reason is required.')).toBeInTheDocument()
+
+    await fireEvent.input(getByTestId('voice-kick-reason-input'), {
+      target: { value: 'disruptive behavior' },
+    })
+    await fireEvent.click(getByTestId('voice-kick-submit-button'))
+
+    await waitFor(() => {
+      expect(moderationApi.createVoiceKick).toHaveBeenCalledWith('lobby', {
+        targetUserId: 'user-2',
+        channelSlug: 'general',
+        reason: 'disruptive behavior',
+      })
+    })
+    expect(toastState.show).toHaveBeenCalledWith(
+      expect.objectContaining({
+        variant: 'success',
+        message: 'User kicked from voice',
+      }),
+    )
+    await waitFor(() => {
+      expect(queryByTestId('voice-kick-dialog')).not.toBeInTheDocument()
+    })
   })
 
   it('shows retry toast when send fails and retries via toast action', async () => {

@@ -11,7 +11,9 @@ use serde_json::json;
 use crate::{
     AppError, AppState,
     middleware::auth::AuthenticatedUser,
-    services::moderation_service::{self, CreateBanInput, CreateKickInput, CreateMuteInput},
+    services::moderation_service::{
+        self, CreateBanInput, CreateKickInput, CreateMuteInput, CreateVoiceKickInput,
+    },
     ws::{protocol::ServerOp, registry},
 };
 
@@ -29,6 +31,13 @@ pub struct CreateMuteRequest {
 pub struct CreateKickRequest {
     pub target_user_id: Option<String>,
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateVoiceKickRequest {
+    pub target_user_id: Option<String>,
+    pub reason: Option<String>,
+    pub channel_slug: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +79,29 @@ pub async fn create_kick(
         "kick",
         true,
     );
+    Ok((StatusCode::CREATED, Json(json!({ "data": created }))).into_response())
+}
+
+pub async fn create_voice_kick(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(guild_slug): Path<String>,
+    payload: Result<Json<CreateVoiceKickRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+    let input = to_create_voice_kick_input(req)?;
+    let created =
+        moderation_service::create_voice_kick(&state.pool, &user.user_id, &guild_slug, input)
+            .await?;
+    crate::ws::gateway::disconnect_user_from_voice_channel(
+        &state.pool,
+        state.voice_runtime.as_ref(),
+        &guild_slug,
+        &created.channel_slug,
+        &created.target_user_id,
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(json!({ "data": created }))).into_response())
 }
 
@@ -181,6 +213,33 @@ fn to_create_kick_input(req: CreateKickRequest) -> Result<CreateKickInput, AppEr
     Ok(CreateKickInput {
         target_user_id: target_user_id.to_string(),
         reason: reason.to_string(),
+    })
+}
+
+fn to_create_voice_kick_input(
+    req: CreateVoiceKickRequest,
+) -> Result<CreateVoiceKickInput, AppError> {
+    let target_user_id = req.target_user_id.as_deref().unwrap_or("").trim();
+    if target_user_id.is_empty() {
+        return Err(AppError::ValidationError(
+            "target_user_id is required".to_string(),
+        ));
+    }
+    let reason = req.reason.as_deref().unwrap_or("").trim();
+    if reason.is_empty() {
+        return Err(AppError::ValidationError("reason is required".to_string()));
+    }
+    let channel_slug = req.channel_slug.as_deref().unwrap_or("").trim();
+    if channel_slug.is_empty() {
+        return Err(AppError::ValidationError(
+            "channel_slug is required".to_string(),
+        ));
+    }
+
+    Ok(CreateVoiceKickInput {
+        target_user_id: target_user_id.to_string(),
+        reason: reason.to_string(),
+        channel_slug: channel_slug.to_string(),
     })
 }
 
@@ -478,6 +537,46 @@ mod tests {
         }
     }
 
+    async fn seed_voice_channel(state: &AppState) {
+        let created_at = "2026-03-01T00:00:00Z";
+        match &state.pool {
+            crate::db::DbPool::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO channels (id, guild_id, slug, name, channel_type, position, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                )
+                .bind("voice-channel-id")
+                .bind("guild-id")
+                .bind("voice-room")
+                .bind("Voice Room")
+                .bind("voice")
+                .bind(1_i64)
+                .bind(created_at)
+                .bind(created_at)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            crate::db::DbPool::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO channels (id, guild_id, slug, name, channel_type, position, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                )
+                .bind("voice-channel-id")
+                .bind("guild-id")
+                .bind("voice-room")
+                .bind("Voice Room")
+                .bind("voice")
+                .bind(1_i64)
+                .bind(created_at)
+                .bind(created_at)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+    }
+
     fn mod_user() -> AuthenticatedUser {
         AuthenticatedUser {
             user_id: "mod-user-id".to_string(),
@@ -530,6 +629,30 @@ mod tests {
             reason: Some("   ".to_string()),
         });
         assert!(matches!(missing_reason, Err(AppError::ValidationError(_))));
+    }
+
+    #[test]
+    fn to_create_voice_kick_input_validates_required_fields() {
+        let missing_target = to_create_voice_kick_input(CreateVoiceKickRequest {
+            target_user_id: None,
+            reason: Some("reason".to_string()),
+            channel_slug: Some("voice-room".to_string()),
+        });
+        assert!(matches!(missing_target, Err(AppError::ValidationError(_))));
+
+        let missing_reason = to_create_voice_kick_input(CreateVoiceKickRequest {
+            target_user_id: Some("target".to_string()),
+            reason: Some("   ".to_string()),
+            channel_slug: Some("voice-room".to_string()),
+        });
+        assert!(matches!(missing_reason, Err(AppError::ValidationError(_))));
+
+        let missing_channel = to_create_voice_kick_input(CreateVoiceKickRequest {
+            target_user_id: Some("target".to_string()),
+            reason: Some("reason".to_string()),
+            channel_slug: Some("   ".to_string()),
+        });
+        assert!(matches!(missing_channel, Err(AppError::ValidationError(_))));
     }
 
     #[test]
@@ -615,6 +738,38 @@ mod tests {
         assert_eq!(
             payload["data"]["reason"],
             Value::String("serious breach".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn create_voice_kick_returns_data_envelope() {
+        let state = test_state().await;
+        seed_guild_fixture(&state).await;
+        seed_voice_channel(&state).await;
+        let response = create_voice_kick(
+            State(state),
+            mod_user(),
+            Path("test-guild".to_string()),
+            Ok(Json(CreateVoiceKickRequest {
+                target_user_id: Some("target-user-id".to_string()),
+                reason: Some("voice disruption".to_string()),
+                channel_slug: Some("voice-room".to_string()),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert!(payload.get("data").is_some());
+        assert_eq!(
+            payload["data"]["target_user_id"],
+            Value::String("target-user-id".to_string())
+        );
+        assert_eq!(
+            payload["data"]["channel_slug"],
+            Value::String("voice-room".to_string())
         );
     }
 

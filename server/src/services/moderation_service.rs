@@ -3,14 +3,15 @@ use serde::Serialize;
 use uuid::Uuid;
 
 #[cfg(test)]
-use crate::models::{guild_member, role};
+use crate::models::role;
 use crate::{
     AppError,
     config::AttachmentConfig,
     db::DbPool,
     models::{
+        channel,
         guild::{self, Guild},
-        guild_ban, message, message_attachment, moderation,
+        guild_ban, guild_member, message, message_attachment, moderation,
     },
     permissions,
     services::file_storage_service::FileStorageProvider,
@@ -30,6 +31,13 @@ pub struct CreateMuteInput {
 pub struct CreateKickInput {
     pub target_user_id: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateVoiceKickInput {
+    pub target_user_id: String,
+    pub reason: String,
+    pub channel_slug: String,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +77,18 @@ pub struct MuteStatusResponse {
 pub struct KickActionResponse {
     pub id: String,
     pub guild_slug: String,
+    pub actor_user_id: String,
+    pub target_user_id: String,
+    pub reason: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VoiceKickActionResponse {
+    pub id: String,
+    pub guild_slug: String,
+    pub channel_slug: String,
     pub actor_user_id: String,
     pub target_user_id: String,
     pub reason: String,
@@ -246,6 +266,93 @@ pub async fn create_kick(
     Ok(KickActionResponse {
         id,
         guild_slug: guild.slug,
+        actor_user_id,
+        target_user_id,
+        reason,
+        created_at: now_str.clone(),
+        updated_at: now_str,
+    })
+}
+
+pub async fn create_voice_kick(
+    pool: &DbPool,
+    actor_user_id: &str,
+    guild_slug: &str,
+    input: CreateVoiceKickInput,
+) -> Result<VoiceKickActionResponse, AppError> {
+    let actor_user_id = normalize_id(actor_user_id, "actor_user_id")?;
+    let guild_slug = normalize_slug(guild_slug, "guild_slug")?;
+    let target_user_id = normalize_id(&input.target_user_id, "target_user_id")?;
+    if actor_user_id == target_user_id {
+        return Err(AppError::ValidationError(
+            "Cannot kick yourself from voice".to_string(),
+        ));
+    }
+    let reason = normalize_reason(&input.reason)?;
+    let channel_slug = normalize_slug(&input.channel_slug, "channel_slug")?;
+
+    let guild = guild::find_guild_by_slug(pool, &guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    permissions::require_guild_permission(
+        pool,
+        &guild,
+        &actor_user_id,
+        permissions::MUTE_MEMBERS,
+        "MUTE_MEMBERS",
+    )
+    .await?;
+
+    if target_user_id == guild.owner_id {
+        return Err(AppError::Forbidden(
+            "Cannot kick the guild owner from voice".to_string(),
+        ));
+    }
+    if !permissions::actor_outranks_target_member(pool, &guild, &actor_user_id, &target_user_id)
+        .await?
+    {
+        return Err(AppError::Forbidden(
+            "You can only kick members below your highest role".to_string(),
+        ));
+    }
+
+    let channel = channel::find_channel_by_slug(pool, &guild.id, &channel_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if channel.channel_type != "voice" {
+        return Err(AppError::ValidationError(
+            "channel_slug must reference a voice channel".to_string(),
+        ));
+    }
+    if !guild_member::is_guild_member(pool, &guild.id, &target_user_id).await? {
+        return Err(AppError::ValidationError(
+            "target_user_id must belong to a guild member".to_string(),
+        ));
+    }
+
+    let now = Utc::now();
+    let now_str = now.to_rfc3339();
+    let id = Uuid::new_v4().to_string();
+    moderation::insert_moderation_action(
+        pool,
+        &id,
+        moderation::MODERATION_ACTION_TYPE_VOICE_KICK,
+        &guild.id,
+        &actor_user_id,
+        &target_user_id,
+        &reason,
+        None,
+        None,
+        false,
+        &now_str,
+        &now_str,
+    )
+    .await?;
+
+    Ok(VoiceKickActionResponse {
+        id,
+        guild_slug: guild.slug,
+        channel_slug,
         actor_user_id,
         target_user_id,
         reason,
@@ -879,6 +986,45 @@ mod tests {
         .unwrap();
     }
 
+    async fn seed_voice_channels(pool: &DbPool) {
+        let DbPool::Sqlite(pool) = pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+        let now = "2026-03-01T00:00:00Z";
+
+        sqlx::query(
+            "INSERT INTO channels (id, guild_id, slug, name, channel_type, position, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind("channel-general")
+        .bind("guild-id")
+        .bind("general")
+        .bind("general")
+        .bind("text")
+        .bind(0_i64)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO channels (id, guild_id, slug, name, channel_type, position, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind("channel-voice-room")
+        .bind("guild-id")
+        .bind("voice-room")
+        .bind("Voice Room")
+        .bind("voice")
+        .bind(1_i64)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn normalize_reason_requires_non_empty_reason() {
         assert!(normalize_reason("   ").is_err());
@@ -1100,6 +1246,151 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn create_voice_kick_enforces_permission_hierarchy_target_guards_and_channel_type() {
+        let pool = setup_service_pool().await;
+        seed_voice_channels(&pool).await;
+
+        let missing_permission = create_voice_kick(
+            &pool,
+            "peer-user-id",
+            "test-guild",
+            CreateVoiceKickInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "reason".to_string(),
+                channel_slug: "voice-room".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(missing_permission, AppError::Forbidden(_)));
+
+        let hierarchy_error = create_voice_kick(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateVoiceKickInput {
+                target_user_id: "high-target-user-id".to_string(),
+                reason: "reason".to_string(),
+                channel_slug: "voice-room".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(hierarchy_error, AppError::Forbidden(_)));
+
+        let self_error = create_voice_kick(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateVoiceKickInput {
+                target_user_id: "mod-user-id".to_string(),
+                reason: "reason".to_string(),
+                channel_slug: "voice-room".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(self_error, AppError::ValidationError(_)));
+
+        let owner_error = create_voice_kick(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateVoiceKickInput {
+                target_user_id: "owner-user-id".to_string(),
+                reason: "reason".to_string(),
+                channel_slug: "voice-room".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(owner_error, AppError::Forbidden(_)));
+
+        let text_channel_error = create_voice_kick(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateVoiceKickInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "reason".to_string(),
+                channel_slug: "general".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(text_channel_error, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_voice_kick_records_audit_action_without_removing_membership() {
+        let pool = setup_service_pool().await;
+        seed_voice_channels(&pool).await;
+
+        let created = create_voice_kick(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateVoiceKickInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "voice disruption".to_string(),
+                channel_slug: "voice-room".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(created.target_user_id, "target-user-id");
+        assert_eq!(created.channel_slug, "voice-room");
+        assert!(
+            guild_member::is_guild_member(&pool, "guild-id", "target-user-id")
+                .await
+                .unwrap()
+        );
+        assert!(
+            role::list_assigned_role_ids(&pool, "guild-id", "target-user-id")
+                .await
+                .unwrap()
+                .iter()
+                .any(|role_id| role_id == "role-target-low")
+        );
+
+        let DbPool::Sqlite(sqlite_pool) = &pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+        let action_type = sqlx::query_scalar::<_, String>(
+            "SELECT action_type FROM moderation_actions WHERE id = ?1",
+        )
+        .bind(&created.id)
+        .fetch_one(sqlite_pool)
+        .await
+        .unwrap();
+        let duration_seconds = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT duration_seconds FROM moderation_actions WHERE id = ?1",
+        )
+        .bind(&created.id)
+        .fetch_one(sqlite_pool)
+        .await
+        .unwrap();
+        let expires_at = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT expires_at FROM moderation_actions WHERE id = ?1",
+        )
+        .bind(&created.id)
+        .fetch_one(sqlite_pool)
+        .await
+        .unwrap();
+        let is_active =
+            sqlx::query_scalar::<_, i64>("SELECT is_active FROM moderation_actions WHERE id = ?1")
+                .bind(&created.id)
+                .fetch_one(sqlite_pool)
+                .await
+                .unwrap();
+        assert_eq!(action_type, moderation::MODERATION_ACTION_TYPE_VOICE_KICK);
+        assert_eq!(duration_seconds, None);
+        assert_eq!(expires_at, None);
+        assert_eq!(is_active, 0);
     }
 
     #[tokio::test]

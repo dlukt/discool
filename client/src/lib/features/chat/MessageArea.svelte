@@ -11,8 +11,12 @@ import {
 import { blockState } from '$lib/features/identity/blockStore.svelte'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
 import ProfileSettingsView from '$lib/features/identity/ProfileSettingsView.svelte'
-import type { MuteStatus } from '$lib/features/moderation/moderationApi'
+import {
+  createVoiceKick,
+  type MuteStatus,
+} from '$lib/features/moderation/moderationApi'
 import { muteStatusState } from '$lib/features/moderation/muteStatusStore.svelte'
+import type { VoiceParticipant } from '$lib/features/voice/types'
 import VoiceBar from '$lib/features/voice/VoiceBar.svelte'
 import VoicePanel from '$lib/features/voice/VoicePanel.svelte'
 import {
@@ -72,6 +76,7 @@ const HISTORY_SKELETON_COUNT = 4
 const TYPING_START_THROTTLE_MS = 1_500
 const OPERATION_STATUS_AUTO_CLEAR_MS = 1_500
 const MAX_TIMEOUT_MS = 2_147_483_647
+const MAX_MODERATION_REASON_CHARS = 500
 
 let {
   mode,
@@ -153,6 +158,10 @@ let operationStatusText = $state<string | null>(null)
 let operationStatusTone = $state<'default' | 'error'>('default')
 let operationStatusResetTimer: ReturnType<typeof setTimeout> | null = null
 let muteStatusRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let voiceKickDialogParticipant = $state<VoiceParticipant | null>(null)
+let voiceKickReason = $state('')
+let voiceKickSubmitting = $state(false)
+let voiceKickError = $state<string | null>(null)
 
 let channelKey = $derived(
   mode === 'channel'
@@ -836,6 +845,59 @@ function closeDeleteDialog(): void {
   pendingDeleteMessage = null
 }
 
+function openVoiceKickDialog(participant: VoiceParticipant): void {
+  if (!isChannelMode || !canModerateVoiceParticipants || voiceKickSubmitting)
+    return
+  voiceKickDialogParticipant = participant
+  voiceKickReason = ''
+  voiceKickError = null
+}
+
+function closeVoiceKickDialog(): void {
+  if (voiceKickSubmitting) return
+  voiceKickDialogParticipant = null
+  voiceKickReason = ''
+  voiceKickError = null
+}
+
+async function submitVoiceKick(): Promise<void> {
+  if (!isChannelMode || !voiceKickDialogParticipant || voiceKickSubmitting)
+    return
+  const participant = voiceKickDialogParticipant
+  const trimmedReason = voiceKickReason.trim()
+  if (!trimmedReason) {
+    voiceKickError = 'Reason is required.'
+    return
+  }
+  if (trimmedReason.length > MAX_MODERATION_REASON_CHARS) {
+    voiceKickError = `Reason must be ${MAX_MODERATION_REASON_CHARS} characters or less.`
+    return
+  }
+
+  voiceKickSubmitting = true
+  voiceKickError = null
+  try {
+    await createVoiceKick(activeGuild, {
+      targetUserId: participant.userId,
+      channelSlug: activeChannel,
+      reason: trimmedReason,
+    })
+    const successMessage = 'User kicked from voice'
+    setOperationStatus(
+      successMessage,
+      'default',
+      OPERATION_STATUS_AUTO_CLEAR_MS,
+    )
+    toastState.show({ variant: 'success', message: successMessage })
+    voiceKickDialogParticipant = null
+    voiceKickReason = ''
+  } catch (error) {
+    voiceKickError = messageFromError(error, 'Failed to kick user from voice.')
+  } finally {
+    voiceKickSubmitting = false
+  }
+}
+
 function confirmDeleteMessage(): void {
   if (!pendingDeleteMessage || mode !== 'channel') return
   setOperationStatus('Deleting...')
@@ -1104,6 +1166,10 @@ $effect(() => {
     composerEdit = null
     composerSelection = { start: 0, end: 0 }
     pendingDeleteMessage = null
+    voiceKickDialogParticipant = null
+    voiceKickReason = ''
+    voiceKickError = null
+    voiceKickSubmitting = false
     attachmentContextKey = null
     resetTypingStartThrottle()
     clearSelectedAttachment()
@@ -1114,6 +1180,10 @@ $effect(() => {
   if (!isChannelMode) {
     composerEdit = null
     pendingDeleteMessage = null
+    voiceKickDialogParticipant = null
+    voiceKickReason = ''
+    voiceKickError = null
+    voiceKickSubmitting = false
     resetTypingStartThrottle()
     clearSelectedAttachment()
     attachmentError = null
@@ -1126,6 +1196,17 @@ $effect(() => {
       pendingDeleteMessage.channelSlug !== activeChannel)
   ) {
     pendingDeleteMessage = null
+  }
+  if (
+    voiceKickDialogParticipant &&
+    !activeVoiceParticipants.some(
+      (participant) =>
+        participant.userId === voiceKickDialogParticipant?.userId,
+    )
+  ) {
+    voiceKickDialogParticipant = null
+    voiceKickReason = ''
+    voiceKickError = null
   }
   if (!composerEdit) return
   const exists = timelineMessages.some(
@@ -1498,6 +1579,13 @@ onMount(() => {
         onParticipantVolumeChange={(participantUserId, volumePercent) => {
           voiceState.setParticipantVolume(participantUserId, volumePercent)
         }}
+        onKickFromVoice={(participantUserId) => {
+          const participant = activeVoiceParticipants.find(
+            (entry) => entry.userId === participantUserId,
+          )
+          if (!participant) return
+          openVoiceKickDialog(participant)
+        }}
       />
     {/if}
 
@@ -1680,6 +1768,62 @@ onMount(() => {
       </section>
     {/if}
   </section>
+{/if}
+
+{#if voiceKickDialogParticipant}
+  <div class="fixed inset-0 z-30 flex items-center justify-center bg-black/60 p-4">
+    <div
+      class="w-full max-w-md rounded-md border border-border bg-card p-4 shadow-lg"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Kick ${voiceKickDialogParticipant.displayName ?? voiceKickDialogParticipant.username} from voice`}
+      data-testid="voice-kick-dialog"
+    >
+      <h3 class="text-base font-semibold text-foreground">
+        Kick {voiceKickDialogParticipant.displayName ?? voiceKickDialogParticipant.username}
+      </h3>
+      <p class="mt-2 text-sm text-muted-foreground">
+        Provide a reason before disconnecting this user from the voice channel.
+      </p>
+      {#if voiceKickError}
+        <p
+          class="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive"
+          data-testid="voice-kick-error"
+        >
+          {voiceKickError}
+        </p>
+      {/if}
+      <label class="mt-3 block space-y-1 text-xs text-muted-foreground">
+        <span class="font-medium text-foreground">Reason</span>
+        <textarea
+          class="min-h-[96px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+          bind:value={voiceKickReason}
+          data-testid="voice-kick-reason-input"
+          maxlength={MAX_MODERATION_REASON_CHARS}
+          placeholder="Required moderation reason"
+        ></textarea>
+      </label>
+      <div class="mt-4 flex justify-end gap-2">
+        <button
+          type="button"
+          class="rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+          onclick={closeVoiceKickDialog}
+          disabled={voiceKickSubmitting}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="rounded-md bg-destructive px-3 py-2 text-sm font-medium text-destructive-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+          onclick={() => void submitVoiceKick()}
+          disabled={voiceKickSubmitting}
+          data-testid="voice-kick-submit-button"
+        >
+          {voiceKickSubmitting ? 'Kicking...' : 'Kick from voice'}
+        </button>
+      </div>
+    </div>
+  </div>
 {/if}
 
 {#if pendingDeleteMessage}

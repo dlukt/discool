@@ -12,6 +12,12 @@ export type CreateKickInput = {
   reason: string
 }
 
+export type CreateVoiceKickInput = {
+  targetUserId: string
+  channelSlug: string
+  reason: string
+}
+
 export type BanDeleteMessageWindow = 'none' | '1h' | '24h' | '7d'
 
 export type CreateBanInput = {
@@ -43,6 +49,17 @@ export type MuteStatus = {
 export type KickAction = {
   id: string
   guildSlug: string
+  actorUserId: string
+  targetUserId: string
+  reason: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type VoiceKickAction = {
+  id: string
+  guildSlug: string
+  channelSlug: string
   actorUserId: string
   targetUserId: string
   reason: string
@@ -96,9 +113,26 @@ type CreateKickWire = {
   reason: string
 }
 
+type CreateVoiceKickWire = {
+  target_user_id: string
+  channel_slug: string
+  reason: string
+}
+
 type KickActionWire = {
   id: string
   guild_slug: string
+  actor_user_id: string
+  target_user_id: string
+  reason: string
+  created_at: string
+  updated_at: string
+}
+
+type VoiceKickActionWire = {
+  id: string
+  guild_slug: string
+  channel_slug: string
   actor_user_id: string
   target_user_id: string
   reason: string
@@ -205,6 +239,19 @@ function toKickAction(wire: KickActionWire): KickAction {
   }
 }
 
+function toVoiceKickAction(wire: VoiceKickActionWire): VoiceKickAction {
+  return {
+    id: wire.id,
+    guildSlug: wire.guild_slug,
+    channelSlug: wire.channel_slug,
+    actorUserId: wire.actor_user_id,
+    targetUserId: wire.target_user_id,
+    reason: wire.reason,
+    createdAt: wire.created_at,
+    updatedAt: wire.updated_at,
+  }
+}
+
 function normalizeDeleteMessageWindow(value: string): BanDeleteMessageWindow {
   const normalized = value.trim().toLowerCase()
   if (
@@ -260,6 +307,11 @@ function banCreatePath(guildSlug: string): string {
   return `/api/v1/guilds/${guild}/moderation/bans`
 }
 
+function voiceKickCreatePath(guildSlug: string): string {
+  const guild = normalizePathPart(guildSlug, 'guildSlug')
+  return `/api/v1/guilds/${guild}/moderation/voice-kicks`
+}
+
 export async function createMute(
   guildSlug: string,
   input: CreateMuteInput,
@@ -308,6 +360,25 @@ export async function createKick(
     body: JSON.stringify(payload),
   })
   return toKickAction(wire)
+}
+
+export async function createVoiceKick(
+  guildSlug: string,
+  input: CreateVoiceKickInput,
+): Promise<VoiceKickAction> {
+  const payload: CreateVoiceKickWire = {
+    target_user_id: normalizeRequiredText(input.targetUserId, 'targetUserId'),
+    channel_slug: normalizeRequiredText(input.channelSlug, 'channelSlug'),
+    reason: normalizeRequiredText(input.reason, 'reason'),
+  }
+  const wire = await apiFetch<VoiceKickActionWire>(
+    voiceKickCreatePath(guildSlug),
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
+  )
+  return toVoiceKickAction(wire)
 }
 
 export async function createBan(

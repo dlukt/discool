@@ -830,6 +830,38 @@ async fn handle_voice_leave(
     Ok(())
 }
 
+pub async fn disconnect_user_from_voice_channel(
+    pool: &DbPool,
+    voice_runtime: &VoiceRuntime,
+    guild_slug: &str,
+    channel_slug: &str,
+    target_user_id: &str,
+) -> Result<(), AppError> {
+    let target_user_id = target_user_id.trim();
+    if target_user_id.is_empty() {
+        return Err(AppError::ValidationError(
+            "target_user_id is required".to_string(),
+        ));
+    }
+
+    let disconnected_connections = voice_runtime
+        .disconnect_user_from_channel(guild_slug, channel_slug, target_user_id)
+        .await;
+    for connection_id in disconnected_connections {
+        registry::send_event(
+            &connection_id,
+            ServerOp::VoiceConnectionState,
+            &json!({
+                "guild_slug": guild_slug,
+                "channel_slug": channel_slug,
+                "state": "disconnected",
+            }),
+        );
+    }
+
+    broadcast_voice_state_update(pool, voice_runtime, guild_slug, channel_slug).await
+}
+
 async fn handle_voice_answer(
     voice_runtime: &VoiceRuntime,
     connection_id: &str,

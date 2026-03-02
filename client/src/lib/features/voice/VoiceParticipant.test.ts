@@ -35,6 +35,7 @@ describe('VoiceParticipant', () => {
 
   it('shows keyboard-accessible slider with aria labeling when row is expanded', async () => {
     const onVolumeChange = vi.fn()
+    const onKickFromVoice = vi.fn()
     const { getByTestId, queryByTestId } = render(VoiceParticipant, {
       participant: {
         userId: 'user-1',
@@ -50,6 +51,7 @@ describe('VoiceParticipant', () => {
       },
       onVolumeChange,
       showKickPlaceholder: true,
+      onKickFromVoice,
     })
 
     expect(
@@ -66,13 +68,14 @@ describe('VoiceParticipant', () => {
     expect(slider).toHaveAttribute('step', '5')
     expect(slider).toHaveAttribute('aria-label', 'Alice volume')
     expect(slider).toHaveAttribute('aria-valuetext', '100%')
-    expect(
-      getByTestId('voice-participant-kick-placeholder-user-1'),
-    ).toBeInTheDocument()
+    const kickButton = getByTestId('voice-participant-kick-user-1')
+    expect(kickButton).toBeInTheDocument()
 
     await fireEvent.keyDown(slider, { key: 'ArrowRight' })
     await fireEvent.input(slider, { target: { value: '105' } })
     expect(onVolumeChange).toHaveBeenCalledWith('user-1', 105)
+    await fireEvent.click(kickButton)
+    expect(onKickFromVoice).toHaveBeenCalledWith('user-1')
   })
 
   it('clamps slider input to supported 0..200 range', async () => {

@@ -10,12 +10,14 @@ type Props = {
   participant: VoiceParticipant
   showKickPlaceholder?: boolean
   onVolumeChange?: (participantUserId: string, volumePercent: number) => void
+  onKickFromVoice?: (participantUserId: string) => void
 }
 
 let {
   participant,
   showKickPlaceholder = false,
   onVolumeChange,
+  onKickFromVoice,
 }: Props = $props()
 
 let controlsOpen = $state(false)
@@ -59,6 +61,10 @@ function handleVolumeInput(event: Event): void {
     Number(target.value),
   )
   onVolumeChange?.(participant.userId, nextVolumePercent)
+}
+
+function handleKickFromVoice(): void {
+  onKickFromVoice?.(participant.userId)
 }
 </script>
 
@@ -148,11 +154,11 @@ function handleVolumeInput(event: Event): void {
       {#if showKickPlaceholder}
         <button
           type="button"
-          disabled
-          class="rounded border border-border bg-muted px-2 py-1 text-xs text-muted-foreground"
-          data-testid={`voice-participant-kick-placeholder-${participant.userId}`}
+          class="rounded border border-destructive/70 bg-destructive/10 px-2 py-1 text-xs text-destructive hover:opacity-90"
+          data-testid={`voice-participant-kick-${participant.userId}`}
+          onclick={handleKickFromVoice}
         >
-          Kick from voice (Epic 8 placeholder)
+          Kick from voice
         </button>
       {/if}
     </div>

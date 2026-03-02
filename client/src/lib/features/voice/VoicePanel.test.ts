@@ -45,12 +45,14 @@ describe('VoicePanel', () => {
     expect(queryByTestId('voice-panel-empty')).not.toBeInTheDocument()
   })
 
-  it('propagates participant volume changes and moderator placeholder visibility', async () => {
+  it('propagates participant volume changes and kick action callbacks', async () => {
     const onParticipantVolumeChange = vi.fn()
+    const onKickFromVoice = vi.fn()
     const { getByTestId, queryByTestId } = render(VoicePanel, {
       channelName: 'general',
       canModerateVoiceParticipants: true,
       onParticipantVolumeChange,
+      onKickFromVoice,
       participants: [
         {
           userId: 'user-1',
@@ -77,12 +79,13 @@ describe('VoicePanel', () => {
       'voice-participant-volume-slider-user-1',
     ) as HTMLInputElement
     expect(slider).toHaveAttribute('aria-valuetext', '100%')
-    expect(
-      getByTestId('voice-participant-kick-placeholder-user-1'),
-    ).toBeInTheDocument()
+    const kickButton = getByTestId('voice-participant-kick-user-1')
+    expect(kickButton).toBeInTheDocument()
 
     await fireEvent.input(slider, { target: { value: '150' } })
     expect(onParticipantVolumeChange).toHaveBeenCalledWith('user-1', 150)
+    await fireEvent.click(kickButton)
+    expect(onKickFromVoice).toHaveBeenCalledWith('user-1')
   })
 
   it('supports mobile-sheet layout variant for bottom-sheet containers', () => {
