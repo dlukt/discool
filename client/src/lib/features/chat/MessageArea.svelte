@@ -12,6 +12,7 @@ import { blockState } from '$lib/features/identity/blockStore.svelte'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
 import ProfileSettingsView from '$lib/features/identity/ProfileSettingsView.svelte'
 import {
+  createMessageDelete,
   createVoiceKick,
   type MuteStatus,
 } from '$lib/features/moderation/moderationApi'
@@ -143,6 +144,10 @@ let loadHistoryInFlight = $state(false)
 let lastTailMessageId = $state<string | null>(null)
 let skipNextTailChange = $state(false)
 let pendingDeleteMessage = $state<ChatMessage | null>(null)
+let pendingDeleteRequiresReason = $state(false)
+let deleteReason = $state('')
+let deleteError = $state<string | null>(null)
+let deleteSubmitting = $state(false)
 let attachmentInput = $state<HTMLInputElement | null>(null)
 let selectedAttachment = $state<File | null>(null)
 let attachmentUploadProgress = $state<number | null>(null)
@@ -322,6 +327,9 @@ const attachFilesPermission = GUILD_PERMISSION_CATALOG.find(
 const muteMembersPermission = GUILD_PERMISSION_CATALOG.find(
   (permission) => permission.key === 'MUTE_MEMBERS',
 )
+const manageMessagesPermission = GUILD_PERMISSION_CATALOG.find(
+  (permission) => permission.key === 'MANAGE_MESSAGES',
+)
 let memberRoleData = $derived(
   isChannelMode
     ? guildState.memberRoleDataForGuild(activeGuild)
@@ -377,6 +385,15 @@ let canModerateVoiceParticipants = $derived(
         hasGuildPermission(
           currentMemberPermissionsBitflag,
           muteMembersPermission,
+        ))),
+)
+let canModerateMessages = $derived(
+  isChannelMode &&
+    (Boolean(activeGuildRecord?.isOwner) ||
+      (manageMessagesPermission !== undefined &&
+        hasGuildPermission(
+          currentMemberPermissionsBitflag,
+          manageMessagesPermission,
         ))),
 )
 let currentRoleColor = $derived(
@@ -836,13 +853,22 @@ function cancelComposerEdit(): void {
 
 function requestDeleteMessage(message: ChatMessage): void {
   const currentUserId = currentSessionUser?.id
-  if (!currentUserId) return
-  if (message.isSystem || message.authorUserId !== currentUserId) return
+  if (!currentUserId || mode !== 'channel') return
+  if (message.isSystem) return
+  const isOwnMessage = message.authorUserId === currentUserId
+  if (!isOwnMessage && !canModerateMessages) return
   pendingDeleteMessage = message
+  pendingDeleteRequiresReason = !isOwnMessage
+  deleteReason = ''
+  deleteError = null
 }
 
 function closeDeleteDialog(): void {
+  if (deleteSubmitting) return
   pendingDeleteMessage = null
+  pendingDeleteRequiresReason = false
+  deleteReason = ''
+  deleteError = null
 }
 
 function openVoiceKickDialog(participant: VoiceParticipant): void {
@@ -898,8 +924,50 @@ async function submitVoiceKick(): Promise<void> {
   }
 }
 
-function confirmDeleteMessage(): void {
+async function confirmDeleteMessage(): Promise<void> {
   if (!pendingDeleteMessage || mode !== 'channel') return
+  if (pendingDeleteRequiresReason) {
+    const trimmedReason = deleteReason.trim()
+    if (!trimmedReason) {
+      deleteError = 'Reason is required.'
+      return
+    }
+    if (trimmedReason.length > MAX_MODERATION_REASON_CHARS) {
+      deleteError = `Reason must be ${MAX_MODERATION_REASON_CHARS} characters or less.`
+      return
+    }
+
+    deleteSubmitting = true
+    deleteError = null
+    setOperationStatus('Deleting...')
+    try {
+      await createMessageDelete(activeGuild, {
+        messageId: pendingDeleteMessage.id,
+        channelSlug: pendingDeleteMessage.channelSlug,
+        reason: trimmedReason,
+      })
+      const successMessage = 'Message deleted'
+      setOperationStatus(
+        successMessage,
+        'default',
+        OPERATION_STATUS_AUTO_CLEAR_MS,
+      )
+      toastState.show({ variant: 'success', message: successMessage })
+      pendingDeleteMessage = null
+      pendingDeleteRequiresReason = false
+      deleteReason = ''
+      deleteError = null
+    } catch (error) {
+      const message = messageFromError(error, 'Could not delete message.')
+      deleteError = message
+      setOperationStatus(message, 'error')
+      toastState.show({ variant: 'error', message })
+    } finally {
+      deleteSubmitting = false
+    }
+    return
+  }
+
   setOperationStatus('Deleting...')
   const sent = messageState.sendMessageDelete(
     pendingDeleteMessage.guildSlug,
@@ -1166,6 +1234,10 @@ $effect(() => {
     composerEdit = null
     composerSelection = { start: 0, end: 0 }
     pendingDeleteMessage = null
+    pendingDeleteRequiresReason = false
+    deleteReason = ''
+    deleteError = null
+    deleteSubmitting = false
     voiceKickDialogParticipant = null
     voiceKickReason = ''
     voiceKickError = null
@@ -1180,6 +1252,10 @@ $effect(() => {
   if (!isChannelMode) {
     composerEdit = null
     pendingDeleteMessage = null
+    pendingDeleteRequiresReason = false
+    deleteReason = ''
+    deleteError = null
+    deleteSubmitting = false
     voiceKickDialogParticipant = null
     voiceKickReason = ''
     voiceKickError = null
@@ -1196,6 +1272,10 @@ $effect(() => {
       pendingDeleteMessage.channelSlug !== activeChannel)
   ) {
     pendingDeleteMessage = null
+    pendingDeleteRequiresReason = false
+    deleteReason = ''
+    deleteError = null
+    deleteSubmitting = false
   }
   if (
     voiceKickDialogParticipant &&
@@ -1516,6 +1596,7 @@ onMount(() => {
                     message={row.message}
                     compact={row.compact}
                     currentUserId={currentSessionUser?.id ?? null}
+                    hasManageMessagesPermission={canModerateMessages}
                     onEditRequest={startEditingMessage}
                     onDeleteRequest={requestDeleteMessage}
                     onReactRequest={handleReactionRequest}
@@ -1836,22 +1917,51 @@ onMount(() => {
     >
       <h3 class="text-base font-semibold text-foreground">Delete message</h3>
       <p class="mt-2 text-sm text-muted-foreground">
-        This message will be removed for everyone in this channel.
+        {#if pendingDeleteRequiresReason}
+          Provide a moderation reason before deleting this message for everyone in the channel.
+        {:else}
+          This message will be removed for everyone in this channel.
+        {/if}
       </p>
+      {#if pendingDeleteRequiresReason}
+        <label class="mt-3 block space-y-1 text-xs text-muted-foreground">
+          <span class="font-medium text-foreground">Reason</span>
+          <textarea
+            class="min-h-[96px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            bind:value={deleteReason}
+            data-testid="message-delete-reason-input"
+            maxlength={MAX_MODERATION_REASON_CHARS}
+            placeholder="Required moderation reason"
+            oninput={() => {
+              if (deleteError) deleteError = null
+            }}
+          ></textarea>
+        </label>
+      {/if}
+      {#if deleteError}
+        <p
+          class="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive"
+          data-testid="message-delete-error"
+        >
+          {deleteError}
+        </p>
+      {/if}
       <div class="mt-4 flex justify-end gap-2">
         <button
           type="button"
           class="rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-foreground hover:bg-muted"
           onclick={closeDeleteDialog}
+          disabled={deleteSubmitting}
         >
           Cancel
         </button>
         <button
           type="button"
           class="rounded-md bg-destructive px-3 py-2 text-sm font-medium text-destructive-foreground hover:opacity-90"
-          onclick={confirmDeleteMessage}
+          onclick={() => void confirmDeleteMessage()}
+          disabled={deleteSubmitting}
         >
-          Delete message
+          {deleteSubmitting ? 'Deleting...' : 'Delete message'}
         </button>
       </div>
     </div>

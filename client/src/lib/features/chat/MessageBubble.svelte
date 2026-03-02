@@ -13,6 +13,7 @@ type Props = {
   message: ChatMessage
   compact?: boolean
   currentUserId?: string | null
+  hasManageMessagesPermission?: boolean
   onEditRequest?: (message: ChatMessage) => void
   onDeleteRequest?: (message: ChatMessage) => void
   onReplyRequest?: (message: ChatMessage) => void
@@ -23,6 +24,7 @@ let {
   message,
   compact = false,
   currentUserId = null,
+  hasManageMessagesPermission = false,
   onEditRequest,
   onDeleteRequest,
   onReplyRequest,
@@ -37,6 +39,9 @@ let renderedContent = $derived(
 )
 let isOwnMessage = $derived(
   Boolean(currentUserId && currentUserId === message.authorUserId),
+)
+let canDeleteMessage = $derived(
+  !message.isSystem && (isOwnMessage || hasManageMessagesPermission),
 )
 let contextMenuOpen = $state(false)
 let pickerOpen = $state(false)
@@ -116,7 +121,7 @@ function requestEdit(): void {
 }
 
 function requestDelete(): void {
-  if (!isOwnMessage) return
+  if (!canDeleteMessage) return
   onDeleteRequest?.(message)
   closeContextMenu()
 }
@@ -155,7 +160,7 @@ function handleRowKeydown(event: KeyboardEvent): void {
   }
 
   if (event.key === 'Delete') {
-    if (!isOwnMessage) return
+    if (!canDeleteMessage) return
     event.preventDefault()
     requestDelete()
     return
@@ -368,7 +373,7 @@ function handleRowFocusOut(event: FocusEvent): void {
         type="button"
         class="rounded px-1.5 py-1 text-xs text-foreground hover:bg-muted"
         onclick={requestDelete}
-        disabled={!isOwnMessage}
+        disabled={!canDeleteMessage}
         aria-label="Delete message"
         title="Delete message"
       >
@@ -424,7 +429,7 @@ function handleRowFocusOut(event: FocusEvent): void {
           class="mt-1 block w-full rounded px-2 py-1 text-left text-sm text-destructive hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-50"
           role="menuitem"
           onclick={requestDelete}
-          disabled={!isOwnMessage}
+          disabled={!canDeleteMessage}
         >
           Delete message
         </button>

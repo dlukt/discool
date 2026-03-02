@@ -15,7 +15,11 @@ vi.mock('$lib/api', () => ({
 }))
 
 import { apiFetch, apiFetchCursorList } from '$lib/api'
-import { createVoiceKick, fetchModerationLog } from './moderationApi'
+import {
+  createMessageDelete,
+  createVoiceKick,
+  fetchModerationLog,
+} from './moderationApi'
 
 describe('moderationApi voice kick', () => {
   beforeEach(() => {
@@ -59,6 +63,55 @@ describe('moderationApi voice kick', () => {
           target_user_id: 'target-user-id',
           channel_slug: 'voice-room',
           reason: 'disruptive behavior',
+        }),
+      },
+    )
+  })
+})
+
+describe('moderationApi message delete', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('posts moderated message-delete payload and maps response', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      id: 'mod-action-1',
+      message_id: 'message-1',
+      guild_slug: 'lobby',
+      channel_slug: 'general',
+      actor_user_id: 'mod-user-id',
+      target_user_id: 'target-user-id',
+      reason: 'policy violation',
+      created_at: '2026-03-02T00:00:00.000Z',
+      updated_at: '2026-03-02T00:00:00.000Z',
+    })
+
+    await expect(
+      createMessageDelete(' lobby ', {
+        messageId: ' message-1 ',
+        channelSlug: ' general ',
+        reason: ' policy violation ',
+      }),
+    ).resolves.toEqual({
+      id: 'mod-action-1',
+      messageId: 'message-1',
+      guildSlug: 'lobby',
+      channelSlug: 'general',
+      actorUserId: 'mod-user-id',
+      targetUserId: 'target-user-id',
+      reason: 'policy violation',
+      createdAt: '2026-03-02T00:00:00.000Z',
+      updatedAt: '2026-03-02T00:00:00.000Z',
+    })
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/guilds/lobby/moderation/messages/message-1/delete',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          channel_slug: 'general',
+          reason: 'policy violation',
         }),
       },
     )

@@ -296,6 +296,22 @@ const {
 })
 
 const moderationApi = vi.hoisted(() => ({
+  createMessageDelete: vi.fn(
+    async (
+      _guildSlug: string,
+      _input: { messageId: string; channelSlug: string; reason: string },
+    ) => ({
+      id: 'mod-action-1',
+      messageId: 'm-0',
+      guildSlug: 'lobby',
+      channelSlug: 'general',
+      actorUserId: 'user-1',
+      targetUserId: 'user-2',
+      reason: 'policy violation',
+      createdAt: '2026-03-02T00:00:00.000Z',
+      updatedAt: '2026-03-02T00:00:00.000Z',
+    }),
+  ),
   createVoiceKick: vi.fn(
     async (
       _guildSlug: string,
@@ -492,6 +508,7 @@ describe('MessageArea', () => {
     guildState.bySlug.mockClear()
     muteStatusState.statusForGuild.mockClear()
     muteStatusState.refresh.mockClear()
+    moderationApi.createMessageDelete.mockClear()
     moderationApi.createVoiceKick.mockClear()
   })
 
@@ -1047,6 +1064,7 @@ describe('MessageArea', () => {
   it('requires confirmation before delete operation is sent', async () => {
     seedChannelMessages('lobby:general', 1)
     messageState.version += 1
+    guildState.bySlug.mockReturnValue({ isOwner: false })
 
     const { getByTestId, getByRole, queryByRole } = render(MessageArea, {
       mode: 'channel',
@@ -1079,6 +1097,92 @@ describe('MessageArea', () => {
       'general',
       'm-0',
     )
+  })
+
+  it('requires moderation reason and uses API delete flow for non-owned messages', async () => {
+    seedChannelMessages('lobby:general', 1)
+    timelineByChannel['lobby:general'][0] = {
+      ...timelineByChannel['lobby:general'][0],
+      authorUserId: 'user-2',
+      authorUsername: 'bob',
+      authorDisplayName: 'Bob',
+    }
+    messageState.version += 1
+
+    guildState.bySlug.mockReturnValue({ isOwner: false })
+    guildState.memberRoleDataForGuild.mockReturnValue({
+      members: [
+        {
+          userId: 'user-1',
+          username: 'alice',
+          displayName: 'Alice',
+          avatarColor: '#3366ff',
+          presenceStatus: 'online',
+          highestRoleColor: '#3366ff',
+          roleIds: ['role-mod'],
+          isOwner: false,
+          canAssignRoles: false,
+        },
+        {
+          userId: 'user-2',
+          username: 'bob',
+          displayName: 'Bob',
+          avatarColor: '#99aab5',
+          presenceStatus: 'online',
+          highestRoleColor: '#99aab5',
+          roleIds: [],
+          isOwner: false,
+          canAssignRoles: false,
+        },
+      ],
+      roles: [
+        { id: 'role-mod', permissionsBitflag: 1 << 11, isDefault: false },
+        { id: 'role-default', permissionsBitflag: 0, isDefault: true },
+      ],
+      assignableRoleIds: [],
+      canManageRoles: false,
+    })
+
+    const { getByTestId, getByRole } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    const messageRow = getByTestId('message-row-m-0')
+    await fireEvent.keyDown(messageRow, { key: 'Delete' })
+
+    const dialog = getByRole('dialog', { name: 'Delete message' })
+    await fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Delete message' }),
+    )
+    expect(getByTestId('message-delete-error')).toHaveTextContent(
+      'Reason is required.',
+    )
+    expect(moderationApi.createMessageDelete).not.toHaveBeenCalled()
+    expect(messageState.sendMessageDelete).not.toHaveBeenCalled()
+
+    await fireEvent.input(getByTestId('message-delete-reason-input'), {
+      target: { value: 'policy violation' },
+    })
+    await fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Delete message' }),
+    )
+
+    await waitFor(() => {
+      expect(moderationApi.createMessageDelete).toHaveBeenCalledWith('lobby', {
+        messageId: 'm-0',
+        channelSlug: 'general',
+        reason: 'policy violation',
+      })
+    })
+    expect(toastState.show).toHaveBeenCalledWith({
+      variant: 'success',
+      message: 'Message deleted',
+    })
   })
 
   it('routes emoji reaction selection to websocket toggle operation', async () => {

@@ -133,6 +133,10 @@ pub fn router(state: AppState) -> Router {
             get(moderation::list_bans).post(moderation::create_ban),
         )
         .route(
+            "/guilds/{guild_slug}/moderation/messages/{message_id}/delete",
+            post(moderation::create_message_delete),
+        )
+        .route(
             "/guilds/{guild_slug}/moderation/log",
             get(moderation::list_moderation_log),
         )

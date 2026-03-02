@@ -111,6 +111,23 @@ describe('MessageBubble', () => {
     expect(getByRole('button', { name: 'Delete message' })).toBeDisabled()
   })
 
+  it('enables delete for moderators on non-owned messages', async () => {
+    const onDeleteRequest = vi.fn()
+    const { getByRole } = render(MessageBubble, {
+      message: makeMessage(),
+      currentUserId: 'user-2',
+      hasManageMessagesPermission: true,
+      onDeleteRequest,
+    })
+
+    const deleteButton = getByRole('button', { name: 'Delete message' })
+    expect(deleteButton).toBeEnabled()
+    await fireEvent.click(deleteButton)
+    expect(onDeleteRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'message-1' }),
+    )
+  })
+
   it('renders image and file attachments with fullscreen preview', async () => {
     const { getByTestId } = render(MessageBubble, {
       message: makeMessage({

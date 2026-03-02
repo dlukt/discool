@@ -91,6 +91,7 @@ pub async fn find_message_by_id(
                 "SELECT id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at
                  FROM messages
                  WHERE id = $1
+                   AND deleted_at IS NULL
                  LIMIT 1",
             )
             .bind(message_id)
@@ -102,6 +103,7 @@ pub async fn find_message_by_id(
                 "SELECT id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at
                  FROM messages
                  WHERE id = ?1
+                   AND deleted_at IS NULL
                  LIMIT 1",
             )
             .bind(message_id)
@@ -151,6 +153,7 @@ pub async fn update_message_content_if_unmodified_by_id_channel_and_author(
                      WHERE id = $3
                        AND channel_id = $4
                        AND author_user_id = $5
+                       AND deleted_at IS NULL
                        AND updated_at = $6",
             )
             .bind(content)
@@ -167,7 +170,8 @@ pub async fn update_message_content_if_unmodified_by_id_channel_and_author(
                      SET content = $1, updated_at = $2
                      WHERE id = $3
                        AND channel_id = $4
-                       AND author_user_id = $5",
+                       AND author_user_id = $5
+                       AND deleted_at IS NULL",
             )
             .bind(content)
             .bind(updated_at)
@@ -185,6 +189,7 @@ pub async fn update_message_content_if_unmodified_by_id_channel_and_author(
                      WHERE id = ?3
                        AND channel_id = ?4
                        AND author_user_id = ?5
+                       AND deleted_at IS NULL
                        AND updated_at = ?6",
             )
             .bind(content)
@@ -201,7 +206,8 @@ pub async fn update_message_content_if_unmodified_by_id_channel_and_author(
                      SET content = ?1, updated_at = ?2
                      WHERE id = ?3
                        AND channel_id = ?4
-                       AND author_user_id = ?5",
+                       AND author_user_id = ?5
+                       AND deleted_at IS NULL",
             )
             .bind(content)
             .bind(updated_at)
@@ -229,7 +235,8 @@ pub async fn delete_message_by_id_channel_and_author(
             "DELETE FROM messages
                  WHERE id = $1
                    AND channel_id = $2
-                   AND author_user_id = $3",
+                   AND author_user_id = $3
+                   AND deleted_at IS NULL",
         )
         .bind(message_id)
         .bind(channel_id)
@@ -241,11 +248,77 @@ pub async fn delete_message_by_id_channel_and_author(
             "DELETE FROM messages
                  WHERE id = ?1
                    AND channel_id = ?2
-                   AND author_user_id = ?3",
+                   AND author_user_id = ?3
+                   AND deleted_at IS NULL",
         )
         .bind(message_id)
         .bind(channel_id)
         .bind(author_user_id)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(rows == 1)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn soft_delete_message_by_id_for_moderation(
+    pool: &DbPool,
+    message_id: &str,
+    guild_id: &str,
+    channel_id: &str,
+    deleted_by_user_id: &str,
+    deleted_reason: &str,
+    deleted_moderation_action_id: &str,
+    deleted_at: &str,
+    updated_at: &str,
+) -> Result<bool, AppError> {
+    let rows = match pool {
+        DbPool::Postgres(pool) => sqlx::query(
+            "UPDATE messages
+                 SET deleted_at = $1,
+                     deleted_by_user_id = $2,
+                     deleted_reason = $3,
+                     deleted_moderation_action_id = $4,
+                     updated_at = $5
+                 WHERE id = $6
+                   AND guild_id = $7
+                   AND channel_id = $8
+                   AND deleted_at IS NULL",
+        )
+        .bind(deleted_at)
+        .bind(deleted_by_user_id)
+        .bind(deleted_reason)
+        .bind(deleted_moderation_action_id)
+        .bind(updated_at)
+        .bind(message_id)
+        .bind(guild_id)
+        .bind(channel_id)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+        DbPool::Sqlite(pool) => sqlx::query(
+            "UPDATE messages
+                 SET deleted_at = ?1,
+                     deleted_by_user_id = ?2,
+                     deleted_reason = ?3,
+                     deleted_moderation_action_id = ?4,
+                     updated_at = ?5
+                 WHERE id = ?6
+                   AND guild_id = ?7
+                   AND channel_id = ?8
+                   AND deleted_at IS NULL",
+        )
+        .bind(deleted_at)
+        .bind(deleted_by_user_id)
+        .bind(deleted_reason)
+        .bind(deleted_moderation_action_id)
+        .bind(updated_at)
+        .bind(message_id)
+        .bind(guild_id)
+        .bind(channel_id)
         .execute(pool)
         .await
         .map(|result| result.rows_affected()),
@@ -268,8 +341,9 @@ pub async fn list_message_ids_by_guild_and_author_since(
                     "SELECT id
                  FROM messages
                  WHERE guild_id = $1
-                   AND author_user_id = $2
-                   AND created_at >= $3",
+                    AND author_user_id = $2
+                    AND deleted_at IS NULL
+                    AND created_at >= $3",
                 )
                 .bind(guild_id)
                 .bind(author_user_id)
@@ -282,7 +356,8 @@ pub async fn list_message_ids_by_guild_and_author_since(
                     "SELECT id
                  FROM messages
                  WHERE guild_id = $1
-                   AND author_user_id = $2",
+                    AND author_user_id = $2
+                    AND deleted_at IS NULL",
                 )
                 .bind(guild_id)
                 .bind(author_user_id)
@@ -296,8 +371,9 @@ pub async fn list_message_ids_by_guild_and_author_since(
                     "SELECT id
                  FROM messages
                  WHERE guild_id = ?1
-                   AND author_user_id = ?2
-                   AND created_at >= ?3",
+                    AND author_user_id = ?2
+                    AND deleted_at IS NULL
+                    AND created_at >= ?3",
                 )
                 .bind(guild_id)
                 .bind(author_user_id)
@@ -310,7 +386,8 @@ pub async fn list_message_ids_by_guild_and_author_since(
                     "SELECT id
                  FROM messages
                  WHERE guild_id = ?1
-                   AND author_user_id = ?2",
+                    AND author_user_id = ?2
+                    AND deleted_at IS NULL",
                 )
                 .bind(guild_id)
                 .bind(author_user_id)
@@ -391,6 +468,7 @@ pub async fn list_messages_page_by_channel_id(
                     "SELECT id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at
                      FROM messages
                      WHERE channel_id = $1
+                       AND deleted_at IS NULL
                        AND (created_at < $2 OR (created_at = $2 AND id < $3))
                      ORDER BY created_at DESC, id DESC
                      LIMIT $4",
@@ -407,6 +485,7 @@ pub async fn list_messages_page_by_channel_id(
                     "SELECT id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at
                      FROM messages
                      WHERE channel_id = $1
+                       AND deleted_at IS NULL
                      ORDER BY created_at DESC, id DESC
                      LIMIT $2",
                 )
@@ -422,6 +501,7 @@ pub async fn list_messages_page_by_channel_id(
                     "SELECT id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at
                      FROM messages
                      WHERE channel_id = ?1
+                       AND deleted_at IS NULL
                        AND (created_at < ?2 OR (created_at = ?2 AND id < ?3))
                      ORDER BY created_at DESC, id DESC
                      LIMIT ?4",
@@ -438,6 +518,7 @@ pub async fn list_messages_page_by_channel_id(
                     "SELECT id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at
                      FROM messages
                      WHERE channel_id = ?1
+                       AND deleted_at IS NULL
                      ORDER BY created_at DESC, id DESC
                      LIMIT ?2",
                 )
@@ -757,5 +838,116 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn sqlite_soft_delete_hides_message_from_find_list_and_author_queries() {
+        let pool = init_pool(&DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 1,
+        })
+        .await
+        .unwrap();
+        run_migrations(&pool).await.unwrap();
+        seed_message_fixture(&pool).await;
+
+        let first_timestamp = "2026-02-28T00:00:01Z";
+        let second_timestamp = "2026-02-28T00:00:02Z";
+        insert_message(
+            &pool,
+            "message-visible",
+            "guild-id",
+            "channel-id",
+            "author-user-id",
+            "visible",
+            false,
+            first_timestamp,
+            first_timestamp,
+        )
+        .await
+        .unwrap();
+        insert_message(
+            &pool,
+            "message-soft-deleted",
+            "guild-id",
+            "channel-id",
+            "author-user-id",
+            "deleted",
+            false,
+            second_timestamp,
+            second_timestamp,
+        )
+        .await
+        .unwrap();
+
+        let DbPool::Sqlite(sqlite_pool) = &pool else {
+            panic!("test fixture expects sqlite pool");
+        };
+        sqlx::query(
+            "INSERT INTO moderation_actions (
+                id,
+                action_type,
+                guild_id,
+                actor_user_id,
+                target_user_id,
+                reason,
+                duration_seconds,
+                expires_at,
+                is_active,
+                created_at,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )
+        .bind("mod-action-1")
+        .bind("message_delete")
+        .bind("guild-id")
+        .bind("owner-user-id")
+        .bind("author-user-id")
+        .bind("policy violation")
+        .bind(None::<i64>)
+        .bind(None::<&str>)
+        .bind(0_i64)
+        .bind("2026-02-28T00:00:03Z")
+        .bind("2026-02-28T00:00:03Z")
+        .execute(sqlite_pool)
+        .await
+        .unwrap();
+
+        let soft_deleted = soft_delete_message_by_id_for_moderation(
+            &pool,
+            "message-soft-deleted",
+            "guild-id",
+            "channel-id",
+            "owner-user-id",
+            "policy violation",
+            "mod-action-1",
+            "2026-02-28T00:00:03Z",
+            "2026-02-28T00:00:03Z",
+        )
+        .await
+        .unwrap();
+        assert!(soft_deleted);
+
+        assert!(
+            find_message_by_id(&pool, "message-soft-deleted")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let listed = list_messages_by_channel_id(&pool, "channel-id", 50)
+            .await
+            .unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["message-visible"]
+        );
+        let author_message_ids =
+            list_message_ids_by_guild_and_author_since(&pool, "guild-id", "author-user-id", None)
+                .await
+                .unwrap();
+        assert_eq!(author_message_ids, vec!["message-visible".to_string()]);
     }
 }

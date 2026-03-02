@@ -5528,6 +5528,245 @@ async fn moderation_log_lists_real_actions_and_enforces_view_permission() {
 }
 
 #[tokio::test]
+async fn moderation_message_delete_soft_deletes_broadcasts_and_enforces_permissions() {
+    use serde_json::json;
+    use std::io::Write;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    let cfg_path = dir.join("config.toml");
+    write_server_config_with_db_url(&cfg_path, "127.0.0.1", port, None, "sqlite://./discool.db");
+    let mut cfg = fs::OpenOptions::new().append(true).open(&cfg_path).unwrap();
+    cfg.write_all(
+        b"\n[attachments]\nupload_dir = \"./attachments-test\"\nmax_size_bytes = 1048576\n",
+    )
+    .unwrap();
+
+    let mut server = spawn_server(&dir, |_| {});
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "mod-msg-owner", [209u8; 32]).await;
+    let target_token = register_and_authenticate(&addr, "mod-msg-target", [210u8; 32]).await;
+    let member_token = register_and_authenticate(&addr, "mod-msg-member", [211u8; 32]).await;
+
+    let target_profile =
+        http_response_with_bearer(&addr, "/api/v1/users/me/profile", &target_token).await;
+    assert_eq!(response_status(&target_profile), 200);
+    let target_profile_json: serde_json::Value =
+        serde_json::from_str(response_body(&target_profile)).unwrap();
+    let target_user_id = target_profile_json["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let guild_res = http_post_with_bearer(
+        &addr,
+        "/api/v1/guilds",
+        &json!({ "name": "Message Delete Guild" }).to_string(),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_slug = guild_json["data"]["slug"].as_str().unwrap().to_string();
+
+    let invite_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/invites"),
+        &json!({ "type": "reusable" }).to_string(),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&invite_res), 201);
+    let invite_json: serde_json::Value = serde_json::from_str(response_body(&invite_res)).unwrap();
+    let invite_code = invite_json["data"]["code"].as_str().unwrap().to_string();
+
+    let join_target = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/invites/{invite_code}/join"),
+        "{}",
+        &target_token,
+    )
+    .await;
+    assert_eq!(response_status(&join_target), 200);
+    let join_member = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/invites/{invite_code}/join"),
+        "{}",
+        &member_token,
+    )
+    .await;
+    assert_eq!(response_status(&join_member), 200);
+
+    let boundary = "----discool-moderated-delete-boundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"moderated.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02]);
+    body.extend_from_slice(
+        format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"content\"\r\n\r\nFlagged content")
+            .as_bytes(),
+    );
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let upload_path = format!("/api/v1/guilds/{guild_slug}/channels/general/messages/attachments");
+    let upload_res =
+        http_post_multipart_with_bearer(&addr, &upload_path, boundary, &body, &target_token).await;
+    assert_eq!(response_status(&upload_res), 201);
+    let upload_payload: serde_json::Value =
+        serde_json::from_str(response_body(&upload_res)).unwrap();
+    let message_id = upload_payload["data"]["id"].as_str().unwrap().to_string();
+    let attachment_url = upload_payload["data"]["attachments"][0]["url"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (mut owner_stream, owner_ws_response) =
+        websocket_connect(&addr, "/ws", Some(&owner_token)).await;
+    let (mut target_stream, target_ws_response) =
+        websocket_connect(&addr, "/ws", Some(&target_token)).await;
+    assert_eq!(response_status(&owner_ws_response), 101);
+    assert_eq!(response_status(&target_ws_response), 101);
+    let _ = websocket_read_json_with_op(&mut owner_stream, "hello", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut target_stream, "hello", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut owner_stream,
+        &json!({
+            "op": "c_subscribe",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general",
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    websocket_send_text_frame(
+        &mut target_stream,
+        &json!({
+            "op": "c_subscribe",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": "general",
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let _ = websocket_read_json_with_op(&mut owner_stream, "channel_update", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut target_stream, "channel_update", 1_500).await;
+
+    let forbidden_delete = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/moderation/messages/{message_id}/delete"),
+        &json!({
+            "channel_slug": "general",
+            "reason": "not allowed",
+        })
+        .to_string(),
+        &member_token,
+    )
+    .await;
+    assert_eq!(response_status(&forbidden_delete), 403);
+
+    let delete_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/moderation/messages/{message_id}/delete"),
+        &json!({
+            "channel_slug": "general",
+            "reason": "policy violation",
+        })
+        .to_string(),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&delete_res), 201);
+    let delete_payload: serde_json::Value =
+        serde_json::from_str(response_body(&delete_res)).unwrap();
+    assert_eq!(
+        delete_payload["data"]["message_id"],
+        json!(message_id.as_str())
+    );
+    assert_eq!(delete_payload["data"]["reason"], json!("policy violation"));
+
+    let owner_delete = websocket_read_json_with_op(&mut owner_stream, "message_delete", 1_500)
+        .await
+        .expect("owner should receive message_delete");
+    let target_delete = websocket_read_json_with_op(&mut target_stream, "message_delete", 1_500)
+        .await
+        .expect("target should receive message_delete");
+    assert_eq!(owner_delete["d"]["id"], json!(message_id.as_str()));
+    assert_eq!(target_delete["d"]["id"], json!(message_id.as_str()));
+
+    let history_res = http_response_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/channels/general/messages"),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&history_res), 200);
+    let history_json: serde_json::Value =
+        serde_json::from_str(response_body(&history_res)).unwrap();
+    let history_messages = history_json["data"].as_array().unwrap();
+    assert!(
+        history_messages
+            .iter()
+            .all(|entry| entry["id"] != json!(message_id.as_str()))
+    );
+
+    let attachment_download =
+        http_get_bytes_with_bearer(&addr, &attachment_url, &owner_token).await;
+    let (attachment_download_header, _) = response_header_and_body_bytes(&attachment_download);
+    assert_eq!(response_status(&attachment_download_header), 404);
+
+    let db_url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&db_url).await.unwrap();
+    let deleted_metadata = sqlx::query_as::<
+        _,
+        (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT deleted_at, deleted_by_user_id, deleted_reason, deleted_moderation_action_id
+         FROM messages
+         WHERE id = ?1
+         LIMIT 1",
+    )
+    .bind(&message_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(deleted_metadata.0.is_some());
+    assert!(deleted_metadata.1.is_some());
+    assert_eq!(deleted_metadata.2, Some("policy violation".to_string()));
+    assert!(deleted_metadata.3.is_some());
+
+    let log_res = http_response_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/moderation/log?limit=10&order=desc"),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&log_res), 200);
+    let log_json: serde_json::Value = serde_json::from_str(response_body(&log_res)).unwrap();
+    let entries = log_json["data"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    assert_eq!(entries[0]["action_type"], json!("message_delete"));
+    assert_eq!(entries[0]["reason"], json!("policy violation"));
+    assert_eq!(entries[0]["target_user_id"], json!(target_user_id.as_str()));
+}
+
+#[tokio::test]
 async fn websocket_voice_join_rejects_text_channels_and_invalid_payloads() {
     use serde_json::json;
 

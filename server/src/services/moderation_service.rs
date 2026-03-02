@@ -51,6 +51,13 @@ pub struct CreateBanInput {
 }
 
 #[derive(Debug, Clone)]
+pub struct CreateMessageDeleteInput {
+    pub message_id: String,
+    pub channel_slug: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ListModerationLogInput {
     pub limit: Option<String>,
     pub cursor: Option<String>,
@@ -98,6 +105,19 @@ pub struct KickActionResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct VoiceKickActionResponse {
     pub id: String,
+    pub guild_slug: String,
+    pub channel_slug: String,
+    pub actor_user_id: String,
+    pub target_user_id: String,
+    pub reason: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageDeleteActionResponse {
+    pub id: String,
+    pub message_id: String,
     pub guild_slug: String,
     pub channel_slug: String,
     pub actor_user_id: String,
@@ -388,6 +408,95 @@ pub async fn create_voice_kick(
         id,
         guild_slug: guild.slug,
         channel_slug,
+        actor_user_id,
+        target_user_id,
+        reason,
+        created_at: now_str.clone(),
+        updated_at: now_str,
+    })
+}
+
+pub async fn create_message_delete(
+    pool: &DbPool,
+    actor_user_id: &str,
+    guild_slug: &str,
+    input: CreateMessageDeleteInput,
+) -> Result<MessageDeleteActionResponse, AppError> {
+    let actor_user_id = normalize_id(actor_user_id, "actor_user_id")?;
+    let guild_slug = normalize_slug(guild_slug, "guild_slug")?;
+    let message_id = normalize_id(&input.message_id, "message_id")?;
+    let channel_slug = normalize_slug(&input.channel_slug, "channel_slug")?;
+    let reason = normalize_reason(&input.reason)?;
+
+    let guild = guild::find_guild_by_slug(pool, &guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    permissions::require_guild_permission(
+        pool,
+        &guild,
+        &actor_user_id,
+        permissions::MANAGE_MESSAGES,
+        "MANAGE_MESSAGES",
+    )
+    .await?;
+
+    let channel = channel::find_channel_by_slug(pool, &guild.id, &channel_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let existing = message::find_message_by_id(pool, &message_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if existing.guild_id != guild.id || existing.channel_id != channel.id {
+        return Err(AppError::NotFound);
+    }
+    let target_user_id = existing.author_user_id;
+
+    if target_user_id == guild.owner_id && actor_user_id != guild.owner_id {
+        return Err(AppError::Forbidden(
+            "Cannot delete messages from the guild owner".to_string(),
+        ));
+    }
+    if actor_user_id != guild.owner_id && actor_user_id != target_user_id {
+        let target_is_member =
+            guild_member::is_guild_member(pool, &guild.id, &target_user_id).await?;
+        if target_is_member
+            && !permissions::actor_outranks_target_member(
+                pool,
+                &guild,
+                &actor_user_id,
+                &target_user_id,
+            )
+            .await?
+        {
+            return Err(AppError::Forbidden(
+                "You can only delete messages from members below your highest role".to_string(),
+            ));
+        }
+    }
+
+    let now_str = Utc::now().to_rfc3339();
+    let id = Uuid::new_v4().to_string();
+    let applied = moderation::apply_message_delete_action(
+        pool,
+        &id,
+        &guild.id,
+        &channel.id,
+        &message_id,
+        &actor_user_id,
+        &target_user_id,
+        &reason,
+        &now_str,
+    )
+    .await?;
+    if !applied {
+        return Err(AppError::NotFound);
+    }
+
+    Ok(MessageDeleteActionResponse {
+        id,
+        message_id,
+        guild_slug: guild.slug,
+        channel_slug: channel.slug,
         actor_user_id,
         target_user_id,
         reason,
@@ -1102,8 +1211,11 @@ mod tests {
         .bind("#3366ff")
         .bind(10_i64)
         .bind(
-            (permissions::MUTE_MEMBERS | permissions::KICK_MEMBERS | permissions::BAN_MEMBERS)
-                as i64,
+            (permissions::MUTE_MEMBERS
+                | permissions::KICK_MEMBERS
+                | permissions::BAN_MEMBERS
+                | permissions::VIEW_MOD_LOG
+                | permissions::MANAGE_MESSAGES) as i64,
         )
         .bind(0_i64)
         .bind(now)
@@ -1251,7 +1363,8 @@ mod tests {
             (permissions::MUTE_MEMBERS
                 | permissions::KICK_MEMBERS
                 | permissions::BAN_MEMBERS
-                | permissions::VIEW_MOD_LOG) as i64,
+                | permissions::VIEW_MOD_LOG
+                | permissions::MANAGE_MESSAGES) as i64,
         )
         .bind("role-moderator")
         .execute(sqlite_pool)
@@ -1663,6 +1776,155 @@ mod tests {
         assert_eq!(duration_seconds, None);
         assert_eq!(expires_at, None);
         assert_eq!(is_active, 0);
+    }
+
+    #[tokio::test]
+    async fn create_message_delete_enforces_permission_hierarchy_and_reason_requirements() {
+        let pool = setup_service_pool().await;
+        seed_voice_channels(&pool).await;
+
+        message::insert_message(
+            &pool,
+            "message-high-target",
+            "guild-id",
+            "channel-general",
+            "high-target-user-id",
+            "high role message",
+            false,
+            "2026-03-01T00:01:00Z",
+            "2026-03-01T00:01:00Z",
+        )
+        .await
+        .unwrap();
+
+        let missing_permission = create_message_delete(
+            &pool,
+            "peer-user-id",
+            "test-guild",
+            CreateMessageDeleteInput {
+                message_id: "message-high-target".to_string(),
+                channel_slug: "general".to_string(),
+                reason: "reason".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(missing_permission, AppError::Forbidden(_)));
+
+        let hierarchy_error = create_message_delete(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateMessageDeleteInput {
+                message_id: "message-high-target".to_string(),
+                channel_slug: "general".to_string(),
+                reason: "reason".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(hierarchy_error, AppError::Forbidden(_)));
+
+        let reason_error = create_message_delete(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateMessageDeleteInput {
+                message_id: "message-high-target".to_string(),
+                channel_slug: "general".to_string(),
+                reason: "   ".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(reason_error, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn create_message_delete_soft_deletes_message_and_records_audit_action() {
+        let pool = setup_service_pool().await;
+        seed_voice_channels(&pool).await;
+
+        message::insert_message(
+            &pool,
+            "message-target",
+            "guild-id",
+            "channel-general",
+            "target-user-id",
+            "remove this",
+            false,
+            "2026-03-01T00:01:00Z",
+            "2026-03-01T00:01:00Z",
+        )
+        .await
+        .unwrap();
+
+        let created = create_message_delete(
+            &pool,
+            "owner-user-id",
+            "test-guild",
+            CreateMessageDeleteInput {
+                message_id: "message-target".to_string(),
+                channel_slug: "general".to_string(),
+                reason: "policy violation".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(created.message_id, "message-target");
+        assert_eq!(created.guild_slug, "test-guild");
+        assert_eq!(created.channel_slug, "general");
+        assert_eq!(created.target_user_id, "target-user-id");
+        assert_eq!(created.reason, "policy violation");
+        assert!(
+            message::find_message_by_id(&pool, "message-target")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let DbPool::Sqlite(sqlite_pool) = &pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+        let deleted_metadata = sqlx::query_as::<
+            _,
+            (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            "SELECT deleted_at, deleted_by_user_id, deleted_reason, deleted_moderation_action_id
+             FROM messages
+             WHERE id = ?1",
+        )
+        .bind("message-target")
+        .fetch_one(sqlite_pool)
+        .await
+        .unwrap();
+        assert!(deleted_metadata.0.is_some());
+        assert_eq!(deleted_metadata.1, Some("owner-user-id".to_string()));
+        assert_eq!(deleted_metadata.2, Some("policy violation".to_string()));
+        assert_eq!(deleted_metadata.3, Some(created.id.clone()));
+
+        let action_row = sqlx::query_as::<_, (String, String, String, i64)>(
+            "SELECT action_type, actor_user_id, target_user_id, is_active
+             FROM moderation_actions
+             WHERE id = ?1",
+        )
+        .bind(&created.id)
+        .fetch_one(sqlite_pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            action_row.0,
+            moderation::MODERATION_ACTION_TYPE_MESSAGE_DELETE
+        );
+        assert_eq!(action_row.1, "owner-user-id");
+        assert_eq!(action_row.2, "target-user-id");
+        assert_eq!(action_row.3, 0);
     }
 
     #[tokio::test]

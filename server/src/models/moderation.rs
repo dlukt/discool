@@ -138,6 +138,158 @@ pub async fn insert_moderation_action(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_message_delete_action(
+    pool: &DbPool,
+    id: &str,
+    guild_id: &str,
+    channel_id: &str,
+    message_id: &str,
+    actor_user_id: &str,
+    target_user_id: &str,
+    reason: &str,
+    now: &str,
+) -> Result<bool, AppError> {
+    match pool {
+        DbPool::Postgres(pool) => {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+            sqlx::query(
+                "INSERT INTO moderation_actions (
+                        id,
+                        action_type,
+                        guild_id,
+                        actor_user_id,
+                        target_user_id,
+                        reason,
+                        duration_seconds,
+                        expires_at,
+                        is_active,
+                        created_at,
+                        updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            )
+            .bind(id)
+            .bind(MODERATION_ACTION_TYPE_MESSAGE_DELETE)
+            .bind(guild_id)
+            .bind(actor_user_id)
+            .bind(target_user_id)
+            .bind(reason)
+            .bind(None::<i64>)
+            .bind(None::<&str>)
+            .bind(0_i64)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?;
+
+            let updated_rows = sqlx::query(
+                "UPDATE messages
+                     SET deleted_at = $1,
+                         deleted_by_user_id = $2,
+                         deleted_reason = $3,
+                         deleted_moderation_action_id = $4,
+                         updated_at = $5
+                     WHERE id = $6
+                       AND guild_id = $7
+                       AND channel_id = $8
+                       AND deleted_at IS NULL",
+            )
+            .bind(now)
+            .bind(actor_user_id)
+            .bind(reason)
+            .bind(id)
+            .bind(now)
+            .bind(message_id)
+            .bind(guild_id)
+            .bind(channel_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?
+            .rows_affected();
+            if updated_rows != 1 {
+                return Ok(false);
+            }
+
+            tx.commit()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+        }
+        DbPool::Sqlite(pool) => {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+            sqlx::query(
+                "INSERT INTO moderation_actions (
+                        id,
+                        action_type,
+                        guild_id,
+                        actor_user_id,
+                        target_user_id,
+                        reason,
+                        duration_seconds,
+                        expires_at,
+                        is_active,
+                        created_at,
+                        updated_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            )
+            .bind(id)
+            .bind(MODERATION_ACTION_TYPE_MESSAGE_DELETE)
+            .bind(guild_id)
+            .bind(actor_user_id)
+            .bind(target_user_id)
+            .bind(reason)
+            .bind(None::<i64>)
+            .bind(None::<&str>)
+            .bind(0_i64)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?;
+
+            let updated_rows = sqlx::query(
+                "UPDATE messages
+                     SET deleted_at = ?1,
+                         deleted_by_user_id = ?2,
+                         deleted_reason = ?3,
+                         deleted_moderation_action_id = ?4,
+                         updated_at = ?5
+                     WHERE id = ?6
+                       AND guild_id = ?7
+                       AND channel_id = ?8
+                       AND deleted_at IS NULL",
+            )
+            .bind(now)
+            .bind(actor_user_id)
+            .bind(reason)
+            .bind(id)
+            .bind(now)
+            .bind(message_id)
+            .bind(guild_id)
+            .bind(channel_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| AppError::Internal(err.to_string()))?
+            .rows_affected();
+            if updated_rows != 1 {
+                return Ok(false);
+            }
+
+            tx.commit()
+                .await
+                .map_err(|err| AppError::Internal(err.to_string()))?;
+        }
+    }
+
+    Ok(true)
+}
+
 pub async fn find_latest_active_mute_for_target(
     pool: &DbPool,
     guild_id: &str,

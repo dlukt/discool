@@ -26,6 +26,12 @@ export type CreateBanInput = {
   deleteMessageWindow: BanDeleteMessageWindow
 }
 
+export type CreateMessageDeleteInput = {
+  messageId: string
+  channelSlug: string
+  reason: string
+}
+
 export type MuteAction = {
   id: string
   guildSlug: string
@@ -77,6 +83,18 @@ export type BanAction = {
   deleteMessageWindow: BanDeleteMessageWindow
   deleteMessagesWindowSeconds: number | null
   deletedMessagesCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+export type MessageDeleteAction = {
+  id: string
+  messageId: string
+  guildSlug: string
+  channelSlug: string
+  actorUserId: string
+  targetUserId: string
+  reason: string
   createdAt: string
   updatedAt: string
 }
@@ -192,6 +210,23 @@ type BanActionWire = {
   delete_message_window: BanDeleteMessageWindow
   delete_messages_window_seconds?: number
   deleted_messages_count: number
+  created_at: string
+  updated_at: string
+}
+
+type CreateMessageDeleteWire = {
+  channel_slug: string
+  reason: string
+}
+
+type MessageDeleteActionWire = {
+  id: string
+  message_id: string
+  guild_slug: string
+  channel_slug: string
+  actor_user_id: string
+  target_user_id: string
+  reason: string
   created_at: string
   updated_at: string
 }
@@ -338,6 +373,22 @@ function toBanAction(wire: BanActionWire): BanAction {
   }
 }
 
+function toMessageDeleteAction(
+  wire: MessageDeleteActionWire,
+): MessageDeleteAction {
+  return {
+    id: wire.id,
+    messageId: wire.message_id,
+    guildSlug: wire.guild_slug,
+    channelSlug: wire.channel_slug,
+    actorUserId: wire.actor_user_id,
+    targetUserId: wire.target_user_id,
+    reason: wire.reason,
+    createdAt: wire.created_at,
+    updatedAt: wire.updated_at,
+  }
+}
+
 function toModerationLogEntry(
   wire: ModerationLogEntryWire,
 ): ModerationLogEntry {
@@ -380,6 +431,12 @@ function banCreatePath(guildSlug: string): string {
 function voiceKickCreatePath(guildSlug: string): string {
   const guild = normalizePathPart(guildSlug, 'guildSlug')
   return `/api/v1/guilds/${guild}/moderation/voice-kicks`
+}
+
+function messageDeleteCreatePath(guildSlug: string, messageId: string): string {
+  const guild = normalizePathPart(guildSlug, 'guildSlug')
+  const message = normalizePathPart(messageId, 'messageId')
+  return `/api/v1/guilds/${guild}/moderation/messages/${message}/delete`
 }
 
 function moderationLogPath(
@@ -514,6 +571,24 @@ export async function createBan(
     body: JSON.stringify(payload),
   })
   return toBanAction(wire)
+}
+
+export async function createMessageDelete(
+  guildSlug: string,
+  input: CreateMessageDeleteInput,
+): Promise<MessageDeleteAction> {
+  const payload: CreateMessageDeleteWire = {
+    channel_slug: normalizeRequiredText(input.channelSlug, 'channelSlug'),
+    reason: normalizeRequiredText(input.reason, 'reason'),
+  }
+  const wire = await apiFetch<MessageDeleteActionWire>(
+    messageDeleteCreatePath(guildSlug, input.messageId),
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
+  )
+  return toMessageDeleteAction(wire)
 }
 
 export async function fetchModerationLog(

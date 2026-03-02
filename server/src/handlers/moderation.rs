@@ -13,8 +13,8 @@ use crate::{
     AppError, AppState,
     middleware::auth::AuthenticatedUser,
     services::moderation_service::{
-        self, CreateBanInput, CreateKickInput, CreateMuteInput, CreateVoiceKickInput,
-        ListModerationLogInput,
+        self, CreateBanInput, CreateKickInput, CreateMessageDeleteInput, CreateMuteInput,
+        CreateVoiceKickInput, ListModerationLogInput,
     },
     ws::{protocol::ServerOp, registry},
 };
@@ -47,6 +47,12 @@ pub struct CreateBanRequest {
     pub target_user_id: Option<String>,
     pub reason: Option<String>,
     pub delete_message_window: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateMessageDeleteRequest {
+    pub channel_slug: Option<String>,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,6 +148,31 @@ pub async fn create_ban(
         &created.target_user_id,
         "ban",
         true,
+    );
+    Ok((StatusCode::CREATED, Json(json!({ "data": created }))).into_response())
+}
+
+pub async fn create_message_delete(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path((guild_slug, message_id)): Path<(String, String)>,
+    payload: Result<Json<CreateMessageDeleteRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+    let input = to_create_message_delete_input(req, message_id)?;
+    let created =
+        moderation_service::create_message_delete(&state.pool, &user.user_id, &guild_slug, input)
+            .await?;
+    registry::broadcast_to_channel(
+        &created.guild_slug,
+        &created.channel_slug,
+        ServerOp::MessageDelete,
+        &json!({
+            "id": created.message_id.clone(),
+            "guild_slug": created.guild_slug.clone(),
+            "channel_slug": created.channel_slug.clone(),
+        }),
     );
     Ok((StatusCode::CREATED, Json(json!({ "data": created }))).into_response())
 }
@@ -309,6 +340,34 @@ fn to_create_ban_input(req: CreateBanRequest) -> Result<CreateBanInput, AppError
     })
 }
 
+fn to_create_message_delete_input(
+    req: CreateMessageDeleteRequest,
+    message_id: String,
+) -> Result<CreateMessageDeleteInput, AppError> {
+    let normalized_message_id = message_id.trim();
+    if normalized_message_id.is_empty() {
+        return Err(AppError::ValidationError(
+            "message_id is required".to_string(),
+        ));
+    }
+    let channel_slug = req.channel_slug.as_deref().unwrap_or("").trim();
+    if channel_slug.is_empty() {
+        return Err(AppError::ValidationError(
+            "channel_slug is required".to_string(),
+        ));
+    }
+    let reason = req.reason.as_deref().unwrap_or("").trim();
+    if reason.is_empty() {
+        return Err(AppError::ValidationError("reason is required".to_string()));
+    }
+
+    Ok(CreateMessageDeleteInput {
+        message_id: normalized_message_id.to_string(),
+        channel_slug: channel_slug.to_string(),
+        reason: reason.to_string(),
+    })
+}
+
 fn emit_guild_member_update(
     guild_slug: &str,
     actor_user_id: &str,
@@ -458,7 +517,9 @@ mod tests {
                     .bind(
                         (crate::permissions::MUTE_MEMBERS
                             | crate::permissions::KICK_MEMBERS
-                            | crate::permissions::BAN_MEMBERS)
+                            | crate::permissions::BAN_MEMBERS
+                            | crate::permissions::VIEW_MOD_LOG
+                            | crate::permissions::MANAGE_MESSAGES)
                             as i64,
                     )
                     .bind(0_i64)
@@ -557,7 +618,9 @@ mod tests {
                     .bind(
                         (crate::permissions::MUTE_MEMBERS
                             | crate::permissions::KICK_MEMBERS
-                            | crate::permissions::BAN_MEMBERS)
+                            | crate::permissions::BAN_MEMBERS
+                            | crate::permissions::VIEW_MOD_LOG
+                            | crate::permissions::MANAGE_MESSAGES)
                             as i64,
                     )
                     .bind(0_i64)
@@ -609,6 +672,76 @@ mod tests {
                 .bind("Voice Room")
                 .bind("voice")
                 .bind(1_i64)
+                .bind(created_at)
+                .bind(created_at)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+    }
+
+    async fn seed_text_channel_message(state: &AppState, message_id: &str, author_user_id: &str) {
+        let created_at = "2026-03-01T00:00:00Z";
+        match &state.pool {
+            crate::db::DbPool::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO channels (id, guild_id, slug, name, channel_type, position, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                )
+                .bind("text-channel-id")
+                .bind("guild-id")
+                .bind("general")
+                .bind("general")
+                .bind("text")
+                .bind(0_i64)
+                .bind(created_at)
+                .bind(created_at)
+                .execute(pool)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "INSERT INTO messages (id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                )
+                .bind(message_id)
+                .bind("guild-id")
+                .bind("text-channel-id")
+                .bind(author_user_id)
+                .bind("message")
+                .bind(0_i64)
+                .bind(created_at)
+                .bind(created_at)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            crate::db::DbPool::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO channels (id, guild_id, slug, name, channel_type, position, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                )
+                .bind("text-channel-id")
+                .bind("guild-id")
+                .bind("general")
+                .bind("general")
+                .bind("text")
+                .bind(0_i64)
+                .bind(created_at)
+                .bind(created_at)
+                .execute(pool)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "INSERT INTO messages (id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                )
+                .bind(message_id)
+                .bind("guild-id")
+                .bind("text-channel-id")
+                .bind(author_user_id)
+                .bind("message")
+                .bind(0_i64)
                 .bind(created_at)
                 .bind(created_at)
                 .execute(pool)
@@ -718,6 +851,36 @@ mod tests {
             delete_message_window: Some("  ".to_string()),
         });
         assert!(matches!(missing_window, Err(AppError::ValidationError(_))));
+    }
+
+    #[test]
+    fn to_create_message_delete_input_validates_required_fields() {
+        let missing_message = to_create_message_delete_input(
+            CreateMessageDeleteRequest {
+                channel_slug: Some("general".to_string()),
+                reason: Some("reason".to_string()),
+            },
+            "   ".to_string(),
+        );
+        assert!(matches!(missing_message, Err(AppError::ValidationError(_))));
+
+        let missing_channel = to_create_message_delete_input(
+            CreateMessageDeleteRequest {
+                channel_slug: Some("   ".to_string()),
+                reason: Some("reason".to_string()),
+            },
+            "message-id".to_string(),
+        );
+        assert!(matches!(missing_channel, Err(AppError::ValidationError(_))));
+
+        let missing_reason = to_create_message_delete_input(
+            CreateMessageDeleteRequest {
+                channel_slug: Some("general".to_string()),
+                reason: Some("   ".to_string()),
+            },
+            "message-id".to_string(),
+        );
+        assert!(matches!(missing_reason, Err(AppError::ValidationError(_))));
     }
 
     #[tokio::test]
@@ -875,6 +1038,41 @@ mod tests {
             .unwrap();
         let removed: Value = serde_json::from_slice(&delete_body).unwrap();
         assert_eq!(removed["data"]["id"], Value::String(ban_id));
+    }
+
+    #[tokio::test]
+    async fn create_message_delete_returns_data_envelope() {
+        let state = test_state().await;
+        seed_guild_fixture(&state).await;
+        seed_text_channel_message(&state, "message-delete-1", "target-user-id").await;
+        let response = create_message_delete(
+            State(state),
+            mod_user(),
+            Path(("test-guild".to_string(), "message-delete-1".to_string())),
+            Ok(Json(CreateMessageDeleteRequest {
+                channel_slug: Some("general".to_string()),
+                reason: Some("policy violation".to_string()),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert!(payload.get("data").is_some());
+        assert_eq!(
+            payload["data"]["message_id"],
+            Value::String("message-delete-1".to_string())
+        );
+        assert_eq!(
+            payload["data"]["channel_slug"],
+            Value::String("general".to_string())
+        );
+        assert_eq!(
+            payload["data"]["reason"],
+            Value::String("policy violation".to_string())
+        );
     }
 
     #[tokio::test]
