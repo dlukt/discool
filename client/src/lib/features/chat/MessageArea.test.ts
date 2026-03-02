@@ -1090,6 +1090,22 @@ describe('MessageArea', () => {
     expect(voiceState.disconnect).toHaveBeenCalledTimes(1)
   })
 
+  it('can suppress inline voice controls for shell-managed mobile controls', () => {
+    voiceState.statusForChannel.mockReturnValue('connected')
+    const { queryByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+      showVoiceControls: false,
+    })
+
+    expect(queryByTestId('voice-bar')).not.toBeInTheDocument()
+    expect(queryByTestId('voice-panel')).not.toBeInTheDocument()
+  })
+
   it('keeps VoiceBar visible with reconnecting and connection-lost states', async () => {
     voiceState.statusForChannel.mockReturnValue('retrying')
     voiceState.statusMessageForChannel.mockReturnValue('Reconnecting...')

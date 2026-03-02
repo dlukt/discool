@@ -7,6 +7,7 @@ import VoiceParticipantRow from './VoiceParticipant.svelte'
 type Props = {
   channelName: string
   participants: VoiceParticipant[]
+  variant?: 'default' | 'mobile-sheet'
   canModerateVoiceParticipants?: boolean
   onParticipantVolumeChange?: (
     participantUserId: string,
@@ -17,6 +18,7 @@ type Props = {
 let {
   channelName,
   participants,
+  variant = 'default',
   canModerateVoiceParticipants = false,
   onParticipantVolumeChange,
 }: Props = $props()
@@ -24,11 +26,13 @@ let {
 let occupancyAnnouncement = $derived(
   `${participants.length} ${participants.length === 1 ? 'user' : 'users'} in voice channel ${channelName}`,
 )
+let isMobileSheetVariant = $derived(variant === 'mobile-sheet')
 </script>
 
 <section
-  class="rounded-md border border-border bg-card/80 p-3"
+  class={`rounded-md border border-border bg-card/80 p-3 ${isMobileSheetVariant ? 'max-h-[40vh] overflow-y-auto' : ''}`}
   data-testid="voice-panel"
+  data-variant={variant}
   aria-label={`Voice participants for ${channelName}`}
 >
   <p

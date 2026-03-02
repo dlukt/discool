@@ -38,6 +38,7 @@ type Props = {
   displayName: string
   isAdmin: boolean
   showRecoveryNudge: boolean
+  showVoiceControls?: boolean
   onOpenSettings?: () => void | Promise<void>
   onDismissRecoveryNudge?: () => void | Promise<void>
 }
@@ -77,6 +78,7 @@ let {
   displayName,
   isAdmin,
   showRecoveryNudge,
+  showVoiceControls = true,
   onOpenSettings,
   onDismissRecoveryNudge,
 }: Props = $props()
@@ -108,8 +110,10 @@ let voiceConnectionState = $derived(
     : 'idle',
 )
 let participantsOpen = $state(false)
+let voiceControlsEnabled = $derived(showVoiceControls)
 let showVoiceBar = $derived(
-  isChannelMode &&
+  voiceControlsEnabled &&
+    isChannelMode &&
     (voiceConnectionState === 'connected' ||
       voiceConnectionState === 'retrying' ||
       (voiceConnectionState === 'failed' &&

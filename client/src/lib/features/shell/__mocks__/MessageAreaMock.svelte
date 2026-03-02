@@ -8,6 +8,7 @@ type Props = {
   displayName: string
   isAdmin: boolean
   showRecoveryNudge: boolean
+  showVoiceControls?: boolean
 }
 
 let { mode }: Props = $props()

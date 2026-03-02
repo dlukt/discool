@@ -25,7 +25,14 @@ import { blockState } from '$lib/features/identity/blockStore.svelte'
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import MemberList from '$lib/features/members/MemberList.svelte'
 import { presenceState } from '$lib/features/members/presenceStore.svelte'
-import { voiceState } from '$lib/features/voice/voiceStore.svelte'
+// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
+import VoiceBar from '$lib/features/voice/VoiceBar.svelte'
+// biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
+import VoicePanel from '$lib/features/voice/VoicePanel.svelte'
+import {
+  VOICE_CONNECTION_LOST_MESSAGE,
+  voiceState,
+} from '$lib/features/voice/voiceStore.svelte'
 import { wsClient } from '$lib/ws/client'
 
 type ShellMode = 'home' | 'channel' | 'dm' | 'settings' | 'admin'
@@ -87,6 +94,8 @@ let shellRecoveryNudge = $derived(showRecoveryNudge)
 let viewport = $state<ViewportMode>('desktop')
 let tabletMembersVisible = $state(false)
 let mobilePanel = $state<MobilePanel>('messages')
+let mobileVoiceSheetOpen = $state(false)
+let mobileVoiceSheetHandleStartY = $state<number | null>(null)
 let guildSettingsOpen = $state(false)
 let inviteModalOpen = $state(false)
 let mainContent = $state<HTMLElement | null>(null)
@@ -530,6 +539,41 @@ let params = $derived(
 let activeGuild = $derived(params.guild ?? 'lobby')
 let activeChannel = $derived(params.channel ?? 'general')
 let activeDm = $derived(params.dm ?? null)
+let voiceStatusMessage = $derived(
+  shellMode === 'channel'
+    ? voiceState.statusMessageForChannel(activeGuild, activeChannel)
+    : null,
+)
+let voiceConnectionState = $derived(
+  shellMode === 'channel'
+    ? voiceState.statusForChannel(activeGuild, activeChannel)
+    : 'idle',
+)
+let showMobileVoiceControls = $derived(
+  viewport === 'mobile' &&
+    shellMode === 'channel' &&
+    (voiceConnectionState === 'connected' ||
+      voiceConnectionState === 'retrying' ||
+      (voiceConnectionState === 'failed' &&
+        voiceStatusMessage === VOICE_CONNECTION_LOST_MESSAGE)),
+)
+let activeVoiceParticipants = $derived(
+  showMobileVoiceControls ? voiceState.activeChannelParticipants() : [],
+)
+let mobileVoiceQuality = $derived.by(() => {
+  if (voiceConnectionState === 'connected') return 'green'
+  if (
+    voiceConnectionState === 'connecting' ||
+    voiceConnectionState === 'retrying'
+  )
+    return 'yellow'
+  return 'red'
+})
+let mobileVoiceQualityLabel = $derived.by(() => {
+  if (mobileVoiceQuality === 'green') return 'Good'
+  if (mobileVoiceQuality === 'yellow') return 'Limited'
+  return 'Poor'
+})
 let canOpenGuildSettings = $derived(shellMode === 'channel')
 let canOpenInvites = $derived(shellMode === 'channel')
 let quickQueryNormalized = $derived(
@@ -701,9 +745,44 @@ let quickSwitcherGroupedResults = $derived.by(() => {
 let quickSwitcherFlatResults = $derived.by(() =>
   quickSwitcherGroupedResults.flatMap((group) => group.results),
 )
+const MOBILE_VOICE_SHEET_CLOSE_SWIPE_PX = 40
 
 function openMobilePanel(panel: MobilePanel) {
   mobilePanel = panel
+}
+
+function openMobileVoiceSheet() {
+  if (!showMobileVoiceControls) return
+  mobileVoiceSheetOpen = true
+}
+
+function closeMobileVoiceSheet() {
+  mobileVoiceSheetOpen = false
+  mobileVoiceSheetHandleStartY = null
+}
+
+function handleMobileVoiceSheetKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape') return
+  event.preventDefault()
+  closeMobileVoiceSheet()
+}
+
+function handleMobileVoiceSheetHandlePointerDown(event: PointerEvent) {
+  if (event.pointerType === 'mouse') return
+  mobileVoiceSheetHandleStartY = event.clientY
+}
+
+function handleMobileVoiceSheetHandlePointerCancel() {
+  mobileVoiceSheetHandleStartY = null
+}
+
+function handleMobileVoiceSheetHandlePointerUp(event: PointerEvent) {
+  if (mobileVoiceSheetHandleStartY === null) return
+  const swipeDelta = event.clientY - mobileVoiceSheetHandleStartY
+  mobileVoiceSheetHandleStartY = null
+  if (swipeDelta >= MOBILE_VOICE_SHEET_CLOSE_SWIPE_PX) {
+    closeMobileVoiceSheet()
+  }
 }
 
 function toggleTabletMembers() {
@@ -749,6 +828,11 @@ $effect(() => {
 
 $effect(() => {
   if (viewport !== 'mobile') mobilePanel = 'messages'
+})
+
+$effect(() => {
+  if (showMobileVoiceControls) return
+  mobileVoiceSheetOpen = false
 })
 
 $effect(() => {
@@ -904,32 +988,57 @@ $effect(() => {
       id="main-content"
       tabindex="-1"
       bind:this={mainContent}
-      class="flex-1 overflow-auto outline-none"
+      class="flex min-h-0 flex-1 flex-col overflow-hidden outline-none"
     >
-      {#if activeMobilePanel === 'guilds'}
-        <GuildRail
-          activeGuild={activeGuild}
-          activeChannel={activeChannel}
-          activeDm={activeDm}
-          mode={shellMode}
-        />
-      {:else if activeMobilePanel === 'channels'}
-        <ChannelList activeGuild={activeGuild} activeChannel={activeChannel} />
-      {:else if activeMobilePanel === 'members'}
-        <MemberList activeGuild={activeGuild} />
-      {:else}
-        <MessageArea
-          mode={shellMode}
-          activeGuild={activeGuild}
-          activeChannel={activeChannel}
-          activeDm={activeDm}
-          displayName={shellDisplayName}
-          isAdmin={canAccessAdmin}
-          showRecoveryNudge={shellRecoveryNudge}
-          onOpenSettings={handleOpenSettings}
-          onDismissRecoveryNudge={handleDismissRecoveryNudge}
-        />
+      {#if showMobileVoiceControls}
+        <div
+          class="border-b border-border px-2 pb-2 pt-[calc(env(safe-area-inset-top,0px)+0.5rem)]"
+          data-testid="mobile-voice-bar-container"
+        >
+          <VoiceBar
+            guildName={activeGuild}
+            channelName={activeChannel}
+            connectionState={voiceConnectionState}
+            variant="mobile"
+            isMuted={voiceState.isMuted}
+            isDeafened={voiceState.isDeafened}
+            isParticipantsOpen={mobileVoiceSheetOpen}
+            onToggleParticipants={openMobileVoiceSheet}
+            onToggleMute={() => voiceState.toggleMute()}
+            onToggleDeafen={() => voiceState.toggleDeafen()}
+            onDisconnect={() => voiceState.disconnect()}
+            onOpenSheet={openMobileVoiceSheet}
+          />
+        </div>
       {/if}
+
+      <div class="min-h-0 flex-1 overflow-auto">
+        {#if activeMobilePanel === 'guilds'}
+          <GuildRail
+            activeGuild={activeGuild}
+            activeChannel={activeChannel}
+            activeDm={activeDm}
+            mode={shellMode}
+          />
+        {:else if activeMobilePanel === 'channels'}
+          <ChannelList activeGuild={activeGuild} activeChannel={activeChannel} />
+        {:else if activeMobilePanel === 'members'}
+          <MemberList activeGuild={activeGuild} />
+        {:else}
+          <MessageArea
+            mode={shellMode}
+            activeGuild={activeGuild}
+            activeChannel={activeChannel}
+            activeDm={activeDm}
+            displayName={shellDisplayName}
+            isAdmin={canAccessAdmin}
+            showRecoveryNudge={shellRecoveryNudge}
+            showVoiceControls={false}
+            onOpenSettings={handleOpenSettings}
+            onDismissRecoveryNudge={handleDismissRecoveryNudge}
+          />
+        {/if}
+      </div>
     </main>
 
     <nav
@@ -969,6 +1078,114 @@ $effect(() => {
         Members
       </button>
     </nav>
+
+    {#if showMobileVoiceControls && mobileVoiceSheetOpen}
+      <div
+        class="fixed inset-0 z-30 bg-black/40"
+        data-testid="mobile-voice-sheet-backdrop"
+        role="presentation"
+        onpointerdown={closeMobileVoiceSheet}
+      ></div>
+      <div
+        class="fixed inset-x-0 bottom-0 z-40 max-h-[85vh] overflow-hidden rounded-t-2xl border border-border bg-card shadow-2xl"
+        role="dialog"
+        tabindex="-1"
+        aria-modal="true"
+        aria-label="Mobile voice controls"
+        data-testid="mobile-voice-sheet"
+        onkeydown={handleMobileVoiceSheetKeydown}
+      >
+        <div class="space-y-4 px-4 pb-[calc(env(safe-area-inset-bottom,0px)+1rem)] pt-3">
+          <div class="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              class="mx-auto h-12 w-12 touch-manipulation rounded-full text-muted-foreground"
+              aria-label="Swipe down to close voice controls"
+              data-testid="mobile-voice-sheet-handle"
+              onpointerdown={handleMobileVoiceSheetHandlePointerDown}
+              onpointerup={handleMobileVoiceSheetHandlePointerUp}
+              onpointercancel={handleMobileVoiceSheetHandlePointerCancel}
+            >
+              <span class="mx-auto block h-1.5 w-12 rounded-full bg-muted"></span>
+            </button>
+            <button
+              type="button"
+              class="inline-flex h-12 w-12 items-center justify-center rounded-md border border-border bg-background text-foreground hover:bg-muted"
+              aria-label="Close voice controls"
+              data-testid="mobile-voice-sheet-close"
+              onclick={closeMobileVoiceSheet}
+            >
+              ✕
+            </button>
+          </div>
+
+          <div class="flex items-center justify-between gap-2">
+            <p class="truncate text-sm font-semibold text-foreground">
+              #{activeChannel}
+            </p>
+            <div class="flex items-center gap-2 text-xs text-muted-foreground">
+              <span
+                class={`h-2.5 w-2.5 rounded-full ${mobileVoiceQuality === 'green' ? 'bg-emerald-500' : mobileVoiceQuality === 'yellow' ? 'bg-amber-400' : 'bg-destructive'}`}
+                data-testid="mobile-voice-sheet-quality-dot"
+                data-quality={mobileVoiceQuality}
+              ></span>
+              <span data-testid="mobile-voice-sheet-quality-label">
+                {mobileVoiceQualityLabel}
+              </span>
+            </div>
+          </div>
+
+          {#if voiceStatusMessage}
+            <p
+              class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+              data-testid="mobile-voice-sheet-status"
+              aria-live={voiceConnectionState === 'failed' ? 'assertive' : 'polite'}
+            >
+              {voiceStatusMessage}
+            </p>
+          {/if}
+
+          <div class="flex items-center justify-center gap-2">
+            <button
+              type="button"
+              class={`inline-flex h-16 w-16 items-center justify-center rounded-full border text-2xl hover:bg-muted ${voiceState.isMuted ? 'border-amber-500/40 bg-amber-500/10 text-amber-200' : 'border-border bg-background text-foreground'}`}
+              aria-label={voiceState.isMuted ? 'Unmute microphone' : 'Mute microphone'}
+              data-testid="mobile-voice-sheet-mute"
+              onclick={() => voiceState.toggleMute()}
+            >
+              {voiceState.isMuted ? '🎤✕' : '🎤'}
+            </button>
+            <button
+              type="button"
+              class={`inline-flex h-16 w-16 items-center justify-center rounded-full border text-2xl hover:bg-muted ${voiceState.isDeafened ? 'border-amber-500/40 bg-amber-500/10 text-amber-200' : 'border-border bg-background text-foreground'}`}
+              aria-label={voiceState.isDeafened ? 'Undeafen audio' : 'Deafen audio'}
+              data-testid="mobile-voice-sheet-deafen"
+              onclick={() => voiceState.toggleDeafen()}
+            >
+              {voiceState.isDeafened ? '🎧✕' : '🎧'}
+            </button>
+            <button
+              type="button"
+              class="inline-flex h-16 w-16 items-center justify-center rounded-full border border-fire/40 bg-fire text-2xl text-fire-foreground hover:opacity-90"
+              aria-label="Disconnect from voice channel"
+              data-testid="mobile-voice-sheet-disconnect"
+              onclick={() => voiceState.disconnect()}
+            >
+              📞
+            </button>
+          </div>
+
+          <VoicePanel
+            channelName={activeChannel}
+            participants={activeVoiceParticipants}
+            variant="mobile-sheet"
+            onParticipantVolumeChange={(participantUserId, volumePercent) => {
+              voiceState.setParticipantVolume(participantUserId, volumePercent)
+            }}
+          />
+        </div>
+      </div>
+    {/if}
   </div>
 {:else}
   <div class="relative flex min-h-screen bg-background">

@@ -31,6 +31,38 @@ const { voiceState } = vi.hoisted(() => ({
       | 'disconnected'
       | 'retrying'
       | 'failed',
+    statusMessageForChannel: vi.fn<
+      (guildSlug: string, channelSlug: string) => string | null
+    >(() => null),
+    statusForChannel: vi.fn<
+      (
+        guildSlug: string,
+        channelSlug: string,
+      ) =>
+        | 'idle'
+        | 'connecting'
+        | 'connected'
+        | 'disconnected'
+        | 'retrying'
+        | 'failed'
+    >(() => 'connected'),
+    activeChannelParticipants: vi.fn<
+      () => Array<{
+        userId: string
+        username: string
+        displayName: string | null
+        avatarColor: string | null
+        audioStreamId: string | null
+        isMuted: boolean
+        isDeafened: boolean
+        isSpeaking: boolean
+        volumePercent: number
+        volumeScalar: number
+      }>
+    >(() => []),
+    setParticipantVolume: vi.fn(),
+    isMuted: false,
+    isDeafened: false,
     activateVoiceChannel: vi.fn(),
     clearActiveChannel: vi.fn(),
     toggleMute: vi.fn(),
@@ -448,6 +480,15 @@ describe('ShellRoute', () => {
     blockState.isBlocked.mockReset()
     blockState.isBlocked.mockReturnValue(false)
     voiceState.status = 'connected'
+    voiceState.statusMessageForChannel.mockReset()
+    voiceState.statusMessageForChannel.mockReturnValue(null)
+    voiceState.statusForChannel.mockReset()
+    voiceState.statusForChannel.mockImplementation(() => voiceState.status)
+    voiceState.activeChannelParticipants.mockReset()
+    voiceState.activeChannelParticipants.mockReturnValue([])
+    voiceState.setParticipantVolume.mockClear()
+    voiceState.isMuted = false
+    voiceState.isDeafened = false
     voiceState.activateVoiceChannel.mockClear()
     voiceState.clearActiveChannel.mockClear()
     voiceState.toggleMute.mockClear()
@@ -505,6 +546,59 @@ describe('ShellRoute', () => {
     await fireEvent.click(getByRole('button', { name: 'Members' }))
     expect(queryByRole('heading', { name: 'Messages' })).not.toBeInTheDocument()
     expect(getByRole('heading', { name: 'Members' })).toBeInTheDocument()
+  })
+
+  it('keeps mobile voice controls available while switching panels', async () => {
+    setViewport(600)
+    const props = buildProps()
+    const { getByRole, getByTestId } = render(ShellRoute, props)
+
+    expect(getByTestId('mobile-voice-bar-container')).toBeInTheDocument()
+
+    await fireEvent.click(getByRole('button', { name: 'Members' }))
+    expect(getByRole('heading', { name: 'Members' })).toBeInTheDocument()
+    expect(getByTestId('mobile-voice-bar-container')).toBeInTheDocument()
+  })
+
+  it('opens and dismisses the mobile voice sheet with touch-safe controls', async () => {
+    setViewport(600)
+    voiceState.activeChannelParticipants.mockReturnValue([
+      {
+        userId: 'user-2',
+        username: 'bob',
+        displayName: 'Bob',
+        avatarColor: '#3366ff',
+        audioStreamId: 'stream-2',
+        isMuted: false,
+        isDeafened: false,
+        isSpeaking: false,
+        volumePercent: 100,
+        volumeScalar: 1,
+      },
+    ])
+    const props = buildProps()
+    const { getByTestId, queryByTestId } = render(ShellRoute, props)
+
+    expect(queryByTestId('mobile-voice-sheet')).not.toBeInTheDocument()
+
+    await fireEvent.click(getByTestId('voice-bar-open-sheet'))
+    expect(getByTestId('mobile-voice-sheet')).toBeInTheDocument()
+    expect(getByTestId('mobile-voice-sheet-quality-dot')).toHaveAttribute(
+      'data-quality',
+      'green',
+    )
+
+    await fireEvent.click(getByTestId('mobile-voice-sheet-mute'))
+    await fireEvent.click(getByTestId('mobile-voice-sheet-deafen'))
+    await fireEvent.click(getByTestId('mobile-voice-sheet-disconnect'))
+    expect(voiceState.toggleMute).toHaveBeenCalledTimes(1)
+    expect(voiceState.toggleDeafen).toHaveBeenCalledTimes(1)
+    expect(voiceState.disconnect).toHaveBeenCalledTimes(1)
+
+    await fireEvent.pointerDown(getByTestId('mobile-voice-sheet-backdrop'))
+    await waitFor(() => {
+      expect(queryByTestId('mobile-voice-sheet')).not.toBeInTheDocument()
+    })
   })
 
   it('shows invite action only in channel mode', async () => {

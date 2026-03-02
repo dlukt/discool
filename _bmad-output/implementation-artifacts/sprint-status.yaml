@@ -119,7 +119,7 @@ development_status:
   7-4-individual-volume-control: done
   7-5-voice-channel-switching: done
   7-6-voice-auto-reconnect: done
-  7-7-mobile-voice-controls: backlog
+  7-7-mobile-voice-controls: done
   epic-7-retrospective: optional
 
   # Epic 8: Moderation, Reporting & Data Privacy

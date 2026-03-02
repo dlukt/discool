@@ -84,4 +84,17 @@ describe('VoicePanel', () => {
     await fireEvent.input(slider, { target: { value: '150' } })
     expect(onParticipantVolumeChange).toHaveBeenCalledWith('user-1', 150)
   })
+
+  it('supports mobile-sheet layout variant for bottom-sheet containers', () => {
+    const { getByTestId } = render(VoicePanel, {
+      channelName: 'general',
+      variant: 'mobile-sheet',
+      participants: [],
+    })
+
+    const panel = getByTestId('voice-panel')
+    expect(panel).toHaveAttribute('data-variant', 'mobile-sheet')
+    expect(panel).toHaveClass('max-h-[40vh]')
+    expect(panel).toHaveClass('overflow-y-auto')
+  })
 })

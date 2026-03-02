@@ -158,4 +158,40 @@ describe('VoiceBar', () => {
       'Deafened and muted.',
     )
   })
+
+  it('supports compact mobile voice controls and sheet open action', async () => {
+    const onToggleMute = vi.fn()
+    const onOpenSheet = vi.fn()
+    const view = render(VoiceBar, {
+      guildName: 'lobby',
+      channelName: 'voice-room',
+      connectionState: 'connected',
+      variant: 'mobile',
+      isMuted: false,
+      isDeafened: false,
+      isParticipantsOpen: false,
+      onToggleParticipants: vi.fn(),
+      onToggleMute,
+      onToggleDeafen: vi.fn(),
+      onDisconnect: vi.fn(),
+      onOpenSheet,
+    })
+
+    expect(view.getByTestId('voice-bar-channel')).toHaveTextContent(
+      '#voice-room',
+    )
+    expect(view.queryByTestId('voice-bar-quality-dot')).not.toBeInTheDocument()
+    expect(
+      view.queryByTestId('voice-bar-toggle-participants'),
+    ).not.toBeInTheDocument()
+    expect(
+      view.queryByTestId('voice-bar-toggle-deafen'),
+    ).not.toBeInTheDocument()
+    expect(view.queryByTestId('voice-bar-disconnect')).not.toBeInTheDocument()
+
+    await fireEvent.click(view.getByTestId('voice-bar-open-sheet'))
+    await fireEvent.click(view.getByTestId('voice-bar-toggle-mute'))
+    expect(onOpenSheet).toHaveBeenCalledTimes(1)
+    expect(onToggleMute).toHaveBeenCalledTimes(1)
+  })
 })
