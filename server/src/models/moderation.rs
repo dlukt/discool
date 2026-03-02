@@ -7,6 +7,16 @@ pub const MODERATION_ACTION_TYPE_BAN: &str = "ban";
 pub const MODERATION_ACTION_TYPE_VOICE_KICK: &str = "voice_kick";
 pub const MODERATION_ACTION_TYPE_MESSAGE_DELETE: &str = "message_delete";
 pub const MODERATION_ACTION_TYPE_WARN: &str = "warn";
+pub const REPORT_TARGET_TYPE_MESSAGE: &str = "message";
+pub const REPORT_TARGET_TYPE_USER: &str = "user";
+pub const REPORT_CATEGORY_SPAM: &str = "spam";
+pub const REPORT_CATEGORY_HARASSMENT: &str = "harassment";
+pub const REPORT_CATEGORY_RULE_VIOLATION: &str = "rule_violation";
+pub const REPORT_CATEGORY_OTHER: &str = "other";
+pub const REPORT_STATUS_PENDING: &str = "pending";
+pub const REPORT_STATUS_REVIEWED: &str = "reviewed";
+pub const REPORT_STATUS_ACTIONED: &str = "actioned";
+pub const REPORT_STATUS_DISMISSED: &str = "dismissed";
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ModerationActionRecord {
@@ -55,6 +65,21 @@ pub struct ModerationLogRow {
 pub struct ModerationLogPage {
     pub entries: Vec<ModerationLogRow>,
     pub has_more: bool,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ReportRecord {
+    pub id: String,
+    pub guild_id: String,
+    pub reporter_user_id: String,
+    pub target_type: String,
+    pub target_message_id: Option<String>,
+    pub target_user_id: Option<String>,
+    pub reason: String,
+    pub category: Option<String>,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -136,6 +161,144 @@ pub async fn insert_moderation_action(
     .map_err(|err| AppError::Internal(err.to_string()))?;
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_report(
+    pool: &DbPool,
+    id: &str,
+    guild_id: &str,
+    reporter_user_id: &str,
+    target_type: &str,
+    target_message_id: Option<&str>,
+    target_user_id: Option<&str>,
+    reason: &str,
+    category: Option<&str>,
+    status: &str,
+    created_at: &str,
+    updated_at: &str,
+) -> Result<(), AppError> {
+    let result = match pool {
+        DbPool::Postgres(pool) => sqlx::query(
+            "INSERT INTO reports (
+                    id,
+                    guild_id,
+                    reporter_user_id,
+                    target_type,
+                    target_message_id,
+                    target_user_id,
+                    reason,
+                    category,
+                    status,
+                    created_at,
+                    updated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(reporter_user_id)
+        .bind(target_type)
+        .bind(target_message_id)
+        .bind(target_user_id)
+        .bind(reason)
+        .bind(category)
+        .bind(status)
+        .bind(created_at)
+        .bind(updated_at)
+        .execute(pool)
+        .await
+        .map(|_| ()),
+        DbPool::Sqlite(pool) => sqlx::query(
+            "INSERT INTO reports (
+                    id,
+                    guild_id,
+                    reporter_user_id,
+                    target_type,
+                    target_message_id,
+                    target_user_id,
+                    reason,
+                    category,
+                    status,
+                    created_at,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )
+        .bind(id)
+        .bind(guild_id)
+        .bind(reporter_user_id)
+        .bind(target_type)
+        .bind(target_message_id)
+        .bind(target_user_id)
+        .bind(reason)
+        .bind(category)
+        .bind(status)
+        .bind(created_at)
+        .bind(updated_at)
+        .execute(pool)
+        .await
+        .map(|_| ()),
+    };
+    result.map_err(report_insert_error_to_app_error)?;
+    Ok(())
+}
+
+pub async fn list_reports_by_guild_and_status(
+    pool: &DbPool,
+    guild_id: &str,
+    status: &str,
+    limit: i64,
+) -> Result<Vec<ReportRecord>, AppError> {
+    let normalized_limit = limit.clamp(1, 200);
+    let rows = match pool {
+        DbPool::Postgres(pool) => {
+            let mut query = QueryBuilder::<sqlx::Postgres>::new(
+                "SELECT id,
+                        guild_id,
+                        reporter_user_id,
+                        target_type,
+                        target_message_id,
+                        target_user_id,
+                        reason,
+                        category,
+                        status,
+                        created_at,
+                        updated_at
+                 FROM reports
+                 WHERE guild_id = ",
+            );
+            query.push_bind(guild_id);
+            query.push(" AND status = ");
+            query.push_bind(status);
+            query.push(" ORDER BY created_at ASC, id ASC LIMIT ");
+            query.push_bind(normalized_limit);
+            query.build_query_as().fetch_all(pool).await
+        }
+        DbPool::Sqlite(pool) => {
+            let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                "SELECT id,
+                        guild_id,
+                        reporter_user_id,
+                        target_type,
+                        target_message_id,
+                        target_user_id,
+                        reason,
+                        category,
+                        status,
+                        created_at,
+                        updated_at
+                 FROM reports
+                 WHERE guild_id = ",
+            );
+            query.push_bind(guild_id);
+            query.push(" AND status = ");
+            query.push_bind(status);
+            query.push(" ORDER BY created_at ASC, id ASC LIMIT ");
+            query.push_bind(normalized_limit);
+            query.build_query_as().fetch_all(pool).await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+    Ok(rows)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -399,6 +562,29 @@ pub async fn deactivate_active_mutes_for_target(
     .map_err(|err| AppError::Internal(err.to_string()))?;
 
     Ok(rows_affected)
+}
+
+fn report_insert_error_to_app_error(err: sqlx::Error) -> AppError {
+    if is_report_unique_violation(&err) {
+        return AppError::Conflict(
+            "You have already reported this target in this guild".to_string(),
+        );
+    }
+    AppError::Internal(err.to_string())
+}
+
+fn is_report_unique_violation(err: &sqlx::Error) -> bool {
+    let sqlx::Error::Database(db_err) = err else {
+        return false;
+    };
+    if let Some(code) = db_err.code() {
+        let code = code.as_ref();
+        if code == "23505" || code == "2067" || code == "1555" {
+            return true;
+        }
+    }
+    let message = db_err.message().to_ascii_lowercase();
+    message.contains("unique") || message.contains("duplicate")
 }
 
 pub async fn list_moderation_log_page_by_guild_id(

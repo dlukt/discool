@@ -299,6 +299,28 @@ const {
 })
 
 const moderationApi = vi.hoisted(() => ({
+  createMessageReport: vi.fn(
+    async (
+      _guildSlug: string,
+      _input: {
+        messageId: string
+        reason: string
+        category?: 'spam' | 'harassment' | 'rule_violation' | 'other' | null
+      },
+    ) => ({
+      id: 'report-1',
+      guildSlug: 'lobby',
+      reporterUserId: 'user-1',
+      targetType: 'message' as const,
+      targetMessageId: 'm-0',
+      targetUserId: null,
+      reason: 'harmful content',
+      category: 'harassment' as const,
+      status: 'pending' as const,
+      createdAt: '2026-03-02T00:00:00.000Z',
+      updatedAt: '2026-03-02T00:00:00.000Z',
+    }),
+  ),
   createMessageDelete: vi.fn(
     async (
       _guildSlug: string,
@@ -512,6 +534,7 @@ describe('MessageArea', () => {
     muteStatusState.statusForGuild.mockClear()
     muteStatusState.refresh.mockClear()
     moderationApi.createMessageDelete.mockClear()
+    moderationApi.createMessageReport.mockClear()
     moderationApi.createVoiceKick.mockClear()
   })
 
@@ -1185,6 +1208,59 @@ describe('MessageArea', () => {
     expect(toastState.show).toHaveBeenCalledWith({
       variant: 'success',
       message: 'Message deleted',
+    })
+  })
+
+  it('submits message reports with required reason and exact success toast copy', async () => {
+    seedChannelMessages('lobby:general', 1)
+    timelineByChannel['lobby:general'][0] = {
+      ...timelineByChannel['lobby:general'][0],
+      authorUserId: 'user-2',
+      authorUsername: 'bob',
+      authorDisplayName: 'Bob',
+    }
+    messageState.version += 1
+
+    const { getByTestId, getByRole } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    const messageRow = getByTestId('message-row-m-0')
+    await fireEvent.keyDown(messageRow, { key: 'ContextMenu' })
+    await fireEvent.click(
+      within(getByTestId('message-context-menu-m-0')).getByRole('menuitem', {
+        name: 'Report',
+      }),
+    )
+
+    const dialog = getByRole('dialog', { name: 'Report message from Bob' })
+    await fireEvent.click(within(dialog).getByTestId('report-submit-button'))
+    expect(getByTestId('report-error')).toHaveTextContent('Reason is required.')
+    expect(moderationApi.createMessageReport).not.toHaveBeenCalled()
+
+    await fireEvent.input(getByTestId('report-reason-input'), {
+      target: { value: 'harmful content' },
+    })
+    await fireEvent.change(getByTestId('report-category-select'), {
+      target: { value: 'harassment' },
+    })
+    await fireEvent.click(getByTestId('report-submit-button'))
+
+    await waitFor(() => {
+      expect(moderationApi.createMessageReport).toHaveBeenCalledWith('lobby', {
+        messageId: 'm-0',
+        reason: 'harmful content',
+        category: 'harassment',
+      })
+    })
+    expect(toastState.show).toHaveBeenCalledWith({
+      variant: 'success',
+      message: 'Report submitted. A moderator will review it.',
     })
   })
 

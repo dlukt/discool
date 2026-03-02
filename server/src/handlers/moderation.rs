@@ -13,8 +13,9 @@ use crate::{
     AppError, AppState,
     middleware::auth::AuthenticatedUser,
     services::moderation_service::{
-        self, CreateBanInput, CreateKickInput, CreateMessageDeleteInput, CreateMuteInput,
-        CreateVoiceKickInput, ListModerationLogInput, ListUserMessageHistoryInput,
+        self, CreateBanInput, CreateKickInput, CreateMessageDeleteInput, CreateMessageReportInput,
+        CreateMuteInput, CreateUserReportInput, CreateVoiceKickInput, ListModerationLogInput,
+        ListUserMessageHistoryInput,
     },
     ws::{protocol::ServerOp, registry},
 };
@@ -53,6 +54,13 @@ pub struct CreateBanRequest {
 pub struct CreateMessageDeleteRequest {
     pub channel_slug: Option<String>,
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateReportRequest {
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,6 +196,52 @@ pub async fn create_message_delete(
             "channel_slug": created.channel_slug.clone(),
         }),
     );
+    Ok((StatusCode::CREATED, Json(json!({ "data": created }))).into_response())
+}
+
+pub async fn create_message_report(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path((guild_slug, message_id)): Path<(String, String)>,
+    payload: Result<Json<CreateReportRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+    let (reason, category) = to_create_report_payload(req)?;
+    let created = moderation_service::create_message_report(
+        &state.pool,
+        &user.user_id,
+        &guild_slug,
+        CreateMessageReportInput {
+            message_id,
+            reason,
+            category,
+        },
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(json!({ "data": created }))).into_response())
+}
+
+pub async fn create_user_report(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path((guild_slug, target_user_id)): Path<(String, String)>,
+    payload: Result<Json<CreateReportRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+    let (reason, category) = to_create_report_payload(req)?;
+    let created = moderation_service::create_user_report(
+        &state.pool,
+        &user.user_id,
+        &guild_slug,
+        CreateUserReportInput {
+            target_user_id,
+            reason,
+            category,
+        },
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(json!({ "data": created }))).into_response())
 }
 
@@ -403,6 +457,22 @@ fn to_create_message_delete_input(
         channel_slug: channel_slug.to_string(),
         reason: reason.to_string(),
     })
+}
+
+fn to_create_report_payload(
+    req: CreateReportRequest,
+) -> Result<(String, Option<String>), AppError> {
+    let reason = req.reason.as_deref().unwrap_or("").trim();
+    if reason.is_empty() {
+        return Err(AppError::ValidationError("reason is required".to_string()));
+    }
+    let category = req
+        .category
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    Ok((reason.to_string(), category))
 }
 
 fn to_list_user_message_history_input(
@@ -941,6 +1011,23 @@ mod tests {
     }
 
     #[test]
+    fn to_create_report_payload_validates_required_fields() {
+        let missing_reason = to_create_report_payload(CreateReportRequest {
+            reason: Some("   ".to_string()),
+            category: Some("spam".to_string()),
+        });
+        assert!(matches!(missing_reason, Err(AppError::ValidationError(_))));
+
+        let payload = to_create_report_payload(CreateReportRequest {
+            reason: Some(" policy violation ".to_string()),
+            category: Some("  harassment ".to_string()),
+        })
+        .unwrap();
+        assert_eq!(payload.0, "policy violation");
+        assert_eq!(payload.1, Some("harassment".to_string()));
+    }
+
+    #[test]
     fn to_list_user_message_history_input_validates_target_user_id() {
         let missing_target = to_list_user_message_history_input(
             "   ".to_string(),
@@ -1144,6 +1231,75 @@ mod tests {
         assert_eq!(
             payload["data"]["reason"],
             Value::String("policy violation".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn create_message_report_returns_data_envelope() {
+        let state = test_state().await;
+        seed_guild_fixture(&state).await;
+        seed_text_channel_message(&state, "message-report-1", "target-user-id").await;
+        let response = create_message_report(
+            State(state),
+            mod_user(),
+            Path(("test-guild".to_string(), "message-report-1".to_string())),
+            Ok(Json(CreateReportRequest {
+                reason: Some("harmful content".to_string()),
+                category: Some("harassment".to_string()),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert!(payload.get("data").is_some());
+        assert_eq!(
+            payload["data"]["target_type"],
+            Value::String("message".to_string())
+        );
+        assert_eq!(
+            payload["data"]["target_message_id"],
+            Value::String("message-report-1".to_string())
+        );
+        assert_eq!(
+            payload["data"]["status"],
+            Value::String("pending".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn create_user_report_returns_data_envelope() {
+        let state = test_state().await;
+        seed_guild_fixture(&state).await;
+        let response = create_user_report(
+            State(state),
+            mod_user(),
+            Path(("test-guild".to_string(), "target-user-id".to_string())),
+            Ok(Json(CreateReportRequest {
+                reason: Some("suspicious behavior".to_string()),
+                category: Some("other".to_string()),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert!(payload.get("data").is_some());
+        assert_eq!(
+            payload["data"]["target_type"],
+            Value::String("user".to_string())
+        );
+        assert_eq!(
+            payload["data"]["target_user_id"],
+            Value::String("target-user-id".to_string())
+        );
+        assert_eq!(
+            payload["data"]["status"],
+            Value::String("pending".to_string())
         );
     }
 

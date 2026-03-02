@@ -58,6 +58,20 @@ pub struct CreateMessageDeleteInput {
 }
 
 #[derive(Debug, Clone)]
+pub struct CreateMessageReportInput {
+    pub message_id: String,
+    pub reason: String,
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateUserReportInput {
+    pub target_user_id: String,
+    pub reason: String,
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ListModerationLogInput {
     pub limit: Option<String>,
     pub cursor: Option<String>,
@@ -133,6 +147,24 @@ pub struct MessageDeleteActionResponse {
     pub actor_user_id: String,
     pub target_user_id: String,
     pub reason: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UserContentReportResponse {
+    pub id: String,
+    pub guild_slug: String,
+    pub reporter_user_id: String,
+    pub target_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_user_id: Option<String>,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    pub status: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -525,6 +557,136 @@ pub async fn create_message_delete(
         actor_user_id,
         target_user_id,
         reason,
+        created_at: now_str.clone(),
+        updated_at: now_str,
+    })
+}
+
+pub async fn create_message_report(
+    pool: &DbPool,
+    reporter_user_id: &str,
+    guild_slug: &str,
+    input: CreateMessageReportInput,
+) -> Result<UserContentReportResponse, AppError> {
+    let reporter_user_id = normalize_id(reporter_user_id, "reporter_user_id")?;
+    let guild_slug = normalize_slug(guild_slug, "guild_slug")?;
+    let message_id = normalize_id(&input.message_id, "message_id")?;
+    let reason = normalize_reason(&input.reason)?;
+    let category = normalize_report_category(input.category.as_deref())?;
+
+    let guild = guild::find_guild_by_slug(pool, &guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !guild_member::is_guild_member(pool, &guild.id, &reporter_user_id).await? {
+        return Err(AppError::Forbidden(
+            "Only guild members can submit reports in this guild".to_string(),
+        ));
+    }
+
+    let message = message::find_message_by_id(pool, &message_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if message.guild_id != guild.id {
+        return Err(AppError::NotFound);
+    }
+    if message.author_user_id == reporter_user_id {
+        return Err(AppError::ValidationError(
+            "Cannot report your own message".to_string(),
+        ));
+    }
+
+    let now_str = Utc::now().to_rfc3339();
+    let id = Uuid::new_v4().to_string();
+    moderation::insert_report(
+        pool,
+        &id,
+        &guild.id,
+        &reporter_user_id,
+        moderation::REPORT_TARGET_TYPE_MESSAGE,
+        Some(&message_id),
+        None,
+        &reason,
+        category.as_deref(),
+        moderation::REPORT_STATUS_PENDING,
+        &now_str,
+        &now_str,
+    )
+    .await?;
+
+    Ok(UserContentReportResponse {
+        id,
+        guild_slug: guild.slug,
+        reporter_user_id,
+        target_type: moderation::REPORT_TARGET_TYPE_MESSAGE.to_string(),
+        target_message_id: Some(message_id),
+        target_user_id: None,
+        reason,
+        category,
+        status: moderation::REPORT_STATUS_PENDING.to_string(),
+        created_at: now_str.clone(),
+        updated_at: now_str,
+    })
+}
+
+pub async fn create_user_report(
+    pool: &DbPool,
+    reporter_user_id: &str,
+    guild_slug: &str,
+    input: CreateUserReportInput,
+) -> Result<UserContentReportResponse, AppError> {
+    let reporter_user_id = normalize_id(reporter_user_id, "reporter_user_id")?;
+    let guild_slug = normalize_slug(guild_slug, "guild_slug")?;
+    let target_user_id = normalize_id(&input.target_user_id, "target_user_id")?;
+    if reporter_user_id == target_user_id {
+        return Err(AppError::ValidationError(
+            "Cannot report your own user account".to_string(),
+        ));
+    }
+    let reason = normalize_reason(&input.reason)?;
+    let category = normalize_report_category(input.category.as_deref())?;
+
+    let guild = guild::find_guild_by_slug(pool, &guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !guild_member::is_guild_member(pool, &guild.id, &reporter_user_id).await? {
+        return Err(AppError::Forbidden(
+            "Only guild members can submit reports in this guild".to_string(),
+        ));
+    }
+    if !guild_member::is_guild_member(pool, &guild.id, &target_user_id).await? {
+        return Err(AppError::ValidationError(
+            "target_user_id must belong to a guild member".to_string(),
+        ));
+    }
+
+    let now_str = Utc::now().to_rfc3339();
+    let id = Uuid::new_v4().to_string();
+    moderation::insert_report(
+        pool,
+        &id,
+        &guild.id,
+        &reporter_user_id,
+        moderation::REPORT_TARGET_TYPE_USER,
+        None,
+        Some(&target_user_id),
+        &reason,
+        category.as_deref(),
+        moderation::REPORT_STATUS_PENDING,
+        &now_str,
+        &now_str,
+    )
+    .await?;
+
+    Ok(UserContentReportResponse {
+        id,
+        guild_slug: guild.slug,
+        reporter_user_id,
+        target_type: moderation::REPORT_TARGET_TYPE_USER.to_string(),
+        target_message_id: None,
+        target_user_id: Some(target_user_id),
+        reason,
+        category,
+        status: moderation::REPORT_STATUS_PENDING.to_string(),
         created_at: now_str.clone(),
         updated_at: now_str,
     })
@@ -1002,6 +1164,25 @@ fn normalize_reason(value: &str) -> Result<String, AppError> {
     Ok(reason.to_string())
 }
 
+fn normalize_report_category(value: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    match normalized.as_str() {
+        moderation::REPORT_CATEGORY_SPAM
+        | moderation::REPORT_CATEGORY_HARASSMENT
+        | moderation::REPORT_CATEGORY_RULE_VIOLATION
+        | moderation::REPORT_CATEGORY_OTHER => Ok(Some(normalized)),
+        _ => Err(AppError::ValidationError(
+            "category must be one of: spam, harassment, rule_violation, other".to_string(),
+        )),
+    }
+}
+
 fn normalize_duration_seconds(value: Option<i64>) -> Result<Option<i64>, AppError> {
     let Some(duration_seconds) = value else {
         return Ok(None);
@@ -1265,6 +1446,7 @@ mod tests {
         .await
         .unwrap();
         run_migrations(&pool).await.unwrap();
+        permissions::invalidate_guild_permission_cache("guild-id");
         seed_fixture(&pool).await;
         pool
     }
@@ -1547,6 +1729,21 @@ mod tests {
             normalize_reason("  valid reason  ").unwrap(),
             "valid reason"
         );
+    }
+
+    #[test]
+    fn normalize_report_category_accepts_known_values_and_rejects_unknown_values() {
+        assert_eq!(normalize_report_category(None).unwrap(), None);
+        assert_eq!(normalize_report_category(Some("   ")).unwrap(), None);
+        assert_eq!(
+            normalize_report_category(Some(" SPAM ")).unwrap(),
+            Some("spam".to_string())
+        );
+        assert_eq!(
+            normalize_report_category(Some("rule_violation")).unwrap(),
+            Some("rule_violation".to_string())
+        );
+        assert!(normalize_report_category(Some("invalid")).is_err());
     }
 
     #[test]
@@ -2091,6 +2288,165 @@ mod tests {
         assert_eq!(action_row.1, "owner-user-id");
         assert_eq!(action_row.2, "target-user-id");
         assert_eq!(action_row.3, 0);
+    }
+
+    #[tokio::test]
+    async fn create_message_report_validates_membership_self_report_and_duplicates() {
+        let pool = setup_service_pool().await;
+        seed_voice_channels(&pool).await;
+        message::insert_message(
+            &pool,
+            "report-message-1",
+            "guild-id",
+            "channel-general",
+            "target-user-id",
+            "flag this",
+            false,
+            "2026-03-01T00:01:00Z",
+            "2026-03-01T00:01:00Z",
+        )
+        .await
+        .unwrap();
+
+        let missing_membership = create_message_report(
+            &pool,
+            "outsider-user-id",
+            "test-guild",
+            CreateMessageReportInput {
+                message_id: "report-message-1".to_string(),
+                reason: "spam".to_string(),
+                category: Some("spam".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(missing_membership, AppError::Forbidden(_)));
+
+        let self_report = create_message_report(
+            &pool,
+            "target-user-id",
+            "test-guild",
+            CreateMessageReportInput {
+                message_id: "report-message-1".to_string(),
+                reason: "cannot self report".to_string(),
+                category: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(self_report, AppError::ValidationError(_)));
+
+        let created = create_message_report(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateMessageReportInput {
+                message_id: "report-message-1".to_string(),
+                reason: "harmful content".to_string(),
+                category: Some("harassment".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.target_type, moderation::REPORT_TARGET_TYPE_MESSAGE);
+        assert_eq!(
+            created.target_message_id,
+            Some("report-message-1".to_string())
+        );
+        assert_eq!(created.category, Some("harassment".to_string()));
+        assert_eq!(created.status, moderation::REPORT_STATUS_PENDING);
+
+        let duplicate = create_message_report(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateMessageReportInput {
+                message_id: "report-message-1".to_string(),
+                reason: "duplicate".to_string(),
+                category: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(duplicate, AppError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn create_user_report_validates_target_self_report_and_duplicates() {
+        let pool = setup_service_pool().await;
+
+        let missing_membership = create_user_report(
+            &pool,
+            "outsider-user-id",
+            "test-guild",
+            CreateUserReportInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "spam".to_string(),
+                category: Some("spam".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(missing_membership, AppError::Forbidden(_)));
+
+        let missing_target = create_user_report(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateUserReportInput {
+                target_user_id: "not-a-member".to_string(),
+                reason: "spam".to_string(),
+                category: Some("spam".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(missing_target, AppError::ValidationError(_)));
+
+        let self_report = create_user_report(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateUserReportInput {
+                target_user_id: "mod-user-id".to_string(),
+                reason: "self".to_string(),
+                category: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(self_report, AppError::ValidationError(_)));
+
+        let created = create_user_report(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateUserReportInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "impersonation".to_string(),
+                category: Some("other".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.target_type, moderation::REPORT_TARGET_TYPE_USER);
+        assert_eq!(created.target_user_id, Some("target-user-id".to_string()));
+        assert_eq!(created.category, Some("other".to_string()));
+        assert_eq!(created.status, moderation::REPORT_STATUS_PENDING);
+
+        let duplicate = create_user_report(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateUserReportInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "duplicate".to_string(),
+                category: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(duplicate, AppError::Conflict(_)));
     }
 
     #[tokio::test]

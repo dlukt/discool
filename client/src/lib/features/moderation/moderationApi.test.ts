@@ -17,6 +17,8 @@ vi.mock('$lib/api', () => ({
 import { apiFetch, apiFetchCursorList } from '$lib/api'
 import {
   createMessageDelete,
+  createMessageReport,
+  createUserReport,
   createVoiceKick,
   fetchModerationLog,
   fetchUserMessageHistory,
@@ -113,6 +115,120 @@ describe('moderationApi message delete', () => {
         body: JSON.stringify({
           channel_slug: 'general',
           reason: 'policy violation',
+        }),
+      },
+    )
+  })
+})
+
+describe('moderationApi message report', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('posts message-report payload and maps response', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      id: 'report-1',
+      guild_slug: 'lobby',
+      reporter_user_id: 'reporter-id',
+      target_type: 'message',
+      target_message_id: 'message-1',
+      reason: 'harmful content',
+      category: 'harassment',
+      status: 'pending',
+      created_at: '2026-03-02T00:00:00.000Z',
+      updated_at: '2026-03-02T00:00:00.000Z',
+    })
+
+    await expect(
+      createMessageReport(' lobby ', {
+        messageId: ' message-1 ',
+        reason: ' harmful content ',
+        category: 'harassment',
+      }),
+    ).resolves.toEqual({
+      id: 'report-1',
+      guildSlug: 'lobby',
+      reporterUserId: 'reporter-id',
+      targetType: 'message',
+      targetMessageId: 'message-1',
+      targetUserId: null,
+      reason: 'harmful content',
+      category: 'harassment',
+      status: 'pending',
+      createdAt: '2026-03-02T00:00:00.000Z',
+      updatedAt: '2026-03-02T00:00:00.000Z',
+    })
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/guilds/lobby/moderation/reports/messages/message-1',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          reason: 'harmful content',
+          category: 'harassment',
+        }),
+      },
+    )
+  })
+
+  it('rejects invalid category before issuing request', async () => {
+    await expect(
+      createMessageReport('lobby', {
+        messageId: 'message-1',
+        reason: 'content',
+        category: 'invalid' as never,
+      }),
+    ).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+    })
+    expect(apiFetch).not.toHaveBeenCalled()
+  })
+})
+
+describe('moderationApi user report', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('posts user-report payload and maps response', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      id: 'report-2',
+      guild_slug: 'lobby',
+      reporter_user_id: 'reporter-id',
+      target_type: 'user',
+      target_user_id: 'target-user-id',
+      reason: 'impersonation',
+      status: 'pending',
+      created_at: '2026-03-02T00:00:00.000Z',
+      updated_at: '2026-03-02T00:00:00.000Z',
+    })
+
+    await expect(
+      createUserReport(' lobby ', {
+        targetUserId: ' target-user-id ',
+        reason: ' impersonation ',
+      }),
+    ).resolves.toEqual({
+      id: 'report-2',
+      guildSlug: 'lobby',
+      reporterUserId: 'reporter-id',
+      targetType: 'user',
+      targetMessageId: null,
+      targetUserId: 'target-user-id',
+      reason: 'impersonation',
+      category: null,
+      status: 'pending',
+      createdAt: '2026-03-02T00:00:00.000Z',
+      updatedAt: '2026-03-02T00:00:00.000Z',
+    })
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/guilds/lobby/moderation/reports/users/target-user-id',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          reason: 'impersonation',
         }),
       },
     )

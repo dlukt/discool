@@ -16,6 +16,7 @@ type Props = {
   hasManageMessagesPermission?: boolean
   onEditRequest?: (message: ChatMessage) => void
   onDeleteRequest?: (message: ChatMessage) => void
+  onReportRequest?: (message: ChatMessage) => void
   onReplyRequest?: (message: ChatMessage) => void
   onReactRequest?: (message: ChatMessage, emoji: string) => void
 }
@@ -27,6 +28,7 @@ let {
   hasManageMessagesPermission = false,
   onEditRequest,
   onDeleteRequest,
+  onReportRequest,
   onReplyRequest,
   onReactRequest,
 }: Props = $props()
@@ -43,6 +45,7 @@ let isOwnMessage = $derived(
 let canDeleteMessage = $derived(
   !message.isSystem && (isOwnMessage || hasManageMessagesPermission),
 )
+let canReportMessage = $derived(!message.isSystem && !isOwnMessage)
 let contextMenuOpen = $state(false)
 let pickerOpen = $state(false)
 let imagePreviewAttachment = $state<ChatMessageAttachment | null>(null)
@@ -123,6 +126,12 @@ function requestEdit(): void {
 function requestDelete(): void {
   if (!canDeleteMessage) return
   onDeleteRequest?.(message)
+  closeContextMenu()
+}
+
+function requestReport(): void {
+  if (!canReportMessage) return
+  onReportRequest?.(message)
   closeContextMenu()
 }
 
@@ -381,6 +390,16 @@ function handleRowFocusOut(event: FocusEvent): void {
       </button>
       <button
         type="button"
+        class="rounded px-1.5 py-1 text-xs text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+        onclick={requestReport}
+        disabled={!canReportMessage}
+        aria-label="Report message"
+        title="Report message"
+      >
+        Report
+      </button>
+      <button
+        type="button"
         class="rounded px-1.5 py-1 text-xs text-foreground hover:bg-muted"
         onclick={requestReact}
         aria-label="React to message"
@@ -432,6 +451,15 @@ function handleRowFocusOut(event: FocusEvent): void {
           disabled={!canDeleteMessage}
         >
           Delete message
+        </button>
+        <button
+          type="button"
+          class="mt-1 block w-full rounded px-2 py-1 text-left text-sm text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+          role="menuitem"
+          onclick={requestReport}
+          disabled={!canReportMessage}
+        >
+          Report
         </button>
       </div>
     {/if}

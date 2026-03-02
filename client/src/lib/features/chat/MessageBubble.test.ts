@@ -101,7 +101,7 @@ describe('MessageBubble', () => {
     )
   })
 
-  it('keeps edit/delete disabled for non-owner messages', () => {
+  it('keeps edit/delete disabled for non-owner messages and allows reporting', () => {
     const { getByRole } = render(MessageBubble, {
       message: makeMessage(),
       currentUserId: 'user-2',
@@ -109,6 +109,7 @@ describe('MessageBubble', () => {
 
     expect(getByRole('button', { name: 'Edit message' })).toBeDisabled()
     expect(getByRole('button', { name: 'Delete message' })).toBeDisabled()
+    expect(getByRole('button', { name: 'Report message' })).toBeEnabled()
   })
 
   it('enables delete for moderators on non-owned messages', async () => {
@@ -126,6 +127,32 @@ describe('MessageBubble', () => {
     expect(onDeleteRequest).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'message-1' }),
     )
+  })
+
+  it('emits report callbacks for non-owned messages', async () => {
+    const onReportRequest = vi.fn()
+    const { getByRole, getByTestId } = render(MessageBubble, {
+      message: makeMessage(),
+      currentUserId: 'user-2',
+      onReportRequest,
+    })
+
+    await fireEvent.click(getByRole('button', { name: 'Report message' }))
+    expect(onReportRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'message-1' }),
+    )
+
+    const row = getByTestId('message-row-message-1')
+    await fireEvent.keyDown(row, { key: 'ContextMenu' })
+    await fireEvent.click(
+      within(getByTestId('message-context-menu-message-1')).getByRole(
+        'menuitem',
+        {
+          name: 'Report',
+        },
+      ),
+    )
+    expect(onReportRequest).toHaveBeenCalledTimes(2)
   })
 
   it('renders image and file attachments with fullscreen preview', async () => {

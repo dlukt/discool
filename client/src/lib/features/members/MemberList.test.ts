@@ -100,6 +100,28 @@ const { guildState, memberDataByGuild, presenceStatuses, identityState } =
   })
 
 const moderationApi = vi.hoisted(() => ({
+  createUserReport: vi.fn(
+    async (
+      _guildSlug: string,
+      _input: {
+        targetUserId: string
+        reason: string
+        category?: 'spam' | 'harassment' | 'rule_violation' | 'other' | null
+      },
+    ) => ({
+      id: 'report-1',
+      guildSlug: 'lobby',
+      reporterUserId: 'user-viewer',
+      targetType: 'user' as const,
+      targetMessageId: null,
+      targetUserId: 'user-default',
+      reason: 'abusive behavior',
+      category: 'harassment' as const,
+      status: 'pending' as const,
+      createdAt: '2026-03-02T00:00:00.000Z',
+      updatedAt: '2026-03-02T00:00:00.000Z',
+    }),
+  ),
   createMute: vi.fn(
     async (
       _guildSlug: string,
@@ -351,6 +373,7 @@ describe('MemberList', () => {
       user: { id: 'user-viewer' },
     }
     guildState.loadGuilds.mockClear()
+    moderationApi.createUserReport.mockClear()
     moderationApi.createMute.mockClear()
     moderationApi.createKick.mockClear()
     moderationApi.createBan.mockClear()
@@ -509,6 +532,50 @@ describe('MemberList', () => {
       'discool:open-message-history-intent',
       historyIntentHandler,
     )
+  })
+
+  it('shows report-user action for non-self users and submits reports', async () => {
+    const { getByTestId, getByRole, getByText } = render(MemberList, {
+      activeGuild: 'lobby',
+    })
+
+    await waitFor(() => {
+      expect(guildState.loadMembers).toHaveBeenCalledWith('lobby', true)
+    })
+
+    await fireEvent.keyDown(getByTestId('member-row-user-default'), {
+      key: 'ContextMenu',
+    })
+
+    const reportUserButton = getByRole('button', { name: 'Report user' })
+    expect(reportUserButton).toBeInTheDocument()
+    await fireEvent.click(reportUserButton)
+
+    expect(
+      getByRole('dialog', { name: 'Report user General User' }),
+    ).toBeInTheDocument()
+    await fireEvent.click(getByTestId('report-submit-button'))
+    expect(getByTestId('report-error')).toHaveTextContent('Reason is required.')
+    expect(moderationApi.createUserReport).not.toHaveBeenCalled()
+
+    await fireEvent.input(getByTestId('report-reason-input'), {
+      target: { value: 'abusive behavior' },
+    })
+    await fireEvent.change(getByTestId('report-category-select'), {
+      target: { value: 'harassment' },
+    })
+    await fireEvent.click(getByTestId('report-submit-button'))
+
+    await waitFor(() => {
+      expect(moderationApi.createUserReport).toHaveBeenCalledWith('lobby', {
+        targetUserId: 'user-default',
+        reason: 'abusive behavior',
+        category: 'harassment',
+      })
+    })
+    expect(
+      getByText('Report submitted. A moderator will review it.'),
+    ).toBeInTheDocument()
   })
 
   it('shows moderation-log panel tab only when VIEW_MOD_LOG is available', async () => {

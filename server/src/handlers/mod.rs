@@ -137,6 +137,14 @@ pub fn router(state: AppState) -> Router {
             post(moderation::create_message_delete),
         )
         .route(
+            "/guilds/{guild_slug}/moderation/reports/messages/{message_id}",
+            post(moderation::create_message_report),
+        )
+        .route(
+            "/guilds/{guild_slug}/moderation/reports/users/{target_user_id}",
+            post(moderation::create_user_report),
+        )
+        .route(
             "/guilds/{guild_slug}/moderation/log",
             get(moderation::list_moderation_log),
         )

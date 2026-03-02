@@ -13,10 +13,13 @@ import { identityState } from '$lib/features/identity/identityStore.svelte'
 import ProfileSettingsView from '$lib/features/identity/ProfileSettingsView.svelte'
 import {
   createMessageDelete,
+  createMessageReport,
   createVoiceKick,
   type MuteStatus,
+  type ReportCategory,
 } from '$lib/features/moderation/moderationApi'
 import { muteStatusState } from '$lib/features/moderation/muteStatusStore.svelte'
+import ReportDialog from '$lib/features/moderation/ReportDialog.svelte'
 import type { VoiceParticipant } from '$lib/features/voice/types'
 import VoiceBar from '$lib/features/voice/VoiceBar.svelte'
 import VoicePanel from '$lib/features/voice/VoicePanel.svelte'
@@ -78,6 +81,7 @@ const TYPING_START_THROTTLE_MS = 1_500
 const OPERATION_STATUS_AUTO_CLEAR_MS = 1_500
 const MAX_TIMEOUT_MS = 2_147_483_647
 const MAX_MODERATION_REASON_CHARS = 500
+const REPORT_SUBMITTED_TOAST = 'Report submitted. A moderator will review it.'
 
 let {
   mode,
@@ -148,6 +152,9 @@ let pendingDeleteRequiresReason = $state(false)
 let deleteReason = $state('')
 let deleteError = $state<string | null>(null)
 let deleteSubmitting = $state(false)
+let pendingMessageReport = $state<ChatMessage | null>(null)
+let reportError = $state<string | null>(null)
+let reportSubmitting = $state(false)
 let attachmentInput = $state<HTMLInputElement | null>(null)
 let selectedAttachment = $state<File | null>(null)
 let attachmentUploadProgress = $state<number | null>(null)
@@ -871,12 +878,26 @@ function requestDeleteMessage(message: ChatMessage): void {
   deleteError = null
 }
 
+function requestMessageReport(message: ChatMessage): void {
+  const currentUserId = currentSessionUser?.id
+  if (!currentUserId || mode !== 'channel') return
+  if (message.isSystem || message.authorUserId === currentUserId) return
+  pendingMessageReport = message
+  reportError = null
+}
+
 function closeDeleteDialog(): void {
   if (deleteSubmitting) return
   pendingDeleteMessage = null
   pendingDeleteRequiresReason = false
   deleteReason = ''
   deleteError = null
+}
+
+function closeMessageReportDialog(): void {
+  if (reportSubmitting) return
+  pendingMessageReport = null
+  reportError = null
 }
 
 function openVoiceKickDialog(participant: VoiceParticipant): void {
@@ -991,6 +1012,31 @@ async function confirmDeleteMessage(): Promise<void> {
   }
   setOperationStatus('Deleted.', 'default', OPERATION_STATUS_AUTO_CLEAR_MS)
   closeDeleteDialog()
+}
+
+async function submitMessageReport(input: {
+  reason: string
+  category: ReportCategory | null
+}): Promise<void> {
+  if (!pendingMessageReport || mode !== 'channel') return
+  reportSubmitting = true
+  reportError = null
+  try {
+    await createMessageReport(activeGuild, {
+      messageId: pendingMessageReport.id,
+      reason: input.reason,
+      category: input.category,
+    })
+    toastState.show({
+      variant: 'success',
+      message: REPORT_SUBMITTED_TOAST,
+    })
+    pendingMessageReport = null
+  } catch (error) {
+    reportError = messageFromError(error, 'Failed to submit report.')
+  } finally {
+    reportSubmitting = false
+  }
 }
 
 function handleReactionRequest(message: ChatMessage, emoji: string): void {
@@ -1295,6 +1341,9 @@ $effect(() => {
     deleteReason = ''
     deleteError = null
     deleteSubmitting = false
+    pendingMessageReport = null
+    reportError = null
+    reportSubmitting = false
     voiceKickDialogParticipant = null
     voiceKickReason = ''
     voiceKickError = null
@@ -1315,6 +1364,9 @@ $effect(() => {
     deleteReason = ''
     deleteError = null
     deleteSubmitting = false
+    pendingMessageReport = null
+    reportError = null
+    reportSubmitting = false
     voiceKickDialogParticipant = null
     voiceKickReason = ''
     voiceKickError = null
@@ -1335,6 +1387,15 @@ $effect(() => {
     deleteReason = ''
     deleteError = null
     deleteSubmitting = false
+  }
+  if (
+    pendingMessageReport &&
+    (pendingMessageReport.guildSlug !== activeGuild ||
+      pendingMessageReport.channelSlug !== activeChannel)
+  ) {
+    pendingMessageReport = null
+    reportError = null
+    reportSubmitting = false
   }
   if (
     voiceKickDialogParticipant &&
@@ -1675,6 +1736,7 @@ onMount(() => {
                     hasManageMessagesPermission={canModerateMessages}
                     onEditRequest={startEditingMessage}
                     onDeleteRequest={requestDeleteMessage}
+                    onReportRequest={requestMessageReport}
                     onReactRequest={handleReactionRequest}
                   />
                 </div>
@@ -1982,6 +2044,21 @@ onMount(() => {
     </div>
   </div>
 {/if}
+
+<ReportDialog
+  open={pendingMessageReport !== null}
+  title={
+    pendingMessageReport
+      ? `Report message from ${pendingMessageReport.authorDisplayName}`
+      : 'Report message'
+  }
+  description="Describe why this message should be reviewed by moderators."
+  submitLabel="Submit report"
+  submitting={reportSubmitting}
+  errorMessage={reportError}
+  onCancel={closeMessageReportDialog}
+  onSubmit={(payload) => void submitMessageReport(payload)}
+/>
 
 {#if pendingDeleteMessage}
   <div class="fixed inset-0 z-30 flex items-center justify-center bg-black/60 p-4">

@@ -131,7 +131,7 @@ development_status:
   8-5-moderation-log: done
   8-6-message-deletion-by-moderators: done
   8-7-view-user-message-history-moderator: done
-  8-8-user-content-reporting: backlog
+  8-8-user-content-reporting: done
   8-9-report-queue-and-lifecycle: backlog
   8-10-personal-data-export-gdpr: backlog
   8-11-account-deletion-gdpr: backlog

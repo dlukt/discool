@@ -5986,6 +5986,200 @@ async fn moderation_message_delete_soft_deletes_broadcasts_and_enforces_permissi
 }
 
 #[tokio::test]
+async fn moderation_reports_create_and_reject_self_and_duplicate_submissions() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "report-owner", [228u8; 32]).await;
+    let reporter_token = register_and_authenticate(&addr, "report-member", [229u8; 32]).await;
+    let target_token = register_and_authenticate(&addr, "report-target", [230u8; 32]).await;
+
+    let guild_res = http_post_with_bearer(
+        &addr,
+        "/api/v1/guilds",
+        &json!({ "name": "Report Guild" }).to_string(),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_slug = guild_json["data"]["slug"].as_str().unwrap().to_string();
+
+    let db_url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&db_url).await.unwrap();
+    let guild_id = sqlx::query_scalar::<_, String>("SELECT id FROM guilds WHERE slug = ?1")
+        .bind(&guild_slug)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let reporter_user_id = user_id_by_username(&pool, "report-member").await;
+    let target_user_id = user_id_by_username(&pool, "report-target").await;
+    let _owner_user_id = user_id_by_username(&pool, "report-owner").await;
+    add_guild_member(&pool, &guild_id, &reporter_user_id).await;
+    add_guild_member(&pool, &guild_id, &target_user_id).await;
+
+    let general_channel_id = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM channels WHERE guild_id = ?1 AND slug = ?2 LIMIT 1",
+    )
+    .bind(&guild_id)
+    .bind("general")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    for (message_id, author_user_id) in [
+        ("report-target-message", target_user_id.as_str()),
+        ("report-own-message", reporter_user_id.as_str()),
+    ] {
+        sqlx::query(
+            "INSERT INTO messages (id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind(message_id)
+        .bind(&guild_id)
+        .bind(&general_channel_id)
+        .bind(author_user_id)
+        .bind("needs review")
+        .bind(0_i64)
+        .bind("2026-03-01T00:00:00Z")
+        .bind("2026-03-01T00:00:00Z")
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let message_report_res = http_post_with_bearer(
+        &addr,
+        &format!(
+            "/api/v1/guilds/{guild_slug}/moderation/reports/messages/{}",
+            "report-target-message"
+        ),
+        &json!({
+            "reason": "harmful content",
+            "category": "harassment",
+        })
+        .to_string(),
+        &reporter_token,
+    )
+    .await;
+    assert_eq!(response_status(&message_report_res), 201);
+    let message_report_json: serde_json::Value =
+        serde_json::from_str(response_body(&message_report_res)).unwrap();
+    assert_eq!(message_report_json["data"]["target_type"], json!("message"));
+    assert_eq!(
+        message_report_json["data"]["target_message_id"],
+        json!("report-target-message")
+    );
+    assert_eq!(message_report_json["data"]["status"], json!("pending"));
+
+    let duplicate_message_report = http_post_with_bearer(
+        &addr,
+        &format!(
+            "/api/v1/guilds/{guild_slug}/moderation/reports/messages/{}",
+            "report-target-message"
+        ),
+        &json!({
+            "reason": "second attempt",
+        })
+        .to_string(),
+        &reporter_token,
+    )
+    .await;
+    assert_eq!(response_status(&duplicate_message_report), 409);
+
+    let self_message_report = http_post_with_bearer(
+        &addr,
+        &format!(
+            "/api/v1/guilds/{guild_slug}/moderation/reports/messages/{}",
+            "report-own-message"
+        ),
+        &json!({
+            "reason": "self report",
+        })
+        .to_string(),
+        &reporter_token,
+    )
+    .await;
+    assert_eq!(response_status(&self_message_report), 422);
+
+    let user_report_res = http_post_with_bearer(
+        &addr,
+        &format!(
+            "/api/v1/guilds/{guild_slug}/moderation/reports/users/{}",
+            target_user_id
+        ),
+        &json!({
+            "reason": "impersonation",
+            "category": "other",
+        })
+        .to_string(),
+        &reporter_token,
+    )
+    .await;
+    assert_eq!(response_status(&user_report_res), 201);
+    let user_report_json: serde_json::Value =
+        serde_json::from_str(response_body(&user_report_res)).unwrap();
+    assert_eq!(user_report_json["data"]["target_type"], json!("user"));
+    assert_eq!(
+        user_report_json["data"]["target_user_id"],
+        json!(target_user_id.as_str())
+    );
+    assert_eq!(user_report_json["data"]["status"], json!("pending"));
+
+    let duplicate_user_report = http_post_with_bearer(
+        &addr,
+        &format!(
+            "/api/v1/guilds/{guild_slug}/moderation/reports/users/{}",
+            target_user_id
+        ),
+        &json!({
+            "reason": "duplicate",
+        })
+        .to_string(),
+        &reporter_token,
+    )
+    .await;
+    assert_eq!(response_status(&duplicate_user_report), 409);
+
+    let self_user_report = http_post_with_bearer(
+        &addr,
+        &format!(
+            "/api/v1/guilds/{guild_slug}/moderation/reports/users/{}",
+            reporter_user_id
+        ),
+        &json!({
+            "reason": "self user report",
+        })
+        .to_string(),
+        &reporter_token,
+    )
+    .await;
+    assert_eq!(response_status(&self_user_report), 422);
+
+    let stored_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reports")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored_count, 2);
+
+    let _ = target_token;
+}
+
+#[tokio::test]
 async fn websocket_voice_join_rejects_text_channels_and_invalid_payloads() {
     use serde_json::json;
 

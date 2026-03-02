@@ -21,7 +21,10 @@ import {
   createBan,
   createKick,
   createMute,
+  createUserReport,
+  type ReportCategory,
 } from '$lib/features/moderation/moderationApi'
+import ReportDialog from '$lib/features/moderation/ReportDialog.svelte'
 import UserMessageHistoryPanel from '$lib/features/moderation/UserMessageHistoryPanel.svelte'
 import { toastState } from '$lib/feedback/toastStore.svelte'
 import { presenceState } from './presenceStore.svelte'
@@ -71,6 +74,7 @@ const MEMBER_ROW_HEIGHT = 56
 const VIRTUAL_OVERSCAN_PX = 240
 const OWNER_ROLE_COLOR = '#f59e0b'
 const MAX_MUTE_REASON_CHARS = 500
+const REPORT_SUBMITTED_TOAST = 'Report submitted. A moderator will review it.'
 
 const MODERATION_ACTIONS: Array<{
   permission: ModerationPermission
@@ -113,6 +117,9 @@ let banDialogMemberId = $state<string | null>(null)
 let banReason = $state('')
 let banDeleteWindow = $state<BanDeletePreset>('none')
 let banSubmitting = $state(false)
+let reportDialogMemberId = $state<string | null>(null)
+let reportSubmitting = $state(false)
+let reportError = $state<string | null>(null)
 let messageHistoryMemberId = $state<string | null>(null)
 let roleOverridesByMember = $state<Record<string, string[]>>({})
 let scrollTop = $state(0)
@@ -273,6 +280,13 @@ let messageHistoryMember = $derived(
   messageHistoryMemberId
     ? (membersWithPresence.find(
         (member) => member.userId === messageHistoryMemberId,
+      ) ?? null)
+    : null,
+)
+let reportDialogMember = $derived(
+  reportDialogMemberId
+    ? (membersWithPresence.find(
+        (member) => member.userId === reportDialogMemberId,
       ) ?? null)
     : null,
 )
@@ -653,6 +667,20 @@ function closeMessageHistory(): void {
   messageHistoryMemberId = null
 }
 
+function openReportDialog(member: GuildMember): void {
+  if (!currentUserId || member.userId === currentUserId) return
+  reportDialogMemberId = member.userId
+  reportError = null
+  errorMessage = null
+  statusMessage = null
+}
+
+function closeReportDialog(): void {
+  if (reportSubmitting) return
+  reportDialogMemberId = null
+  reportError = null
+}
+
 function durationSecondsForPreset(preset: MuteDurationPreset): number | null {
   if (preset === '1h') return 60 * 60
   if (preset === '24h') return 24 * 60 * 60
@@ -837,6 +865,29 @@ async function toggleBlockForMember(member: GuildMember): Promise<void> {
   }
 }
 
+async function submitUserReport(input: {
+  reason: string
+  category: ReportCategory | null
+}): Promise<void> {
+  if (reportSubmitting || !reportDialogMember) return
+  reportSubmitting = true
+  reportError = null
+  try {
+    await createUserReport(activeGuild, {
+      targetUserId: reportDialogMember.userId,
+      reason: input.reason,
+      category: input.category,
+    })
+    statusMessage = REPORT_SUBMITTED_TOAST
+    toastState.show({ variant: 'success', message: REPORT_SUBMITTED_TOAST })
+    closeReportDialog()
+  } catch (err) {
+    reportError = messageFromError(err, 'Failed to submit report.')
+  } finally {
+    reportSubmitting = false
+  }
+}
+
 $effect(() => {
   if (!activeGuild) return
   loading = true
@@ -850,6 +901,9 @@ $effect(() => {
   resetKickDialogState()
   banDialogMemberId = null
   resetBanDialogState()
+  reportDialogMemberId = null
+  reportSubmitting = false
+  reportError = null
   messageHistoryMemberId = null
   roleOverridesByMember = {}
   scrollTop = 0
@@ -884,6 +938,13 @@ $effect(() => {
 $effect(() => {
   if (canViewModerationLog || activePanel !== 'mod-log') return
   activePanel = 'members'
+})
+
+$effect(() => {
+  if (!reportDialogMemberId || reportDialogMember) return
+  reportDialogMemberId = null
+  reportSubmitting = false
+  reportError = null
 })
 </script>
 
@@ -1068,6 +1129,15 @@ $effect(() => {
             <button
               type="button"
               class="rounded-md border border-border px-2 py-1 text-xs hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+              onclick={() => openReportDialog(selectedMember)}
+              disabled={reportSubmitting}
+              data-testid="report-user-button"
+            >
+              Report user
+            </button>
+            <button
+              type="button"
+              class="rounded-md border border-border px-2 py-1 text-xs hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
               onclick={() => void toggleBlockForMember(selectedMember)}
               disabled={pendingBlockUserId === selectedMember.userId}
             >
@@ -1163,6 +1233,21 @@ $effect(() => {
     {/if}
   {/if}
 </aside>
+
+<ReportDialog
+  open={reportDialogMember !== null}
+  title={
+    reportDialogMember
+      ? `Report user ${reportDialogMember.displayName}`
+      : 'Report user'
+  }
+  description="Describe why this member should be reviewed by moderators."
+  submitLabel="Submit report"
+  submitting={reportSubmitting}
+  errorMessage={reportError}
+  onCancel={closeReportDialog}
+  onSubmit={(payload) => void submitUserReport(payload)}
+/>
 
 {#if muteDialogMember}
   <div

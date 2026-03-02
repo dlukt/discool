@@ -32,6 +32,34 @@ export type CreateMessageDeleteInput = {
   reason: string
 }
 
+export type ReportCategory = 'spam' | 'harassment' | 'rule_violation' | 'other'
+
+export type CreateMessageReportInput = {
+  messageId: string
+  reason: string
+  category?: ReportCategory | null
+}
+
+export type CreateUserReportInput = {
+  targetUserId: string
+  reason: string
+  category?: ReportCategory | null
+}
+
+export type UserContentReport = {
+  id: string
+  guildSlug: string
+  reporterUserId: string
+  targetType: 'message' | 'user'
+  targetMessageId: string | null
+  targetUserId: string | null
+  reason: string
+  category: ReportCategory | null
+  status: 'pending' | 'reviewed' | 'actioned' | 'dismissed'
+  createdAt: string
+  updatedAt: string
+}
+
 export type MuteAction = {
   id: string
   guildSlug: string
@@ -252,6 +280,25 @@ type MessageDeleteActionWire = {
   updated_at: string
 }
 
+type CreateReportWire = {
+  reason: string
+  category?: ReportCategory
+}
+
+type UserContentReportWire = {
+  id: string
+  guild_slug: string
+  reporter_user_id: string
+  target_type: 'message' | 'user'
+  target_message_id?: string
+  target_user_id?: string
+  reason: string
+  category?: ReportCategory
+  status: 'pending' | 'reviewed' | 'actioned' | 'dismissed'
+  created_at: string
+  updated_at: string
+}
+
 type ModerationLogEntryWire = {
   id: string
   action_type: ModerationLogActionType
@@ -383,6 +430,26 @@ function normalizeDeleteMessageWindow(value: string): BanDeleteMessageWindow {
   )
 }
 
+function normalizeOptionalReportCategory(
+  value: string | null | undefined,
+): ReportCategory | null {
+  if (value === undefined || value === null) return null
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) return null
+  if (
+    normalized === 'spam' ||
+    normalized === 'harassment' ||
+    normalized === 'rule_violation' ||
+    normalized === 'other'
+  ) {
+    return normalized
+  }
+  throw new ApiError(
+    'VALIDATION_ERROR',
+    'category must be one of: spam, harassment, rule_violation, other',
+  )
+}
+
 function toBanAction(wire: BanActionWire): BanAction {
   return {
     id: wire.id,
@@ -413,6 +480,22 @@ function toMessageDeleteAction(
     actorUserId: wire.actor_user_id,
     targetUserId: wire.target_user_id,
     reason: wire.reason,
+    createdAt: wire.created_at,
+    updatedAt: wire.updated_at,
+  }
+}
+
+function toUserContentReport(wire: UserContentReportWire): UserContentReport {
+  return {
+    id: wire.id,
+    guildSlug: wire.guild_slug,
+    reporterUserId: wire.reporter_user_id,
+    targetType: wire.target_type,
+    targetMessageId: wire.target_message_id ?? null,
+    targetUserId: wire.target_user_id ?? null,
+    reason: wire.reason,
+    category: wire.category ?? null,
+    status: wire.status,
     createdAt: wire.created_at,
     updatedAt: wire.updated_at,
   }
@@ -478,6 +561,18 @@ function messageDeleteCreatePath(guildSlug: string, messageId: string): string {
   const guild = normalizePathPart(guildSlug, 'guildSlug')
   const message = normalizePathPart(messageId, 'messageId')
   return `/api/v1/guilds/${guild}/moderation/messages/${message}/delete`
+}
+
+function messageReportCreatePath(guildSlug: string, messageId: string): string {
+  const guild = normalizePathPart(guildSlug, 'guildSlug')
+  const message = normalizePathPart(messageId, 'messageId')
+  return `/api/v1/guilds/${guild}/moderation/reports/messages/${message}`
+}
+
+function userReportCreatePath(guildSlug: string, targetUserId: string): string {
+  const guild = normalizePathPart(guildSlug, 'guildSlug')
+  const target = normalizePathPart(targetUserId, 'targetUserId')
+  return `/api/v1/guilds/${guild}/moderation/reports/users/${target}`
 }
 
 function moderationLogPath(
@@ -685,6 +780,48 @@ export async function createMessageDelete(
     },
   )
   return toMessageDeleteAction(wire)
+}
+
+export async function createMessageReport(
+  guildSlug: string,
+  input: CreateMessageReportInput,
+): Promise<UserContentReport> {
+  const payload: CreateReportWire = {
+    reason: normalizeRequiredText(input.reason, 'reason'),
+  }
+  const category = normalizeOptionalReportCategory(input.category)
+  if (category !== null) {
+    payload.category = category
+  }
+  const wire = await apiFetch<UserContentReportWire>(
+    messageReportCreatePath(guildSlug, input.messageId),
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
+  )
+  return toUserContentReport(wire)
+}
+
+export async function createUserReport(
+  guildSlug: string,
+  input: CreateUserReportInput,
+): Promise<UserContentReport> {
+  const payload: CreateReportWire = {
+    reason: normalizeRequiredText(input.reason, 'reason'),
+  }
+  const category = normalizeOptionalReportCategory(input.category)
+  if (category !== null) {
+    payload.category = category
+  }
+  const wire = await apiFetch<UserContentReportWire>(
+    userReportCreatePath(guildSlug, input.targetUserId),
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
+  )
+  return toUserContentReport(wire)
 }
 
 export async function fetchModerationLog(
