@@ -55,6 +55,36 @@ pub async fn insert_guild_member(
     Ok(rows == 1)
 }
 
+pub async fn remove_guild_member(
+    pool: &DbPool,
+    guild_id: &str,
+    user_id: &str,
+) -> Result<u64, AppError> {
+    let rows = match pool {
+        DbPool::Postgres(pool) => sqlx::query(
+            "DELETE FROM guild_members
+                 WHERE guild_id = $1 AND user_id = $2",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+        DbPool::Sqlite(pool) => sqlx::query(
+            "DELETE FROM guild_members
+                 WHERE guild_id = ?1 AND user_id = ?2",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(rows)
+}
+
 pub async fn list_guild_member_profiles(
     pool: &DbPool,
     guild_id: &str,

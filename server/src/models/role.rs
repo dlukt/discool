@@ -617,6 +617,36 @@ pub async fn delete_role_assignments_by_role_id(
     Ok(rows)
 }
 
+pub async fn remove_role_assignments_for_member(
+    pool: &DbPool,
+    guild_id: &str,
+    user_id: &str,
+) -> Result<u64, AppError> {
+    let rows = match pool {
+        DbPool::Postgres(pool) => sqlx::query(
+            "DELETE FROM role_assignments
+                 WHERE guild_id = $1 AND user_id = $2",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+        DbPool::Sqlite(pool) => sqlx::query(
+            "DELETE FROM role_assignments
+                 WHERE guild_id = ?1 AND user_id = ?2",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(rows)
+}
+
 pub async fn delete_custom_role(pool: &DbPool, role_id: &str) -> Result<u64, AppError> {
     let rows = match pool {
         DbPool::Postgres(pool) => sqlx::query("DELETE FROM roles WHERE id = $1 AND is_default = 0")

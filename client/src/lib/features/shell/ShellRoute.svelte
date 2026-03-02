@@ -836,6 +836,32 @@ $effect(() => {
 })
 
 $effect(() => {
+  if (shellMode !== 'channel') return
+  if (guildState.loading) return
+  if (guildState.bySlug(activeGuild)) return
+
+  const fallbackGuild = guildState.guilds[0]
+  if (!fallbackGuild) {
+    if (currentPath !== '/') {
+      void goto('/')
+    }
+    return
+  }
+
+  const fallbackChannel = resolveGuildChannelSlug(fallbackGuild)
+  if (!fallbackChannel) {
+    if (currentPath !== '/') {
+      void goto('/')
+    }
+    return
+  }
+
+  const fallbackPath = `/${fallbackGuild.slug}/${fallbackChannel}`
+  if (currentPath === fallbackPath) return
+  void goto(fallbackPath)
+})
+
+$effect(() => {
   if (shellMode === 'channel') {
     presenceState.setRouting(activeGuild, activeChannel)
     return

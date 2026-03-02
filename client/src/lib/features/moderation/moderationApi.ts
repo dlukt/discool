@@ -7,6 +7,11 @@ export type CreateMuteInput = {
   isPermanent?: boolean
 }
 
+export type CreateKickInput = {
+  targetUserId: string
+  reason: string
+}
+
 export type MuteAction = {
   id: string
   guildSlug: string
@@ -25,6 +30,16 @@ export type MuteStatus = {
   isPermanent: boolean
   expiresAt: string | null
   reason: string | null
+}
+
+export type KickAction = {
+  id: string
+  guildSlug: string
+  actorUserId: string
+  targetUserId: string
+  reason: string
+  createdAt: string
+  updatedAt: string
 }
 
 type CreateMuteWire = {
@@ -52,6 +67,21 @@ type MuteStatusWire = {
   is_permanent: boolean
   expires_at?: string
   reason?: string
+}
+
+type CreateKickWire = {
+  target_user_id: string
+  reason: string
+}
+
+type KickActionWire = {
+  id: string
+  guild_slug: string
+  actor_user_id: string
+  target_user_id: string
+  reason: string
+  created_at: string
+  updated_at: string
 }
 
 function normalizePathPart(value: string, field: string): string {
@@ -121,6 +151,18 @@ function toMuteStatus(wire: MuteStatusWire): MuteStatus {
   }
 }
 
+function toKickAction(wire: KickActionWire): KickAction {
+  return {
+    id: wire.id,
+    guildSlug: wire.guild_slug,
+    actorUserId: wire.actor_user_id,
+    targetUserId: wire.target_user_id,
+    reason: wire.reason,
+    createdAt: wire.created_at,
+    updatedAt: wire.updated_at,
+  }
+}
+
 function muteCreatePath(guildSlug: string): string {
   const guild = normalizePathPart(guildSlug, 'guildSlug')
   return `/api/v1/guilds/${guild}/moderation/mutes`
@@ -129,6 +171,11 @@ function muteCreatePath(guildSlug: string): string {
 function muteStatusPath(guildSlug: string): string {
   const guild = normalizePathPart(guildSlug, 'guildSlug')
   return `/api/v1/guilds/${guild}/moderation/me/mute-status`
+}
+
+function kickCreatePath(guildSlug: string): string {
+  const guild = normalizePathPart(guildSlug, 'guildSlug')
+  return `/api/v1/guilds/${guild}/moderation/kicks`
 }
 
 export async function createMute(
@@ -164,4 +211,19 @@ export async function fetchMyMuteStatus(
 ): Promise<MuteStatus> {
   const wire = await apiFetch<MuteStatusWire>(muteStatusPath(guildSlug))
   return toMuteStatus(wire)
+}
+
+export async function createKick(
+  guildSlug: string,
+  input: CreateKickInput,
+): Promise<KickAction> {
+  const payload: CreateKickWire = {
+    target_user_id: normalizeRequiredText(input.targetUserId, 'targetUserId'),
+    reason: normalizeRequiredText(input.reason, 'reason'),
+  }
+  const wire = await apiFetch<KickActionWire>(kickCreatePath(guildSlug), {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  return toKickAction(wire)
 }

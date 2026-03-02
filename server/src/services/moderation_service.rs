@@ -7,7 +7,7 @@ use crate::{
     db::DbPool,
     models::{
         guild::{self, Guild},
-        guild_member, moderation,
+        guild_member, moderation, role,
     },
     permissions,
 };
@@ -20,6 +20,12 @@ pub struct CreateMuteInput {
     pub target_user_id: String,
     pub reason: String,
     pub duration_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateKickInput {
+    pub target_user_id: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -46,6 +52,17 @@ pub struct MuteStatusResponse {
     pub expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct KickActionResponse {
+    pub id: String,
+    pub guild_slug: String,
+    pub actor_user_id: String,
+    pub target_user_id: String,
+    pub reason: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 pub async fn create_mute(
@@ -77,11 +94,6 @@ pub async fn create_mute(
     )
     .await?;
 
-    if !guild_member::is_guild_member(pool, &guild.id, &target_user_id).await? {
-        return Err(AppError::ValidationError(
-            "target_user_id must belong to a guild member".to_string(),
-        ));
-    }
     if !permissions::actor_outranks_target_member(pool, &guild, &actor_user_id, &target_user_id)
         .await?
     {
@@ -124,6 +136,93 @@ pub async fn create_mute(
         duration_seconds,
         expires_at,
         is_permanent: duration_seconds.is_none(),
+        created_at: now_str.clone(),
+        updated_at: now_str,
+    })
+}
+
+pub async fn create_kick(
+    pool: &DbPool,
+    actor_user_id: &str,
+    guild_slug: &str,
+    input: CreateKickInput,
+) -> Result<KickActionResponse, AppError> {
+    let actor_user_id = normalize_id(actor_user_id, "actor_user_id")?;
+    let guild_slug = normalize_slug(guild_slug, "guild_slug")?;
+    let target_user_id = normalize_id(&input.target_user_id, "target_user_id")?;
+    if actor_user_id == target_user_id {
+        return Err(AppError::ValidationError(
+            "Cannot kick yourself".to_string(),
+        ));
+    }
+    let reason = normalize_reason(&input.reason)?;
+
+    let guild = guild::find_guild_by_slug(pool, &guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    permissions::require_guild_permission(
+        pool,
+        &guild,
+        &actor_user_id,
+        permissions::KICK_MEMBERS,
+        "KICK_MEMBERS",
+    )
+    .await?;
+
+    if target_user_id == guild.owner_id {
+        return Err(AppError::Forbidden(
+            "Cannot kick the guild owner".to_string(),
+        ));
+    }
+    if !guild_member::is_guild_member(pool, &guild.id, &target_user_id).await? {
+        return Err(AppError::ValidationError(
+            "target_user_id must belong to a guild member".to_string(),
+        ));
+    }
+    if !permissions::actor_outranks_target_member(pool, &guild, &actor_user_id, &target_user_id)
+        .await?
+    {
+        return Err(AppError::Forbidden(
+            "You can only kick members below your highest role".to_string(),
+        ));
+    }
+
+    let now = Utc::now();
+    let now_str = now.to_rfc3339();
+    moderation::deactivate_active_mutes_for_target(pool, &guild.id, &target_user_id, &now_str)
+        .await?;
+
+    let id = Uuid::new_v4().to_string();
+    moderation::insert_moderation_action(
+        pool,
+        &id,
+        moderation::MODERATION_ACTION_TYPE_KICK,
+        &guild.id,
+        &actor_user_id,
+        &target_user_id,
+        &reason,
+        None,
+        None,
+        false,
+        &now_str,
+        &now_str,
+    )
+    .await?;
+    role::remove_role_assignments_for_member(pool, &guild.id, &target_user_id).await?;
+    let removed_membership =
+        guild_member::remove_guild_member(pool, &guild.id, &target_user_id).await?;
+    if removed_membership != 1 {
+        return Err(AppError::ValidationError(
+            "target_user_id must belong to a guild member".to_string(),
+        ));
+    }
+
+    Ok(KickActionResponse {
+        id,
+        guild_slug: guild.slug,
+        actor_user_id,
+        target_user_id,
+        reason,
         created_at: now_str.clone(),
         updated_at: now_str,
     })
@@ -359,6 +458,7 @@ mod tests {
         .unwrap();
 
         for user_id in [
+            "owner-user-id",
             "mod-user-id",
             "target-user-id",
             "peer-user-id",
@@ -420,7 +520,7 @@ mod tests {
         .bind("Moderator")
         .bind("#3366ff")
         .bind(10_i64)
-        .bind(permissions::MUTE_MEMBERS as i64)
+        .bind((permissions::MUTE_MEMBERS | permissions::KICK_MEMBERS) as i64)
         .bind(0_i64)
         .bind(now)
         .bind(now)
@@ -592,6 +692,150 @@ mod tests {
         assert_eq!(permanent.duration_seconds, None);
         assert_eq!(permanent.expires_at, None);
         assert!(permanent.is_permanent);
+    }
+
+    #[tokio::test]
+    async fn create_kick_enforces_permission_hierarchy_and_target_guards() {
+        let pool = setup_service_pool().await;
+        let missing_permission = create_kick(
+            &pool,
+            "peer-user-id",
+            "test-guild",
+            CreateKickInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "reason".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(missing_permission, AppError::Forbidden(_)));
+
+        let hierarchy_error = create_kick(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateKickInput {
+                target_user_id: "high-target-user-id".to_string(),
+                reason: "reason".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(hierarchy_error, AppError::Forbidden(_)));
+
+        let self_error = create_kick(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateKickInput {
+                target_user_id: "mod-user-id".to_string(),
+                reason: "reason".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(self_error, AppError::ValidationError(_)));
+
+        let owner_error = create_kick(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateKickInput {
+                target_user_id: "owner-user-id".to_string(),
+                reason: "reason".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(owner_error, AppError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn create_kick_removes_member_and_records_audit_action() {
+        let pool = setup_service_pool().await;
+        moderation::insert_moderation_action(
+            &pool,
+            "mute-before-kick",
+            moderation::MODERATION_ACTION_TYPE_MUTE,
+            "guild-id",
+            "mod-user-id",
+            "target-user-id",
+            "active mute",
+            Some(3600),
+            Some("2030-01-01T00:00:00Z"),
+            true,
+            "2026-03-01T00:00:00Z",
+            "2026-03-01T00:00:00Z",
+        )
+        .await
+        .unwrap();
+
+        let created = create_kick(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateKickInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "serious breach".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(created.target_user_id, "target-user-id");
+        assert!(
+            !guild_member::is_guild_member(&pool, "guild-id", "target-user-id")
+                .await
+                .unwrap()
+        );
+        assert!(
+            role::list_assigned_role_ids(&pool, "guild-id", "target-user-id")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let DbPool::Sqlite(sqlite_pool) = &pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+        let action_type = sqlx::query_scalar::<_, String>(
+            "SELECT action_type FROM moderation_actions WHERE id = ?1",
+        )
+        .bind(&created.id)
+        .fetch_one(sqlite_pool)
+        .await
+        .unwrap();
+        let duration_seconds = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT duration_seconds FROM moderation_actions WHERE id = ?1",
+        )
+        .bind(&created.id)
+        .fetch_one(sqlite_pool)
+        .await
+        .unwrap();
+        let expires_at = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT expires_at FROM moderation_actions WHERE id = ?1",
+        )
+        .bind(&created.id)
+        .fetch_one(sqlite_pool)
+        .await
+        .unwrap();
+        let is_active =
+            sqlx::query_scalar::<_, i64>("SELECT is_active FROM moderation_actions WHERE id = ?1")
+                .bind(&created.id)
+                .fetch_one(sqlite_pool)
+                .await
+                .unwrap();
+        assert_eq!(action_type, moderation::MODERATION_ACTION_TYPE_KICK);
+        assert_eq!(duration_seconds, None);
+        assert_eq!(expires_at, None);
+        assert_eq!(is_active, 0);
+
+        assert!(
+            moderation::find_latest_active_mute_for_target(&pool, "guild-id", "target-user-id")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

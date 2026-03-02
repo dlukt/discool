@@ -74,6 +74,7 @@ const { voiceState } = vi.hoisted(() => ({
 const { guildState, channelState, dmState } = vi.hoisted(() => {
   const guildState = {
     version: 0,
+    loading: false,
     guilds: [
       {
         id: 'guild-1',
@@ -457,6 +458,7 @@ describe('ShellRoute', () => {
     wsLifecycleState.value = 'disconnected'
     lifecycleListeners.clear()
     routerGoto.mockClear()
+    guildState.loading = false
     guildState.guilds = [createLobbyGuild()]
     channelState.activeGuild = 'lobby'
     channelState.channelsByGuild = {
@@ -520,6 +522,37 @@ describe('ShellRoute', () => {
     expect(queryByTestId('tablet-member-list')).not.toBeInTheDocument()
     await fireEvent.click(getByRole('button', { name: 'Toggle members' }))
     expect(await findByTestId('tablet-member-list')).toBeInTheDocument()
+  })
+
+  it('falls back to the first accessible guild when active guild is removed', async () => {
+    guildState.guilds = [createEngineeringGuild()]
+    channelState.channelsByGuild = {
+      engineering: createEngineeringChannels(),
+    }
+    channelState.channels = [...channelState.channelsByGuild.engineering]
+
+    const props = buildProps({
+      route: {
+        result: {
+          path: {
+            condition: 'exact-match',
+            original: '/lobby/general',
+            params: { guild: 'lobby', channel: 'general' },
+          },
+          querystring: {
+            condition: 'exact-match',
+            original: {},
+            params: {},
+          },
+          status: 200,
+        },
+      },
+    })
+    render(ShellRoute, props)
+
+    await waitFor(() => {
+      expect(routerGoto).toHaveBeenCalledWith('/engineering/announcements')
+    })
   })
 
   it('keeps desktop member rail mounted at fixed sidebar width', () => {

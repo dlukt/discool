@@ -14,7 +14,7 @@ import type {
 } from '$lib/features/guild/types'
 import { blockState } from '$lib/features/identity/blockStore.svelte'
 import { identityState } from '$lib/features/identity/identityStore.svelte'
-import { createMute } from '$lib/features/moderation/moderationApi'
+import { createKick, createMute } from '$lib/features/moderation/moderationApi'
 import { toastState } from '$lib/feedback/toastStore.svelte'
 import { presenceState } from './presenceStore.svelte'
 
@@ -95,6 +95,9 @@ let muteDurationPreset = $state<MuteDurationPreset>('24h')
 let muteCustomMinutes = $state('60')
 let muteReason = $state('')
 let muteSubmitting = $state(false)
+let kickDialogMemberId = $state<string | null>(null)
+let kickReason = $state('')
+let kickSubmitting = $state(false)
 let roleOverridesByMember = $state<Record<string, string[]>>({})
 let scrollTop = $state(0)
 let viewportHeight = $state(240)
@@ -228,6 +231,13 @@ let muteDialogMember = $derived(
   muteDialogMemberId
     ? (membersWithPresence.find(
         (member) => member.userId === muteDialogMemberId,
+      ) ?? null)
+    : null,
+)
+let kickDialogMember = $derived(
+  kickDialogMemberId
+    ? (membersWithPresence.find(
+        (member) => member.userId === kickDialogMemberId,
       ) ?? null)
     : null,
 )
@@ -547,6 +557,27 @@ function closeMuteDialog(): void {
   resetMuteDialogState()
 }
 
+function resetKickDialogState(): void {
+  kickReason = ''
+  kickSubmitting = false
+}
+
+function openKickDialog(member: GuildMember): void {
+  if (member.userId === currentUserId) {
+    errorMessage = 'Cannot kick yourself.'
+    return
+  }
+  kickDialogMemberId = member.userId
+  resetKickDialogState()
+  errorMessage = null
+  statusMessage = null
+}
+
+function closeKickDialog(): void {
+  kickDialogMemberId = null
+  resetKickDialogState()
+}
+
 function durationSecondsForPreset(preset: MuteDurationPreset): number | null {
   if (preset === '1h') return 60 * 60
   if (preset === '24h') return 24 * 60 * 60
@@ -622,6 +653,40 @@ async function submitMute(): Promise<void> {
   }
 }
 
+async function submitKick(): Promise<void> {
+  if (kickSubmitting || !kickDialogMember) return
+  const trimmedReason = kickReason.trim()
+  if (!trimmedReason) {
+    errorMessage = 'Reason is required.'
+    return
+  }
+  if (trimmedReason.length > MAX_MUTE_REASON_CHARS) {
+    errorMessage = `Reason must be ${MAX_MUTE_REASON_CHARS} characters or less.`
+    return
+  }
+
+  kickSubmitting = true
+  errorMessage = null
+  try {
+    await createKick(activeGuild, {
+      targetUserId: kickDialogMember.userId,
+      reason: trimmedReason,
+    })
+    const successMessage = 'User kicked from guild'
+    statusMessage = successMessage
+    toastState.show({ variant: 'success', message: successMessage })
+    closeKickDialog()
+    await Promise.all([
+      guildState.loadMembers(activeGuild, true),
+      guildState.loadGuilds(true),
+    ])
+  } catch (err) {
+    errorMessage = messageFromError(err, 'Failed to kick member.')
+  } finally {
+    kickSubmitting = false
+  }
+}
+
 async function toggleBlockForMember(member: GuildMember): Promise<void> {
   if (pendingBlockUserId || !currentUserId || member.userId === currentUserId) {
     return
@@ -671,6 +736,8 @@ $effect(() => {
   assignPanelMemberId = null
   muteDialogMemberId = null
   resetMuteDialogState()
+  kickDialogMemberId = null
+  resetKickDialogState()
   roleOverridesByMember = {}
   scrollTop = 0
   const guildSlug = activeGuild
@@ -877,6 +944,15 @@ $effect(() => {
                 >
                   Mute member
                 </button>
+              {:else if action.permission === 'KICK_MEMBERS'}
+                <button
+                  type="button"
+                  class="rounded-md border border-border px-2 py-1 text-xs hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+                  onclick={() => openKickDialog(selectedMember)}
+                  disabled={selectedMember.userId === currentUserId}
+                >
+                  Kick member
+                </button>
               {:else}
                 <button
                   type="button"
@@ -1006,6 +1082,69 @@ $effect(() => {
             data-testid="mute-submit-button"
           >
             {muteSubmitting ? 'Muting...' : 'Mute member'}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if kickDialogMember}
+  <div
+    class="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4"
+    role="presentation"
+  >
+    <div
+      class="w-full max-w-md rounded-md border border-border bg-card p-4 shadow-xl"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Kick ${kickDialogMember.displayName}`}
+      data-testid="kick-dialog"
+    >
+      <header class="mb-3 flex items-center justify-between gap-2">
+        <h3 class="text-sm font-semibold text-foreground">
+          Kick {kickDialogMember.displayName}
+        </h3>
+        <button
+          type="button"
+          class="rounded-md bg-muted px-2 py-1 text-xs hover:opacity-90"
+          onclick={closeKickDialog}
+        >
+          Close
+        </button>
+      </header>
+
+      <div class="space-y-3">
+        <p class="text-xs text-muted-foreground">
+          This will remove {kickDialogMember.displayName} from the guild.
+        </p>
+        <label class="block space-y-1 text-xs text-muted-foreground">
+          <span class="font-medium text-foreground">Reason</span>
+          <textarea
+            class="min-h-[84px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            maxlength={MAX_MUTE_REASON_CHARS}
+            bind:value={kickReason}
+            data-testid="kick-reason-input"
+          ></textarea>
+        </label>
+
+        <div class="flex justify-end gap-2">
+          <button
+            type="button"
+            class="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-muted"
+            onclick={closeKickDialog}
+            disabled={kickSubmitting}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+            onclick={() => void submitKick()}
+            disabled={kickSubmitting}
+            data-testid="kick-submit-button"
+          >
+            {kickSubmitting ? 'Kicking...' : 'Kick member'}
           </button>
         </div>
       </div>

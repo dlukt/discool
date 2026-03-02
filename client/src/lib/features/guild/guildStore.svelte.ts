@@ -2,6 +2,8 @@ import {
   getGuildOrder,
   saveGuildOrder,
 } from '$lib/features/identity/navigationState'
+import { wsClient } from '$lib/ws/client'
+import type { WsEnvelope } from '$lib/ws/protocol'
 import {
   createGuild as createGuildApi,
   createRole as createRoleApi,
@@ -27,6 +29,16 @@ import type {
   UpdateGuildMemberRolesInput,
   UpdateGuildRoleInput,
 } from './types'
+
+function parseGuildUpdateGuildSlug(envelope: WsEnvelope): string | null {
+  if (envelope.op !== 'guild_update') return null
+  const payload = envelope.d
+  if (typeof payload !== 'object' || payload === null) return null
+  const guildSlug = (payload as Record<string, unknown>).guild_slug
+  if (typeof guildSlug !== 'string') return null
+  const normalized = guildSlug.trim()
+  return normalized || null
+}
 
 function normalizeGuildOrder(order: string[]): string[] {
   return [...new Set(order.map((slug) => slug.trim()).filter(Boolean))]
@@ -420,4 +432,11 @@ export const guildState = $state({
     guildState.memberRoleDataByGuild = {}
     guildState.error = null
   },
+})
+
+wsClient.subscribe((envelope) => {
+  const guildSlug = parseGuildUpdateGuildSlug(envelope)
+  if (!guildSlug) return
+  delete guildState.memberRoleDataByGuild[guildSlug]
+  void guildState.loadGuilds(true).catch(() => {})
 })

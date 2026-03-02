@@ -11,7 +11,8 @@ use serde_json::json;
 use crate::{
     AppError, AppState,
     middleware::auth::AuthenticatedUser,
-    services::moderation_service::{self, CreateMuteInput},
+    services::moderation_service::{self, CreateKickInput, CreateMuteInput},
+    ws::{protocol::ServerOp, registry},
 };
 
 #[derive(Debug, Deserialize)]
@@ -22,6 +23,12 @@ pub struct CreateMuteRequest {
     pub duration_seconds: Option<i64>,
     #[serde(default)]
     pub is_permanent: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateKickRequest {
+    pub target_user_id: Option<String>,
+    pub reason: Option<String>,
 }
 
 pub async fn create_mute(
@@ -35,6 +42,21 @@ pub async fn create_mute(
     let input = to_create_mute_input(req)?;
     let created =
         moderation_service::create_mute(&state.pool, &user.user_id, &guild_slug, input).await?;
+    Ok((StatusCode::CREATED, Json(json!({ "data": created }))).into_response())
+}
+
+pub async fn create_kick(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(guild_slug): Path<String>,
+    payload: Result<Json<CreateKickRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+    let input = to_create_kick_input(req)?;
+    let created =
+        moderation_service::create_kick(&state.pool, &user.user_id, &guild_slug, input).await?;
+    emit_kick_guild_updates(&guild_slug, &created.actor_user_id, &created.target_user_id);
     Ok((StatusCode::CREATED, Json(json!({ "data": created }))).into_response())
 }
 
@@ -76,6 +98,43 @@ fn to_create_mute_input(req: CreateMuteRequest) -> Result<CreateMuteInput, AppEr
         reason: reason.to_string(),
         duration_seconds,
     })
+}
+
+fn to_create_kick_input(req: CreateKickRequest) -> Result<CreateKickInput, AppError> {
+    let target_user_id = req.target_user_id.as_deref().unwrap_or("").trim();
+    if target_user_id.is_empty() {
+        return Err(AppError::ValidationError(
+            "target_user_id is required".to_string(),
+        ));
+    }
+    let reason = req.reason.as_deref().unwrap_or("").trim();
+    if reason.is_empty() {
+        return Err(AppError::ValidationError("reason is required".to_string()));
+    }
+
+    Ok(CreateKickInput {
+        target_user_id: target_user_id.to_string(),
+        reason: reason.to_string(),
+    })
+}
+
+fn emit_kick_guild_updates(guild_slug: &str, actor_user_id: &str, target_user_id: &str) {
+    let target_users = vec![actor_user_id.to_string(), target_user_id.to_string()];
+    for connection in registry::user_connection_targets(&target_users) {
+        if connection.user_id == target_user_id {
+            registry::unsubscribe(&connection.connection_id, guild_slug, None);
+        }
+        registry::send_event(
+            &connection.connection_id,
+            ServerOp::GuildUpdate,
+            &json!({
+                "guild_slug": guild_slug,
+                "event": "member_removed",
+                "action_type": "kick",
+                "target_user_id": target_user_id,
+            }),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -194,7 +253,10 @@ mod tests {
                     .bind("Moderator")
                     .bind("#3366ff")
                     .bind(10_i64)
-                    .bind(crate::permissions::MUTE_MEMBERS as i64)
+                    .bind(
+                        (crate::permissions::MUTE_MEMBERS | crate::permissions::KICK_MEMBERS)
+                            as i64,
+                    )
                     .bind(0_i64)
                     .bind(created_at)
                     .bind(created_at)
@@ -288,7 +350,10 @@ mod tests {
                     .bind("Moderator")
                     .bind("#3366ff")
                     .bind(10_i64)
-                    .bind(crate::permissions::MUTE_MEMBERS as i64)
+                    .bind(
+                        (crate::permissions::MUTE_MEMBERS | crate::permissions::KICK_MEMBERS)
+                            as i64,
+                    )
                     .bind(0_i64)
                     .bind(created_at)
                     .bind(created_at)
@@ -346,6 +411,21 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn to_create_kick_input_validates_required_fields() {
+        let missing_target = to_create_kick_input(CreateKickRequest {
+            target_user_id: None,
+            reason: Some("reason".to_string()),
+        });
+        assert!(matches!(missing_target, Err(AppError::ValidationError(_))));
+
+        let missing_reason = to_create_kick_input(CreateKickRequest {
+            target_user_id: Some("target".to_string()),
+            reason: Some("   ".to_string()),
+        });
+        assert!(matches!(missing_reason, Err(AppError::ValidationError(_))));
+    }
+
     #[tokio::test]
     async fn create_mute_returns_data_envelope() {
         let state = test_state().await;
@@ -375,6 +455,36 @@ mod tests {
         assert_eq!(
             payload["data"]["duration_seconds"],
             Value::Number(3600.into())
+        );
+    }
+
+    #[tokio::test]
+    async fn create_kick_returns_data_envelope() {
+        let state = test_state().await;
+        seed_guild_fixture(&state).await;
+        let response = create_kick(
+            State(state.clone()),
+            mod_user(),
+            Path("test-guild".to_string()),
+            Ok(Json(CreateKickRequest {
+                target_user_id: Some("target-user-id".to_string()),
+                reason: Some("serious breach".to_string()),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert!(payload.get("data").is_some());
+        assert_eq!(
+            payload["data"]["target_user_id"],
+            Value::String("target-user-id".to_string())
+        );
+        assert_eq!(
+            payload["data"]["reason"],
+            Value::String("serious breach".to_string())
         );
     }
 }

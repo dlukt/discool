@@ -44,6 +44,7 @@ const { guildState, memberDataByGuild, presenceStatuses, identityState } =
     }
 
     const guildState = {
+      loadGuilds: vi.fn(async () => []),
       loadMembers: vi.fn(
         async (guildSlug: string) => memberDataByGuild[guildSlug] ?? emptyData,
       ),
@@ -117,6 +118,23 @@ const moderationApi = vi.hoisted(() => ({
       durationSeconds: 3600,
       expiresAt: '2026-03-02T00:00:00.000Z',
       isPermanent: false,
+      createdAt: '2026-03-01T00:00:00.000Z',
+      updatedAt: '2026-03-01T00:00:00.000Z',
+    }),
+  ),
+  createKick: vi.fn(
+    async (
+      _guildSlug: string,
+      _input: {
+        targetUserId: string
+        reason: string
+      },
+    ) => ({
+      id: 'kick-1',
+      guildSlug: 'lobby',
+      actorUserId: 'user-viewer',
+      targetUserId: 'user-default',
+      reason: 'serious breach',
       createdAt: '2026-03-01T00:00:00.000Z',
       updatedAt: '2026-03-01T00:00:00.000Z',
     }),
@@ -294,7 +312,9 @@ describe('MemberList', () => {
       token: 'token-123',
       user: { id: 'user-viewer' },
     }
+    guildState.loadGuilds.mockClear()
     moderationApi.createMute.mockClear()
+    moderationApi.createKick.mockClear()
   })
 
   it('groups by highest role, sorts online first, and renders status dots', async () => {
@@ -378,9 +398,7 @@ describe('MemberList', () => {
     })
 
     expect(getByRole('button', { name: 'Mute member' })).toBeInTheDocument()
-    expect(
-      getByRole('button', { name: 'Kick member (coming soon)' }),
-    ).toBeInTheDocument()
+    expect(getByRole('button', { name: 'Kick member' })).toBeInTheDocument()
     expect(
       getByRole('button', { name: 'Moderate messages (coming soon)' }),
     ).toBeInTheDocument()
@@ -417,6 +435,43 @@ describe('MemberList', () => {
     })
 
     window.removeEventListener('discool:open-dm-intent', dmIntentHandler)
+  })
+
+  it('submits kick with required reason and refreshes guild visibility', async () => {
+    const { getByTestId, getByRole, getByText } = render(MemberList, {
+      activeGuild: 'lobby',
+    })
+
+    await waitFor(() => {
+      expect(guildState.loadMembers).toHaveBeenCalledWith('lobby', true)
+    })
+
+    await fireEvent.keyDown(getByTestId('member-row-user-default'), {
+      key: 'ContextMenu',
+    })
+    await fireEvent.click(getByRole('button', { name: 'Kick member' }))
+
+    expect(
+      getByRole('dialog', { name: 'Kick General User' }),
+    ).toBeInTheDocument()
+    await fireEvent.click(getByTestId('kick-submit-button'))
+    expect(getByText('Reason is required.')).toBeInTheDocument()
+
+    await fireEvent.input(getByTestId('kick-reason-input'), {
+      target: { value: 'serious breach' },
+    })
+    await fireEvent.click(getByTestId('kick-submit-button'))
+
+    await waitFor(() => {
+      expect(moderationApi.createKick).toHaveBeenCalledWith('lobby', {
+        targetUserId: 'user-default',
+        reason: 'serious breach',
+      })
+    })
+    await waitFor(() => {
+      expect(guildState.loadGuilds).toHaveBeenCalledWith(true)
+    })
+    expect(getByText('User kicked from guild')).toBeInTheDocument()
   })
 
   it('hides blocked members and supports blocking from context actions', async () => {

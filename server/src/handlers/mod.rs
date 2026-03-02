@@ -121,6 +121,10 @@ pub fn router(state: AppState) -> Router {
             post(moderation::create_mute),
         )
         .route(
+            "/guilds/{guild_slug}/moderation/kicks",
+            post(moderation::create_kick),
+        )
+        .route(
             "/guilds/{guild_slug}/moderation/me/mute-status",
             get(moderation::get_my_mute_status),
         )
