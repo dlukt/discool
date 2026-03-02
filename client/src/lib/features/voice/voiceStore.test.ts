@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { wsSend, envelopeListeners, toastState } = vi.hoisted(() => {
+const {
+  wsSend,
+  envelopeListeners,
+  toastState,
+  loadParticipantVolumePreferences,
+  saveParticipantVolumePreferences,
+} = vi.hoisted(() => {
   const envelopeListeners = new Set<(envelope: unknown) => void>()
   const wsSend = vi.fn(
     (_op: string, _payload?: Record<string, unknown>) => true,
@@ -8,7 +14,22 @@ const { wsSend, envelopeListeners, toastState } = vi.hoisted(() => {
   const toastState = {
     show: vi.fn(),
   }
-  return { wsSend, envelopeListeners, toastState }
+  const loadParticipantVolumePreferences = vi.fn(
+    async (_viewerUserId: string): Promise<Record<string, number>> => ({}),
+  )
+  const saveParticipantVolumePreferences = vi.fn(
+    async (
+      _viewerUserId: string,
+      _preferencesByParticipant: Record<string, number>,
+    ): Promise<void> => {},
+  )
+  return {
+    wsSend,
+    envelopeListeners,
+    toastState,
+    loadParticipantVolumePreferences,
+    saveParticipantVolumePreferences,
+  }
 })
 
 vi.mock('$lib/ws/client', () => ({
@@ -25,6 +46,11 @@ vi.mock('$lib/feedback/toastStore.svelte', () => ({
   toastState,
 }))
 
+vi.mock('./participantVolumeStore.svelte', () => ({
+  loadParticipantVolumePreferences,
+  saveParticipantVolumePreferences,
+}))
+
 import {
   VOICE_FAILED_MESSAGE,
   VOICE_RETRY_MESSAGE,
@@ -37,13 +63,24 @@ function emitEnvelope(envelope: unknown): void {
   }
 }
 
+async function flushMicrotasks(iterations = 4): Promise<void> {
+  for (let index = 0; index < iterations; index += 1) {
+    await Promise.resolve()
+  }
+}
+
 describe('voiceState', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.useFakeTimers()
     voiceState.clearActiveChannel()
     wsSend.mockReset()
     wsSend.mockReturnValue(true)
     toastState.show.mockReset()
+    loadParticipantVolumePreferences.mockReset()
+    loadParticipantVolumePreferences.mockResolvedValue({})
+    saveParticipantVolumePreferences.mockReset()
+    saveParticipantVolumePreferences.mockResolvedValue(undefined)
+    await voiceState.initializeParticipantVolumes(null)
   })
 
   afterEach(() => {
@@ -72,6 +109,7 @@ describe('voiceState', () => {
             username: 'alice',
             display_name: 'Alice',
             avatar_color: '#3366ff',
+            audio_stream_id: 'stream-1',
             is_muted: false,
             is_deafened: false,
             is_speaking: true,
@@ -81,6 +119,7 @@ describe('voiceState', () => {
             username: 'bob',
             display_name: null,
             avatar_color: '#ff6633',
+            audio_stream_id: 'stream-2',
             is_muted: true,
             is_deafened: false,
             is_speaking: false,
@@ -96,23 +135,113 @@ describe('voiceState', () => {
         username: 'alice',
         displayName: 'Alice',
         avatarColor: '#3366ff',
+        audioStreamId: 'stream-1',
         isMuted: false,
         isDeafened: false,
         isSpeaking: true,
+        volumePercent: 100,
+        volumeScalar: 1,
       },
       {
         userId: 'user-2',
         username: 'bob',
         displayName: null,
         avatarColor: '#ff6633',
+        audioStreamId: 'stream-2',
         isMuted: true,
         isDeafened: false,
         isSpeaking: false,
+        volumePercent: 100,
+        volumeScalar: 1,
       },
     ])
 
     voiceState.activateVoiceChannel('lobby', 'voice-room')
     expect(voiceState.activeChannelParticipants()).toHaveLength(2)
+  })
+
+  it('loads persisted volumes and applies clamping/default fallback', async () => {
+    loadParticipantVolumePreferences.mockResolvedValue({
+      'user-2': 175,
+      'user-3': -12,
+    })
+
+    await voiceState.initializeParticipantVolumes('viewer-1')
+
+    expect(loadParticipantVolumePreferences).toHaveBeenCalledWith('viewer-1')
+    expect(voiceState.participantVolumeForUser('user-2').volumePercent).toBe(
+      175,
+    )
+    expect(voiceState.participantVolumeForUser('user-3').volumePercent).toBe(0)
+    expect(
+      voiceState.participantVolumeForUser('missing-user').volumePercent,
+    ).toBe(100)
+  })
+
+  it('persists participant volume changes scoped to current viewer identity', async () => {
+    await voiceState.initializeParticipantVolumes('viewer-1')
+
+    voiceState.setParticipantVolume('user-2', 220)
+    await flushMicrotasks()
+
+    expect(saveParticipantVolumePreferences).toHaveBeenCalledWith('viewer-1', {
+      'user-2': 200,
+    })
+
+    loadParticipantVolumePreferences.mockResolvedValue({})
+    await voiceState.initializeParticipantVolumes('viewer-2')
+
+    expect(loadParticipantVolumePreferences).toHaveBeenCalledWith('viewer-2')
+    expect(voiceState.participantVolumeForUser('user-2').volumePercent).toBe(
+      100,
+    )
+  })
+
+  it('queues persistence snapshots without leaking across owner resets', async () => {
+    const firstSaveGate = (() => {
+      let resolve: (() => void) | null = null
+      const promise = new Promise<void>((complete) => {
+        resolve = () => complete()
+      })
+      return {
+        promise,
+        release: () => {
+          if (!resolve) {
+            throw new Error('Expected first save resolver to be assigned')
+          }
+          resolve()
+        },
+      }
+    })()
+    saveParticipantVolumePreferences
+      .mockImplementationOnce(() => firstSaveGate.promise)
+      .mockResolvedValue(undefined)
+
+    await voiceState.initializeParticipantVolumes('viewer-1')
+
+    voiceState.setParticipantVolume('user-2', 110)
+    voiceState.setParticipantVolume('user-3', 120)
+    await voiceState.initializeParticipantVolumes(null)
+
+    await flushMicrotasks()
+    firstSaveGate.release()
+    await flushMicrotasks(8)
+
+    expect(saveParticipantVolumePreferences).toHaveBeenNthCalledWith(
+      1,
+      'viewer-1',
+      {
+        'user-2': 110,
+      },
+    )
+    expect(saveParticipantVolumePreferences).toHaveBeenNthCalledWith(
+      2,
+      'viewer-1',
+      {
+        'user-2': 110,
+        'user-3': 120,
+      },
+    )
   })
 
   it('shows retry copy then terminal failure copy when retries are exhausted', () => {

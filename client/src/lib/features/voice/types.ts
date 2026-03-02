@@ -32,6 +32,7 @@ export type VoiceParticipantWire = {
   username?: string
   display_name?: string | null
   avatar_color?: string | null
+  audio_stream_id?: string | null
   is_muted?: boolean
   is_deafened?: boolean
   is_speaking?: boolean
@@ -54,7 +55,21 @@ export type VoiceParticipant = {
   username: string
   displayName: string | null
   avatarColor: string | null
+  audioStreamId: string | null
   isMuted: boolean
   isDeafened: boolean
   isSpeaking: boolean
+  volumePercent: number
+  volumeScalar: number
+}
+
+export type VoiceParticipantAudioBinding = {
+  userId: string
+  audioStreamId: string | null
+}
+
+export type VoiceParticipantVolumePreference = {
+  participantUserId: string
+  volumePercent: number
+  audioScalar: number
 }

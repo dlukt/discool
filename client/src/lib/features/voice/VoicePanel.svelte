@@ -7,9 +7,19 @@ import VoiceParticipantRow from './VoiceParticipant.svelte'
 type Props = {
   channelName: string
   participants: VoiceParticipant[]
+  canModerateVoiceParticipants?: boolean
+  onParticipantVolumeChange?: (
+    participantUserId: string,
+    volumePercent: number,
+  ) => void
 }
 
-let { channelName, participants }: Props = $props()
+let {
+  channelName,
+  participants,
+  canModerateVoiceParticipants = false,
+  onParticipantVolumeChange,
+}: Props = $props()
 
 let occupancyAnnouncement = $derived(
   `${participants.length} ${participants.length === 1 ? 'user' : 'users'} in voice channel ${channelName}`,
@@ -41,10 +51,14 @@ let occupancyAnnouncement = $derived(
       No participants in voice.
     </p>
   {:else}
-    <ul class="space-y-1" data-testid="voice-panel-list">
-      {#each participants as participant (participant.userId)}
-        <VoiceParticipantRow {participant} />
-      {/each}
-    </ul>
-  {/if}
+      <ul class="space-y-1" data-testid="voice-panel-list">
+        {#each participants as participant (participant.userId)}
+          <VoiceParticipantRow
+            {participant}
+            showKickPlaceholder={canModerateVoiceParticipants}
+            onVolumeChange={onParticipantVolumeChange}
+          />
+        {/each}
+      </ul>
+    {/if}
 </section>

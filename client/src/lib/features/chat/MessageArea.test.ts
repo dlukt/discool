@@ -51,11 +51,18 @@ const {
         username: string
         displayName: string | null
         avatarColor: string | null
+        audioStreamId: string | null
         isMuted: boolean
         isDeafened: boolean
         isSpeaking: boolean
+        volumePercent: number
+        volumeScalar: number
       }>
     >(() => []),
+    initializeParticipantVolumes: vi.fn(
+      async (_ownerUserId: string | null): Promise<void> => {},
+    ),
+    setParticipantVolume: vi.fn(),
     isMuted: false,
     isDeafened: false,
     toggleMute: vi.fn(),
@@ -407,6 +414,8 @@ describe('MessageArea', () => {
     voiceState.statusForChannel.mockReturnValue('idle')
     voiceState.activeChannelParticipants.mockClear()
     voiceState.activeChannelParticipants.mockReturnValue([])
+    voiceState.initializeParticipantVolumes.mockClear()
+    voiceState.setParticipantVolume.mockClear()
     voiceState.isMuted = false
     voiceState.isDeafened = false
     voiceState.toggleMute.mockClear()
@@ -1088,9 +1097,12 @@ describe('MessageArea', () => {
         username: 'bob',
         displayName: 'Bob',
         avatarColor: '#3366ff',
+        audioStreamId: 'stream-2',
         isMuted: true,
         isDeafened: false,
         isSpeaking: true,
+        volumePercent: 100,
+        volumeScalar: 1,
       },
     ])
     const { getByTestId, queryByTestId } = render(MessageArea, {
@@ -1108,6 +1120,69 @@ describe('MessageArea', () => {
     expect(getByTestId('voice-participant-user-2')).toBeInTheDocument()
     await fireEvent.click(getByTestId('voice-bar-toggle-participants'))
     expect(queryByTestId('voice-panel')).not.toBeInTheDocument()
+  })
+
+  it('wires moderator context and participant volume callbacks into VoicePanel', async () => {
+    voiceState.statusForChannel.mockReturnValue('connected')
+    voiceState.activeChannelParticipants.mockReturnValue([
+      {
+        userId: 'user-2',
+        username: 'bob',
+        displayName: 'Bob',
+        avatarColor: '#3366ff',
+        audioStreamId: 'stream-2',
+        isMuted: false,
+        isDeafened: false,
+        isSpeaking: false,
+        volumePercent: 100,
+        volumeScalar: 1,
+      },
+    ])
+    guildState.memberRoleDataForGuild.mockReturnValue({
+      members: [
+        {
+          userId: 'user-1',
+          username: 'alice',
+          displayName: 'Alice',
+          avatarColor: '#3366ff',
+          presenceStatus: 'online',
+          highestRoleColor: '#3366ff',
+          roleIds: ['role-mod'],
+          isOwner: false,
+          canAssignRoles: false,
+        },
+      ],
+      roles: [
+        {
+          id: 'role-mod',
+          permissionsBitflag: 1 << 7,
+          isDefault: false,
+        },
+      ],
+      assignableRoleIds: [],
+      canManageRoles: false,
+    })
+
+    const { getByTestId } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'general',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    await fireEvent.click(getByTestId('voice-bar-toggle-participants'))
+    await fireEvent.click(getByTestId('voice-participant-toggle-user-2'))
+    expect(
+      getByTestId('voice-participant-kick-placeholder-user-2'),
+    ).toBeInTheDocument()
+
+    const slider = getByTestId(
+      'voice-participant-volume-slider-user-2',
+    ) as HTMLInputElement
+    await fireEvent.input(slider, { target: { value: '145' } })
+    expect(voiceState.setParticipantVolume).toHaveBeenCalledWith('user-2', 145)
   })
 
   it('shows retry toast when send fails and retries via toast action', async () => {

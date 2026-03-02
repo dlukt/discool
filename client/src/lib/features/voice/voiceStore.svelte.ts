@@ -1,6 +1,15 @@
 import { toastState } from '$lib/feedback/toastStore.svelte'
 import { wsClient } from '$lib/ws/client'
 import type { WsEnvelope } from '$lib/ws/protocol'
+import {
+  normalizeParticipantVolumePercent,
+  PARTICIPANT_VOLUME_DEFAULT_PERCENT,
+  participantVolumePercentToAudioScalar,
+} from './participantVolume'
+import {
+  loadParticipantVolumePreferences,
+  saveParticipantVolumePreferences,
+} from './participantVolumeStore.svelte'
 import type {
   VoiceConnectionStateWire,
   VoiceConnectionStatus,
@@ -8,6 +17,8 @@ import type {
   VoiceJoinContext,
   VoiceOfferWire,
   VoiceParticipant,
+  VoiceParticipantAudioBinding,
+  VoiceParticipantVolumePreference,
   VoiceStateUpdateWire,
 } from './types'
 import { VoiceWebRtcClient } from './webrtcClient'
@@ -23,8 +34,13 @@ const RETRY_MAX_ATTEMPTS = 2
 
 type VoiceChannelSnapshot = {
   participantCount: number
-  participants: VoiceParticipant[]
+  participants: VoiceParticipantSnapshot[]
 }
+
+type VoiceParticipantSnapshot = Omit<
+  VoiceParticipant,
+  'volumePercent' | 'volumeScalar'
+>
 
 const voiceClient = new VoiceWebRtcClient((op, payload) =>
   wsClient.send(op, payload),
@@ -32,6 +48,8 @@ const voiceClient = new VoiceWebRtcClient((op, payload) =>
 
 let retryTimer: ReturnType<typeof setTimeout> | null = null
 let joinTimeoutTimer: ReturnType<typeof setTimeout> | null = null
+let participantVolumeLoadToken = 0
+let participantVolumePersistQueue: Promise<void> = Promise.resolve()
 
 voiceClient.setSpeakingStateListener((isSpeaking) => {
   handleLocalSpeakingStateChange(isSpeaking)
@@ -39,6 +57,167 @@ voiceClient.setSpeakingStateListener((isSpeaking) => {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
+}
+
+function messageFromError(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message.trim()) {
+    return err.message
+  }
+  return fallback
+}
+
+function normalizeOptionalId(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim()
+  return normalized.length > 0 ? normalized : null
+}
+
+function createVolumePreference(
+  participantUserId: string,
+  volumePercent: number,
+): VoiceParticipantVolumePreference {
+  const normalizedVolumePercent =
+    normalizeParticipantVolumePercent(volumePercent)
+  return {
+    participantUserId,
+    volumePercent: normalizedVolumePercent,
+    audioScalar: participantVolumePercentToAudioScalar(normalizedVolumePercent),
+  }
+}
+
+function participantVolumeMapFromStorage(
+  persistedVolumes: Record<string, number>,
+): Record<string, VoiceParticipantVolumePreference> {
+  const preferencesByUserId: Record<string, VoiceParticipantVolumePreference> =
+    {}
+  for (const [participantUserId, volumePercent] of Object.entries(
+    persistedVolumes,
+  )) {
+    const normalizedUserId = normalizeOptionalId(participantUserId)
+    if (!normalizedUserId) continue
+    preferencesByUserId[normalizedUserId] = createVolumePreference(
+      normalizedUserId,
+      volumePercent,
+    )
+  }
+  return preferencesByUserId
+}
+
+function participantVolumePercentMap(
+  preferencesByUserId: Record<string, VoiceParticipantVolumePreference>,
+): Record<string, number> {
+  const persistedVolumes: Record<string, number> = {}
+  for (const [participantUserId, preference] of Object.entries(
+    preferencesByUserId,
+  )) {
+    persistedVolumes[participantUserId] = normalizeParticipantVolumePercent(
+      preference.volumePercent,
+    )
+  }
+  return persistedVolumes
+}
+
+function sameParticipantVolumePreferences(
+  left: Record<string, VoiceParticipantVolumePreference>,
+  right: Record<string, VoiceParticipantVolumePreference>,
+): boolean {
+  const leftEntries = Object.entries(left)
+  const rightEntries = Object.entries(right)
+  if (leftEntries.length !== rightEntries.length) return false
+  for (const [participantUserId, leftPreference] of leftEntries) {
+    const rightPreference = right[participantUserId]
+    if (
+      !rightPreference ||
+      leftPreference.volumePercent !== rightPreference.volumePercent ||
+      leftPreference.audioScalar !== rightPreference.audioScalar
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+function replaceParticipantVolumePreferences(
+  nextPreferencesByUserId: Record<string, VoiceParticipantVolumePreference>,
+): void {
+  if (
+    sameParticipantVolumePreferences(
+      voiceState.participantVolumePreferencesByUserId,
+      nextPreferencesByUserId,
+    )
+  ) {
+    return
+  }
+  voiceState.participantVolumePreferencesByUserId = nextPreferencesByUserId
+  voiceState.version += 1
+}
+
+function participantVolumePreferenceForUserId(
+  participantUserId: string,
+): VoiceParticipantVolumePreference {
+  const normalizedUserId = participantUserId.trim()
+  if (!normalizedUserId) {
+    return createVolumePreference('', PARTICIPANT_VOLUME_DEFAULT_PERCENT)
+  }
+  const existing =
+    voiceState.participantVolumePreferencesByUserId[normalizedUserId] ?? null
+  return (
+    existing ??
+    createVolumePreference(normalizedUserId, PARTICIPANT_VOLUME_DEFAULT_PERCENT)
+  )
+}
+
+function participantAudioBindingsFromSnapshots(
+  participants: VoiceParticipantSnapshot[],
+): VoiceParticipantAudioBinding[] {
+  return participants.map((participant) => ({
+    userId: participant.userId,
+    audioStreamId: participant.audioStreamId ?? participant.userId,
+  }))
+}
+
+function applyParticipantVolumesToVoiceClient(
+  participants: VoiceParticipantSnapshot[],
+): void {
+  voiceClient.syncParticipantBindings(
+    participantAudioBindingsFromSnapshots(participants),
+  )
+  for (const participant of participants) {
+    const preference = participantVolumePreferenceForUserId(participant.userId)
+    voiceClient.setParticipantVolume(
+      participant.userId,
+      preference.volumePercent,
+    )
+  }
+}
+
+function syncVoiceClientParticipantBindingsForContext(
+  context: VoiceJoinContext | null,
+): void {
+  if (!context) return
+  const key = channelSnapshotKey(context.guildSlug, context.channelSlug)
+  const participants = voiceState.channelSnapshots[key]?.participants ?? []
+  applyParticipantVolumesToVoiceClient(participants)
+}
+
+function queueParticipantVolumePersistence(
+  ownerUserId: string,
+  persistedVolumes: Record<string, number>,
+): void {
+  participantVolumePersistQueue = participantVolumePersistQueue
+    .catch(() => undefined)
+    .then(async () => {
+      await saveParticipantVolumePreferences(ownerUserId, persistedVolumes)
+      voiceState.participantVolumeError = null
+    })
+    .catch((err) => {
+      const message = messageFromError(
+        err,
+        'Failed to save participant volume preferences to local storage',
+      )
+      voiceState.participantVolumeError = message
+      toastState.show({ variant: 'error', message })
+    })
 }
 
 function clearRetryTimer(): void {
@@ -169,6 +348,7 @@ function markConnectedIfActive(context: VoiceJoinContext): void {
     : null
   voiceClient.setMuted(voiceState.isMuted)
   voiceClient.setDeafened(voiceState.isDeafened)
+  syncVoiceClientParticipantBindingsForContext(context)
   sendVoiceStateUpdate(context)
 }
 
@@ -243,7 +423,7 @@ function parseContextFromWire(
   return { guildSlug, channelSlug }
 }
 
-function parseVoiceParticipant(item: unknown): VoiceParticipant | null {
+function parseVoiceParticipant(item: unknown): VoiceParticipantSnapshot | null {
   if (!isRecord(item)) return null
   const userId = typeof item.user_id === 'string' ? item.user_id.trim() : ''
   const username = typeof item.username === 'string' ? item.username.trim() : ''
@@ -256,11 +436,16 @@ function parseVoiceParticipant(item: unknown): VoiceParticipant | null {
     typeof item.avatar_color === 'string' && item.avatar_color.trim()
       ? item.avatar_color.trim()
       : null
+  const audioStreamId =
+    typeof item.audio_stream_id === 'string' && item.audio_stream_id.trim()
+      ? item.audio_stream_id.trim()
+      : null
   return {
     userId,
     username,
     displayName,
     avatarColor,
+    audioStreamId,
     isMuted: item.is_muted === true,
     isDeafened: item.is_deafened === true,
     isSpeaking: item.is_speaking === true,
@@ -277,7 +462,8 @@ function handleVoiceStateUpdate(payload: VoiceStateUpdateWire): void {
   const participants = participantsWire
     .map((item) => parseVoiceParticipant(item))
     .filter(
-      (participant): participant is VoiceParticipant => participant !== null,
+      (participant): participant is VoiceParticipantSnapshot =>
+        participant !== null,
     )
   const participantCount =
     typeof payload.participant_count === 'number' &&
@@ -292,6 +478,9 @@ function handleVoiceStateUpdate(payload: VoiceStateUpdateWire): void {
       participantCount,
       participants,
     },
+  }
+  if (matchesActiveContext(context)) {
+    applyParticipantVolumesToVoiceClient(participants)
   }
   voiceState.version += 1
 }
@@ -445,6 +634,125 @@ export const voiceState = $state({
   connectedAt: null as number | null,
   joinLatencyMs: null as number | null,
   channelSnapshots: {} as Record<string, VoiceChannelSnapshot>,
+  participantVolumeOwnerUserId: null as string | null,
+  participantVolumesLoading: false,
+  participantVolumesLoaded: false,
+  participantVolumeError: null as string | null,
+  participantVolumePreferencesByUserId: {} as Record<
+    string,
+    VoiceParticipantVolumePreference
+  >,
+
+  initializeParticipantVolumes: async (
+    ownerUserId: string | null,
+  ): Promise<void> => {
+    const normalizedOwnerUserId = normalizeOptionalId(ownerUserId)
+    if (!normalizedOwnerUserId) {
+      participantVolumeLoadToken += 1
+      voiceState.participantVolumeOwnerUserId = null
+      voiceState.participantVolumesLoading = false
+      voiceState.participantVolumesLoaded = true
+      voiceState.participantVolumeError = null
+      replaceParticipantVolumePreferences({})
+      voiceClient.clearParticipantVolumes()
+      return
+    }
+    if (
+      voiceState.participantVolumeOwnerUserId === normalizedOwnerUserId &&
+      voiceState.participantVolumesLoaded &&
+      !voiceState.participantVolumesLoading
+    ) {
+      return
+    }
+    voiceState.participantVolumeOwnerUserId = normalizedOwnerUserId
+    voiceState.participantVolumesLoading = true
+    voiceState.participantVolumesLoaded = false
+    voiceState.participantVolumeError = null
+    const loadToken = ++participantVolumeLoadToken
+    let loadedPreferencesByUserId: Record<
+      string,
+      VoiceParticipantVolumePreference
+    > = {}
+    try {
+      const persistedVolumes = await loadParticipantVolumePreferences(
+        normalizedOwnerUserId,
+      )
+      loadedPreferencesByUserId =
+        participantVolumeMapFromStorage(persistedVolumes)
+      if (loadToken !== participantVolumeLoadToken) {
+        return
+      }
+      replaceParticipantVolumePreferences(loadedPreferencesByUserId)
+      voiceState.participantVolumeError = null
+      voiceClient.clearParticipantVolumes()
+      for (const preference of Object.values(loadedPreferencesByUserId)) {
+        voiceClient.setParticipantVolume(
+          preference.participantUserId,
+          preference.volumePercent,
+        )
+      }
+      syncVoiceClientParticipantBindingsForContext(activeContext())
+    } catch (err) {
+      if (loadToken !== participantVolumeLoadToken) {
+        return
+      }
+      replaceParticipantVolumePreferences({})
+      voiceClient.clearParticipantVolumes()
+      const message = messageFromError(
+        err,
+        'Failed to load participant volume preferences from local storage',
+      )
+      voiceState.participantVolumeError = message
+      toastState.show({ variant: 'error', message })
+    } finally {
+      if (loadToken === participantVolumeLoadToken) {
+        voiceState.participantVolumesLoading = false
+        voiceState.participantVolumesLoaded = true
+      }
+    }
+  },
+
+  participantVolumeForUser: (
+    participantUserId: string,
+  ): VoiceParticipantVolumePreference => {
+    return participantVolumePreferenceForUserId(participantUserId)
+  },
+
+  setParticipantVolume: (
+    participantUserId: string,
+    volumePercent: number,
+  ): void => {
+    const normalizedParticipantUserId = participantUserId.trim()
+    if (!normalizedParticipantUserId) return
+    const nextPreference = createVolumePreference(
+      normalizedParticipantUserId,
+      volumePercent,
+    )
+    const currentPreference =
+      voiceState.participantVolumePreferencesByUserId[
+        normalizedParticipantUserId
+      ]
+    if (
+      currentPreference &&
+      currentPreference.volumePercent === nextPreference.volumePercent
+    ) {
+      return
+    }
+    replaceParticipantVolumePreferences({
+      ...voiceState.participantVolumePreferencesByUserId,
+      [normalizedParticipantUserId]: nextPreference,
+    })
+    voiceClient.setParticipantVolume(
+      normalizedParticipantUserId,
+      nextPreference.volumePercent,
+    )
+    const ownerUserId = voiceState.participantVolumeOwnerUserId
+    if (!ownerUserId) return
+    const persistedVolumes = participantVolumePercentMap(
+      voiceState.participantVolumePreferencesByUserId,
+    )
+    queueParticipantVolumePersistence(ownerUserId, persistedVolumes)
+  },
 
   activateVoiceChannel: (guildSlug: string, channelSlug: string): void => {
     const normalizedGuild = guildSlug.trim()
@@ -582,7 +890,16 @@ export const voiceState = $state({
     if (!normalizedGuild || !normalizedChannel) return []
     const key = channelSnapshotKey(normalizedGuild, normalizedChannel)
     const participants = voiceState.channelSnapshots[key]?.participants ?? []
-    return participants.map((participant) => ({ ...participant }))
+    return participants.map((participant) => {
+      const preference = participantVolumePreferenceForUserId(
+        participant.userId,
+      )
+      return {
+        ...participant,
+        volumePercent: preference.volumePercent,
+        volumeScalar: preference.audioScalar,
+      }
+    })
   },
 
   activeChannelParticipants: (): VoiceParticipant[] => {

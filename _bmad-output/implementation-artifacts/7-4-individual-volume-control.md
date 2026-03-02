@@ -1,6 +1,6 @@
 # Story 7.4: Individual Volume Control
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -38,50 +38,50 @@ so that I can balance audio levels to my preference.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add participant volume preference state model in voice store (AC: 2, 3, 4, 5)
-  - [ ] Extend `client/src/lib/features/voice/types.ts` with strongly typed participant volume preference contracts (no `any`).
-  - [ ] Extend `client/src/lib/features/voice/voiceStore.svelte.ts` with per-participant volume selectors/actions keyed by stable user identity.
-  - [ ] Normalize and clamp values to `0..200` percent and derive audio scalar values in one place to prevent drift.
-  - [ ] Keep existing voice lifecycle behavior (`idle/connecting/retrying/connected/failed`) unchanged.
+- [x] Task 1: Add participant volume preference state model in voice store (AC: 2, 3, 4, 5)
+  - [x] Extend `client/src/lib/features/voice/types.ts` with strongly typed participant volume preference contracts (no `any`).
+  - [x] Extend `client/src/lib/features/voice/voiceStore.svelte.ts` with per-participant volume selectors/actions keyed by stable user identity.
+  - [x] Normalize and clamp values to `0..200` percent and derive audio scalar values in one place to prevent drift.
+  - [x] Keep existing voice lifecycle behavior (`idle/connecting/retrying/connected/failed`) unchanged.
 
-- [ ] Task 2: Persist volume preferences in IndexedDB (AC: 3, 4, 5)
-  - [ ] Add voice volume storage module under `client/src/lib/features/voice/` using IndexedDB transaction helpers aligned with existing identity/block patterns.
-  - [ ] Scope persisted values to current viewer identity + participant user ID so settings do not leak between identities.
-  - [ ] Handle database open/read/write failures explicitly with existing user-facing error patterns (no silent failure path).
-  - [ ] Load persisted volume preferences during voice store initialization and apply defaults when missing.
+- [x] Task 2: Persist volume preferences in IndexedDB (AC: 3, 4, 5)
+  - [x] Add voice volume storage module under `client/src/lib/features/voice/` using IndexedDB transaction helpers aligned with existing identity/block patterns.
+  - [x] Scope persisted values to current viewer identity + participant user ID so settings do not leak between identities.
+  - [x] Handle database open/read/write failures explicitly with existing user-facing error patterns (no silent failure path).
+  - [x] Load persisted volume preferences during voice store initialization and apply defaults when missing.
 
-- [ ] Task 3: Wire per-participant playback gain in WebRTC client (AC: 2, 4, 5)
-  - [ ] Refactor `client/src/lib/features/voice/webrtcClient.ts` remote playback tracking from a plain set to a participant-addressable structure.
-  - [ ] Support `0..100%` via `HTMLMediaElement.volume` and `101..200%` via Web Audio `GainNode` amplification path.
-  - [ ] Preserve existing deafen behavior as a global local playback mute across all participant outputs.
-  - [ ] Ensure cleanup closes audio resources (`AudioContext`, nodes, elements) on disconnect/channel switch.
-  - [ ] If deterministic track-to-user mapping is not available in current signaling flow, add minimal metadata to existing voice payloads to establish that mapping without introducing a new transport.
+- [x] Task 3: Wire per-participant playback gain in WebRTC client (AC: 2, 4, 5)
+  - [x] Refactor `client/src/lib/features/voice/webrtcClient.ts` remote playback tracking from a plain set to a participant-addressable structure.
+  - [x] Support `0..100%` via `HTMLMediaElement.volume` and `101..200%` via Web Audio `GainNode` amplification path.
+  - [x] Preserve existing deafen behavior as a global local playback mute across all participant outputs.
+  - [x] Ensure cleanup closes audio resources (`AudioContext`, nodes, elements) on disconnect/channel switch.
+  - [x] If deterministic track-to-user mapping is not available in current signaling flow, add minimal metadata to existing voice payloads to establish that mapping without introducing a new transport.
 
-- [ ] Task 4: Add VoiceParticipant volume slider UI and keyboard semantics (AC: 1, 2, 4, 5)
-  - [ ] Update `client/src/lib/features/voice/VoiceParticipant.svelte` to include a horizontal slider and current percent label.
-  - [ ] Keep existing speaking/muted/deafened visual indicators and reduced-motion behavior intact.
-  - [ ] Add ARIA labeling/value text so screen readers announce participant name and current volume.
-  - [ ] Ensure keyboard interaction supports arrow keys and Home/End with predictable increments.
+- [x] Task 4: Add VoiceParticipant volume slider UI and keyboard semantics (AC: 1, 2, 4, 5)
+  - [x] Update `client/src/lib/features/voice/VoiceParticipant.svelte` to include a horizontal slider and current percent label.
+  - [x] Keep existing speaking/muted/deafened visual indicators and reduced-motion behavior intact.
+  - [x] Add ARIA labeling/value text so screen readers announce participant name and current volume.
+  - [x] Ensure keyboard interaction supports arrow keys and Home/End with predictable increments.
 
-- [ ] Task 5: Add moderator "Kick from voice" placeholder affordance (AC: 6)
-  - [ ] Update `VoiceParticipant`/`VoicePanel` props to accept moderator capability context from caller.
-  - [ ] Show a clearly labeled placeholder action only when viewer has `MUTE_MEMBERS` permission.
-  - [ ] Keep action non-functional in this story (visual placeholder only), with copy indicating Epic 8 ownership.
+- [x] Task 5: Add moderator "Kick from voice" placeholder affordance (AC: 6)
+  - [x] Update `VoiceParticipant`/`VoicePanel` props to accept moderator capability context from caller.
+  - [x] Show a clearly labeled placeholder action only when viewer has `MUTE_MEMBERS` permission.
+  - [x] Keep action non-functional in this story (visual placeholder only), with copy indicating Epic 8 ownership.
 
-- [ ] Task 6: Integrate volume controls in voice panel/message area wiring (AC: 1, 2, 6)
-  - [ ] Update `client/src/lib/features/voice/VoicePanel.svelte` to pass slider callbacks and moderator state into participant rows.
-  - [ ] Update `client/src/lib/features/chat/MessageArea.svelte` wiring to provide permission context from existing guild/member permission data.
-  - [ ] Ensure panel open/close behavior and existing VoiceBar controls remain unchanged.
+- [x] Task 6: Integrate volume controls in voice panel/message area wiring (AC: 1, 2, 6)
+  - [x] Update `client/src/lib/features/voice/VoicePanel.svelte` to pass slider callbacks and moderator state into participant rows.
+  - [x] Update `client/src/lib/features/chat/MessageArea.svelte` wiring to provide permission context from existing guild/member permission data.
+  - [x] Ensure panel open/close behavior and existing VoiceBar controls remain unchanged.
 
-- [ ] Task 7: Add AC-focused tests and run quality gates (AC: all)
-  - [ ] Add/expand `VoiceParticipant.test.ts` for slider rendering, keyboard behavior, ARIA labeling, and default value.
-  - [ ] Add/expand `VoicePanel.test.ts` for participant volume propagation and moderator placeholder visibility.
-  - [ ] Add/expand `voiceStore.test.ts` for persistence load/save, clamping, identity scoping, and default fallback behavior.
-  - [ ] Add targeted tests for `webrtcClient.ts` volume application paths (0-100 direct volume, >100 gain node) and cleanup.
-  - [ ] Update `MessageArea.test.ts` for moderator-context wiring into voice panel.
-  - [ ] Run quality gates:
-    - [ ] `cd client && npm run lint && npm run check && npm run test && npm run build`
-    - [ ] `cd server && cargo fmt --check && cargo clippy -- -D warnings && cargo test` (run fully if any server/wire changes are made)
+- [x] Task 7: Add AC-focused tests and run quality gates (AC: all)
+  - [x] Add/expand `VoiceParticipant.test.ts` for slider rendering, keyboard behavior, ARIA labeling, and default value.
+  - [x] Add/expand `VoicePanel.test.ts` for participant volume propagation and moderator placeholder visibility.
+  - [x] Add/expand `voiceStore.test.ts` for persistence load/save, clamping, identity scoping, and default fallback behavior.
+  - [x] Add targeted tests for `webrtcClient.ts` volume application paths (0-100 direct volume, >100 gain node) and cleanup.
+  - [x] Update `MessageArea.test.ts` for moderator-context wiring into voice panel.
+  - [x] Run quality gates:
+    - [x] `cd client && npm run lint && npm run check && npm run test && npm run build`
+    - [x] `cd server && cargo fmt --check && cargo clippy -- -D warnings && cargo test` (run fully if any server/wire changes are made)
 
 ## Dev Notes
 
@@ -263,18 +263,61 @@ GPT-5.3-Codex (model ID: gpt-5.3-codex)
 - Loaded workflow engine and create-story instructions.
 - Resolved target story from user input and sprint status (`7-4-individual-volume-control`).
 - Analyzed epics/architecture/PRD/UX artifacts, previous story intelligence, current voice implementation, and latest technical references.
-- Generated implementation-ready story context and status handoff.
+- Implemented per-participant volume domain contracts, shared clamp/scalar helpers, and voice store selectors/actions for participant-local volume state.
+- Added IndexedDB-backed participant volume persistence scoped by viewer identity with explicit toast-based error surfacing on load/save failures.
+- Refactored WebRTC remote playback management to participant-addressable outputs with 0-100 media-element volume and 101-200 Web Audio gain amplification plus cleanup.
+- Added interactive VoiceParticipant slider controls, ARIA/value semantics, and moderator-only "Kick from voice" placeholder wiring via VoicePanel and MessageArea permission context.
+- Expanded voice and chat tests (VoiceParticipant, VoicePanel, voiceStore, webrtcClient, MessageArea) and re-ran client quality gates successfully.
 
 ### Completion Notes List
 
-- Story 7.4 context assembled with explicit guardrails to prevent regressions and implementation drift.
-- Existing voice architecture constraints and reuse opportunities are documented for efficient dev execution.
-- Story status is set to `ready-for-dev` for `dev-story` handoff.
+- Completed Story 7.4 implementation across voice state, persistence, playback pipeline, UI, and moderation-context wiring.
+- Volume preferences now clamp to 0..200 with a shared scalar conversion source-of-truth and are restored per viewer identity from IndexedDB.
+- Participant playback now supports amplification above 100% through GainNode while preserving deafen semantics and resource cleanup on disconnect.
+- Voice participant rows now expose click-to-expand slider controls with ARIA/value text and keyboard-operable range behavior.
+- Moderator context now gates a non-functional "Kick from voice (Epic 8 placeholder)" affordance in participant controls.
+- Client quality gates passed: `npm run lint`, `npm run check`, `npm run test`, and `npm run build`.
 
 ### File List
 
 - _bmad-output/implementation-artifacts/7-4-individual-volume-control.md
+- _bmad-output/implementation-artifacts/sprint-status.yaml
+- client/src/lib/features/chat/MessageArea.svelte
+- client/src/lib/features/chat/MessageArea.test.ts
+- client/src/lib/features/voice/participantVolume.ts
+- client/src/lib/features/voice/participantVolumeStore.svelte.ts
+- client/src/lib/features/voice/types.ts
+- client/src/lib/features/voice/VoicePanel.svelte
+- client/src/lib/features/voice/VoicePanel.test.ts
+- client/src/lib/features/voice/VoiceParticipant.svelte
+- client/src/lib/features/voice/VoiceParticipant.test.ts
+- client/src/lib/features/voice/voiceStore.svelte.ts
+- client/src/lib/features/voice/voiceStore.test.ts
+- client/src/lib/features/voice/webrtcClient.ts
+- client/src/lib/features/voice/webrtcClient.test.ts
+
+## Senior Developer Review (AI)
+
+- Reviewer: Darko
+- Date: 2026-03-02
+- Outcome: Approve (after fix)
+- Git vs Story File List Discrepancies: 0
+
+### Findings
+
+1. **MEDIUM** `client/src/lib/features/voice/voiceStore.svelte.ts` queued participant-volume saves using live store state, which could persist the wrong preference map after owner-context reset while saves were queued.
+   - **Fix applied:** persistence queue now captures a snapshot payload at queue time and writes that snapshot (`queueParticipantVolumePersistence(ownerUserId, persistedVolumes)`).
+   - **Regression test added:** `queues persistence snapshots without leaking across owner resets` in `client/src/lib/features/voice/voiceStore.test.ts`.
+
+### Validation
+
+- `cd client && npm run lint && npm run check`
+- `cd client && npm run test`
+- `cd client && npm run build`
+- `cd server && cargo fmt --check && cargo clippy -- -D warnings && cargo test`
 
 ## Change Log
 
 - 2026-03-01: Created Story 7.4 with comprehensive implementation context and marked status as `ready-for-dev`.
+- 2026-03-02: Implemented individual participant volume controls, local IndexedDB persistence, playback gain path, moderator placeholder wiring, and AC-focused client test coverage; status moved to `review`.
+- 2026-03-02: YOLO code review fixed queued volume-persistence snapshot leakage across owner resets, added regression coverage, and moved story status to `done`.

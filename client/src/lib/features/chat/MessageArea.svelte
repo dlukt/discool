@@ -153,6 +153,10 @@ $effect(() => {
   participantsOpen = false
 })
 
+$effect(() => {
+  void voiceState.initializeParticipantVolumes(currentSessionUserId)
+})
+
 let timelineMessages = $derived.by(() => {
   const _messageVersion = messageState.version
   const _blockVersion = blockState.version
@@ -284,11 +288,15 @@ let visibleRows = $derived.by(() => {
 })
 
 let currentSessionUser = $derived(identityState.session?.user ?? null)
+let currentSessionUserId = $derived(currentSessionUser?.id ?? null)
 let activeGuildRecord = $derived(
   isChannelMode ? guildState.bySlug(activeGuild) : null,
 )
 const attachFilesPermission = GUILD_PERMISSION_CATALOG.find(
   (permission) => permission.key === 'ATTACH_FILES',
+)
+const muteMembersPermission = GUILD_PERMISSION_CATALOG.find(
+  (permission) => permission.key === 'MUTE_MEMBERS',
 )
 let memberRoleData = $derived(
   isChannelMode
@@ -328,6 +336,15 @@ let canAttachFiles = $derived(
         hasGuildPermission(
           currentMemberPermissionsBitflag,
           attachFilesPermission,
+        ))),
+)
+let canModerateVoiceParticipants = $derived(
+  isChannelMode &&
+    (Boolean(activeGuildRecord?.isOwner) ||
+      (muteMembersPermission !== undefined &&
+        hasGuildPermission(
+          currentMemberPermissionsBitflag,
+          muteMembersPermission,
         ))),
 )
 let currentRoleColor = $derived(
@@ -1385,6 +1402,10 @@ onMount(() => {
       <VoicePanel
         channelName={activeChannel}
         participants={activeVoiceParticipants}
+        canModerateVoiceParticipants={canModerateVoiceParticipants}
+        onParticipantVolumeChange={(participantUserId, volumePercent) => {
+          voiceState.setParticipantVolume(participantUserId, volumePercent)
+        }}
       />
     {/if}
 

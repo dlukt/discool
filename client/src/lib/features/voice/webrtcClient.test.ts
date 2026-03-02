@@ -47,6 +47,53 @@ class MockPeerConnection {
   }
 }
 
+type MockAudioContextInstance = {
+  close: ReturnType<typeof vi.fn>
+  resume: ReturnType<typeof vi.fn>
+  createMediaElementSource: ReturnType<typeof vi.fn>
+  createGain: ReturnType<typeof vi.fn>
+  gainNode: {
+    gain: { value: number }
+    connect: ReturnType<typeof vi.fn>
+    disconnect: ReturnType<typeof vi.fn>
+  }
+}
+
+const mockAudioContextInstances: MockAudioContextInstance[] = []
+
+class MockAudioContext {
+  destination = {} as AudioNode
+
+  private readonly sourceNode = {
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+  }
+
+  private readonly gainNode = {
+    gain: { value: 1 },
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+  }
+
+  createMediaElementSource = vi.fn(() => this.sourceNode)
+
+  createGain = vi.fn(() => this.gainNode)
+
+  resume = vi.fn(async () => {})
+
+  close = vi.fn(async () => {})
+
+  constructor() {
+    mockAudioContextInstances.push({
+      close: this.close,
+      resume: this.resume,
+      createMediaElementSource: this.createMediaElementSource,
+      createGain: this.createGain,
+      gainNode: this.gainNode,
+    })
+  }
+}
+
 function latestConnection(): MockPeerConnection {
   const connection = MockPeerConnection.instances.at(-1)
   if (!connection) {
@@ -70,6 +117,7 @@ function setMediaDevices(getUserMedia: () => Promise<MediaStream>): void {
 describe('VoiceWebRtcClient', () => {
   beforeEach(() => {
     MockPeerConnection.instances = []
+    mockAudioContextInstances.length = 0
     vi.stubGlobal(
       'RTCPeerConnection',
       MockPeerConnection as unknown as typeof RTCPeerConnection,
@@ -103,6 +151,7 @@ describe('VoiceWebRtcClient', () => {
     } as unknown as MediaStream
     const getUserMedia = vi.fn(async () => mediaStream)
     setMediaDevices(getUserMedia)
+    vi.stubGlobal('AudioContext', undefined)
 
     const client = new VoiceWebRtcClient(sendSignal)
     await client.applyOffer(
@@ -131,6 +180,116 @@ describe('VoiceWebRtcClient', () => {
     expect(audioTrack.stop).toHaveBeenCalledTimes(1)
   })
 
+  it('applies 0..100 participant volume via media element volume', async () => {
+    const sendSignal = vi.fn(() => true)
+    const audioTrack = {
+      stop: vi.fn(),
+      readyState: 'live',
+      enabled: true,
+    } as unknown as MediaStreamTrack
+    const mediaStream = {
+      getAudioTracks: () => [audioTrack],
+      getTracks: () => [audioTrack],
+    } as unknown as MediaStream
+    const getUserMedia = vi.fn(async () => mediaStream)
+    setMediaDevices(getUserMedia)
+    vi.stubGlobal('AudioContext', undefined)
+    const remoteAudioElement = {
+      autoplay: false,
+      playsInline: false,
+      muted: false,
+      volume: 1,
+      srcObject: null as MediaStream | null,
+      play: vi.fn(async () => {}),
+      pause: vi.fn(),
+    } as unknown as HTMLAudioElement
+    const audioCtor = vi.fn(function MockAudio() {
+      return remoteAudioElement
+    })
+    vi.stubGlobal('Audio', audioCtor as unknown as typeof Audio)
+
+    const client = new VoiceWebRtcClient(sendSignal)
+    await client.applyOffer(
+      { guildSlug: 'lobby', channelSlug: 'voice-room' },
+      'v=0\r\n',
+      vi.fn(),
+    )
+
+    client.syncParticipantBindings([
+      { userId: 'user-remote', audioStreamId: 'remote-stream' },
+    ])
+
+    const connection = latestConnection()
+    const remoteStream = { id: 'remote-stream' } as unknown as MediaStream
+    connection.ontrack?.({
+      streams: [remoteStream],
+    } as unknown as RTCTrackEvent)
+
+    client.setParticipantVolume('user-remote', 40)
+    expect(remoteAudioElement.volume).toBeCloseTo(0.4)
+  })
+
+  it('applies >100 participant volume via gain node and cleans up audio resources', async () => {
+    const sendSignal = vi.fn(() => true)
+    const audioTrack = {
+      stop: vi.fn(),
+      readyState: 'live',
+      enabled: true,
+    } as unknown as MediaStreamTrack
+    const mediaStream = {
+      getAudioTracks: () => [audioTrack],
+      getTracks: () => [audioTrack],
+    } as unknown as MediaStream
+    const getUserMedia = vi.fn(async () => mediaStream)
+    setMediaDevices(getUserMedia)
+    vi.stubGlobal('AudioContext', undefined)
+    const remoteAudioElement = {
+      autoplay: false,
+      playsInline: false,
+      muted: false,
+      volume: 1,
+      srcObject: null as MediaStream | null,
+      play: vi.fn(async () => {}),
+      pause: vi.fn(),
+    } as unknown as HTMLAudioElement
+    const audioCtor = vi.fn(function MockAudio() {
+      return remoteAudioElement
+    })
+    vi.stubGlobal('Audio', audioCtor as unknown as typeof Audio)
+
+    const client = new VoiceWebRtcClient(sendSignal)
+    await client.applyOffer(
+      { guildSlug: 'lobby', channelSlug: 'voice-room' },
+      'v=0\r\n',
+      vi.fn(),
+    )
+    client.syncParticipantBindings([
+      { userId: 'user-remote', audioStreamId: 'remote-stream' },
+    ])
+
+    const connection = latestConnection()
+    const remoteStream = { id: 'remote-stream' } as unknown as MediaStream
+    connection.ontrack?.({
+      streams: [remoteStream],
+    } as unknown as RTCTrackEvent)
+
+    vi.stubGlobal(
+      'AudioContext',
+      MockAudioContext as unknown as typeof AudioContext,
+    )
+    client.setParticipantVolume('user-remote', 150)
+
+    expect(remoteAudioElement.volume).toBe(1)
+    const gainContextInstance = mockAudioContextInstances.at(-1)
+    expect(gainContextInstance).toBeDefined()
+    expect(gainContextInstance?.gainNode.gain.value).toBeCloseTo(1.5)
+
+    client.close()
+    expect(remoteAudioElement.pause).toHaveBeenCalledTimes(1)
+    expect(remoteAudioElement.srcObject).toBeNull()
+    expect(gainContextInstance?.close).toHaveBeenCalledTimes(1)
+  })
+
   it('applies deafen state to tracked remote audio elements', async () => {
     const sendSignal = vi.fn(() => true)
     const audioTrack = {
@@ -144,10 +303,12 @@ describe('VoiceWebRtcClient', () => {
     } as unknown as MediaStream
     const getUserMedia = vi.fn(async () => mediaStream)
     setMediaDevices(getUserMedia)
+    vi.stubGlobal('AudioContext', undefined)
     const remoteAudioElement = {
       autoplay: false,
       playsInline: false,
       muted: false,
+      volume: 1,
       srcObject: null as MediaStream | null,
       play: vi.fn(async () => {}),
       pause: vi.fn(),

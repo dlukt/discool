@@ -1,9 +1,23 @@
 import type { WsClientOp } from '$lib/ws/protocol'
-import type { VoiceJoinContext } from './types'
+import {
+  normalizeParticipantVolumePercent,
+  PARTICIPANT_VOLUME_DEFAULT_PERCENT,
+  participantVolumePercentToAudioScalar,
+} from './participantVolume'
+import type { VoiceJoinContext, VoiceParticipantAudioBinding } from './types'
 
 type SendSignal = (op: WsClientOp, payload: Record<string, unknown>) => boolean
 
 type PeerStateListener = (state: RTCPeerConnectionState) => void
+
+type RemoteAudioOutput = {
+  streamId: string
+  participantUserId: string | null
+  audioElement: HTMLAudioElement
+  audioContext: AudioContext | null
+  sourceNode: MediaElementAudioSourceNode | null
+  gainNode: GainNode | null
+}
 
 export class VoiceWebRtcClient {
   private peerConnection: RTCPeerConnection | null = null
@@ -12,7 +26,13 @@ export class VoiceWebRtcClient {
 
   private localAudioTrack: MediaStreamTrack | null = null
 
-  private remoteAudioElements: Set<HTMLAudioElement> = new Set()
+  private remoteOutputsByStreamId: Map<string, RemoteAudioOutput> = new Map()
+
+  private participantByStreamId: Map<string, string> = new Map()
+
+  private participantVolumeByUserId: Map<string, number> = new Map()
+
+  private anonymousStreamCounter = 0
 
   private isMuted = false
 
@@ -38,6 +58,40 @@ export class VoiceWebRtcClient {
     listener: ((isSpeaking: boolean) => void) | null,
   ): void {
     this.speakingStateListener = listener
+  }
+
+  syncParticipantBindings(bindings: VoiceParticipantAudioBinding[]): void {
+    this.participantByStreamId.clear()
+    for (const binding of bindings) {
+      const normalizedUserId = binding.userId.trim()
+      if (!normalizedUserId) continue
+      const normalizedStreamId = binding.audioStreamId?.trim() ?? ''
+      if (!normalizedStreamId) continue
+      this.participantByStreamId.set(normalizedStreamId, normalizedUserId)
+    }
+    this.rebindRemoteOutputs()
+  }
+
+  clearParticipantVolumes(): void {
+    this.participantVolumeByUserId.clear()
+    for (const output of this.remoteOutputsByStreamId.values()) {
+      this.applyOutputVolume(output, PARTICIPANT_VOLUME_DEFAULT_PERCENT)
+    }
+  }
+
+  setParticipantVolume(participantUserId: string, volumePercent: number): void {
+    const normalizedUserId = participantUserId.trim()
+    if (!normalizedUserId) return
+    const normalizedVolumePercent =
+      normalizeParticipantVolumePercent(volumePercent)
+    this.participantVolumeByUserId.set(
+      normalizedUserId,
+      normalizedVolumePercent,
+    )
+    for (const output of this.remoteOutputsByStreamId.values()) {
+      if (output.participantUserId !== normalizedUserId) continue
+      this.applyOutputVolume(output, normalizedVolumePercent)
+    }
   }
 
   async applyOffer(
@@ -93,8 +147,8 @@ export class VoiceWebRtcClient {
 
   setDeafened(isDeafened: boolean): void {
     this.isDeafened = isDeafened
-    for (const element of this.remoteAudioElements) {
-      element.muted = isDeafened
+    for (const output of this.remoteOutputsByStreamId.values()) {
+      output.audioElement.muted = isDeafened
     }
   }
 
@@ -236,13 +290,47 @@ export class VoiceWebRtcClient {
     this.emitSpeakingState(false)
   }
 
+  private resolveStreamId(stream: MediaStream): string {
+    const streamId = stream.id.trim()
+    if (streamId.length > 0) return streamId
+    this.anonymousStreamCounter += 1
+    return `voice-anon-stream-${this.anonymousStreamCounter}`
+  }
+
+  private resolveParticipantUserId(streamId: string): string | null {
+    const mappedUserId = this.participantByStreamId.get(streamId)
+    if (mappedUserId) return mappedUserId
+    if (this.participantVolumeByUserId.has(streamId)) return streamId
+    if (this.participantByStreamId.size === 1) {
+      return this.participantByStreamId.values().next().value ?? null
+    }
+    return null
+  }
+
+  private rebindRemoteOutputs(): void {
+    for (const output of this.remoteOutputsByStreamId.values()) {
+      output.participantUserId = this.resolveParticipantUserId(output.streamId)
+      const targetVolume =
+        output.participantUserId &&
+        this.participantVolumeByUserId.has(output.participantUserId)
+          ? this.participantVolumeByUserId.get(output.participantUserId)
+          : PARTICIPANT_VOLUME_DEFAULT_PERCENT
+      this.applyOutputVolume(
+        output,
+        targetVolume ?? PARTICIPANT_VOLUME_DEFAULT_PERCENT,
+      )
+    }
+  }
+
   private attachRemoteStream(stream: MediaStream): void {
     if (typeof Audio === 'undefined') return
-    for (const existing of this.remoteAudioElements) {
-      if (existing.srcObject === stream) {
-        existing.muted = this.isDeafened
-        return
-      }
+    const streamId = this.resolveStreamId(stream)
+    if (this.remoteOutputsByStreamId.has(streamId)) {
+      const existing = this.remoteOutputsByStreamId.get(streamId)
+      if (!existing) return
+      existing.audioElement.srcObject = stream
+      existing.audioElement.muted = this.isDeafened
+      return
     }
     const audioElement = new Audio()
     audioElement.autoplay = true
@@ -251,15 +339,97 @@ export class VoiceWebRtcClient {
     ).playsInline = true
     audioElement.muted = this.isDeafened
     audioElement.srcObject = stream
-    this.remoteAudioElements.add(audioElement)
+    const output: RemoteAudioOutput = {
+      streamId,
+      participantUserId: this.resolveParticipantUserId(streamId),
+      audioElement,
+      audioContext: null,
+      sourceNode: null,
+      gainNode: null,
+    }
+    this.remoteOutputsByStreamId.set(streamId, output)
+    const initialVolumePercent =
+      output.participantUserId &&
+      this.participantVolumeByUserId.has(output.participantUserId)
+        ? this.participantVolumeByUserId.get(output.participantUserId)
+        : PARTICIPANT_VOLUME_DEFAULT_PERCENT
+    this.applyOutputVolume(
+      output,
+      initialVolumePercent ?? PARTICIPANT_VOLUME_DEFAULT_PERCENT,
+    )
     void audioElement.play().catch(() => {})
   }
 
-  private cleanupRemoteAudio(): void {
-    for (const element of this.remoteAudioElements) {
-      element.pause()
-      element.srcObject = null
+  private ensureGainNode(output: RemoteAudioOutput): GainNode | null {
+    if (output.gainNode) {
+      return output.gainNode
     }
-    this.remoteAudioElements.clear()
+    if (typeof AudioContext === 'undefined') {
+      return null
+    }
+    try {
+      const audioContext = new AudioContext()
+      const sourceNode = audioContext.createMediaElementSource(
+        output.audioElement,
+      )
+      const gainNode = audioContext.createGain()
+      sourceNode.connect(gainNode)
+      gainNode.connect(audioContext.destination)
+      void audioContext.resume().catch(() => {})
+      output.audioContext = audioContext
+      output.sourceNode = sourceNode
+      output.gainNode = gainNode
+      return gainNode
+    } catch {
+      this.teardownGainNode(output)
+      return null
+    }
+  }
+
+  private teardownGainNode(output: RemoteAudioOutput): void {
+    output.gainNode?.disconnect()
+    output.sourceNode?.disconnect()
+    output.gainNode = null
+    output.sourceNode = null
+    const context = output.audioContext
+    output.audioContext = null
+    if (context) {
+      void context.close()
+    }
+  }
+
+  private applyOutputVolume(
+    output: RemoteAudioOutput,
+    volumePercent: number,
+  ): void {
+    const normalizedVolumePercent =
+      normalizeParticipantVolumePercent(volumePercent)
+    if (normalizedVolumePercent <= 100) {
+      this.teardownGainNode(output)
+      output.audioElement.volume = participantVolumePercentToAudioScalar(
+        normalizedVolumePercent,
+      )
+      return
+    }
+    output.audioElement.volume = 1
+    const gainNode = this.ensureGainNode(output)
+    if (!gainNode) return
+    gainNode.gain.value = participantVolumePercentToAudioScalar(
+      normalizedVolumePercent,
+    )
+  }
+
+  private cleanupRemoteAudioOutput(output: RemoteAudioOutput): void {
+    this.teardownGainNode(output)
+    output.audioElement.pause()
+    output.audioElement.srcObject = null
+  }
+
+  private cleanupRemoteAudio(): void {
+    for (const output of this.remoteOutputsByStreamId.values()) {
+      this.cleanupRemoteAudioOutput(output)
+    }
+    this.remoteOutputsByStreamId.clear()
+    this.anonymousStreamCounter = 0
   }
 }

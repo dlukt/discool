@@ -1,5 +1,5 @@
-import { render } from '@testing-library/svelte'
-import { describe, expect, it } from 'vitest'
+import { fireEvent, render } from '@testing-library/svelte'
+import { describe, expect, it, vi } from 'vitest'
 import VoicePanel from './VoicePanel.svelte'
 
 describe('VoicePanel', () => {
@@ -27,9 +27,12 @@ describe('VoicePanel', () => {
           username: 'alice',
           displayName: 'Alice',
           avatarColor: '#3366ff',
+          audioStreamId: 'stream-1',
           isMuted: false,
           isDeafened: false,
           isSpeaking: false,
+          volumePercent: 100,
+          volumeScalar: 1,
         },
       ],
     })
@@ -40,5 +43,45 @@ describe('VoicePanel', () => {
     )
     expect(getByTestId('voice-participant-user-1')).toBeInTheDocument()
     expect(queryByTestId('voice-panel-empty')).not.toBeInTheDocument()
+  })
+
+  it('propagates participant volume changes and moderator placeholder visibility', async () => {
+    const onParticipantVolumeChange = vi.fn()
+    const { getByTestId, queryByTestId } = render(VoicePanel, {
+      channelName: 'general',
+      canModerateVoiceParticipants: true,
+      onParticipantVolumeChange,
+      participants: [
+        {
+          userId: 'user-1',
+          username: 'alice',
+          displayName: 'Alice',
+          avatarColor: '#3366ff',
+          audioStreamId: 'stream-1',
+          isMuted: false,
+          isDeafened: false,
+          isSpeaking: false,
+          volumePercent: 100,
+          volumeScalar: 1,
+        },
+      ],
+    })
+
+    expect(
+      queryByTestId('voice-participant-volume-slider-user-1'),
+    ).not.toBeInTheDocument()
+
+    await fireEvent.click(getByTestId('voice-participant-toggle-user-1'))
+
+    const slider = getByTestId(
+      'voice-participant-volume-slider-user-1',
+    ) as HTMLInputElement
+    expect(slider).toHaveAttribute('aria-valuetext', '100%')
+    expect(
+      getByTestId('voice-participant-kick-placeholder-user-1'),
+    ).toBeInTheDocument()
+
+    await fireEvent.input(slider, { target: { value: '150' } })
+    expect(onParticipantVolumeChange).toHaveBeenCalledWith('user-1', 150)
   })
 })
