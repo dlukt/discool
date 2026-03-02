@@ -78,8 +78,58 @@ pub struct ReportRecord {
     pub reason: String,
     pub category: Option<String>,
     pub status: String,
+    pub reviewed_at: Option<String>,
+    pub reviewed_by_user_id: Option<String>,
+    pub actioned_at: Option<String>,
+    pub actioned_by_user_id: Option<String>,
+    pub dismissed_at: Option<String>,
+    pub dismissed_by_user_id: Option<String>,
+    pub dismissal_reason: Option<String>,
+    pub moderation_action_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportQueueCursor {
+    pub created_at: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ReportQueueRow {
+    pub id: String,
+    pub guild_id: String,
+    pub reporter_user_id: String,
+    pub reporter_username: String,
+    pub reporter_display_name: Option<String>,
+    pub reporter_avatar_color: Option<String>,
+    pub target_type: String,
+    pub target_message_id: Option<String>,
+    pub target_user_id: Option<String>,
+    pub target_username: Option<String>,
+    pub target_display_name: Option<String>,
+    pub target_avatar_color: Option<String>,
+    pub target_message_content: Option<String>,
+    pub reason: String,
+    pub category: Option<String>,
+    pub status: String,
+    pub reviewed_at: Option<String>,
+    pub reviewed_by_user_id: Option<String>,
+    pub actioned_at: Option<String>,
+    pub actioned_by_user_id: Option<String>,
+    pub dismissed_at: Option<String>,
+    pub dismissed_by_user_id: Option<String>,
+    pub dismissal_reason: Option<String>,
+    pub moderation_action_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReportQueuePage {
+    pub entries: Vec<ReportQueueRow>,
+    pub has_more: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -261,6 +311,14 @@ pub async fn list_reports_by_guild_and_status(
                         reason,
                         category,
                         status,
+                        reviewed_at,
+                        reviewed_by_user_id,
+                        actioned_at,
+                        actioned_by_user_id,
+                        dismissed_at,
+                        dismissed_by_user_id,
+                        dismissal_reason,
+                        moderation_action_id,
                         created_at,
                         updated_at
                  FROM reports
@@ -284,6 +342,14 @@ pub async fn list_reports_by_guild_and_status(
                         reason,
                         category,
                         status,
+                        reviewed_at,
+                        reviewed_by_user_id,
+                        actioned_at,
+                        actioned_by_user_id,
+                        dismissed_at,
+                        dismissed_by_user_id,
+                        dismissal_reason,
+                        moderation_action_id,
                         created_at,
                         updated_at
                  FROM reports
@@ -299,6 +365,619 @@ pub async fn list_reports_by_guild_and_status(
     }
     .map_err(|err| AppError::Internal(err.to_string()))?;
     Ok(rows)
+}
+
+pub async fn find_report_by_id(
+    pool: &DbPool,
+    report_id: &str,
+) -> Result<Option<ReportRecord>, AppError> {
+    let report = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_as(
+                "SELECT id,
+                        guild_id,
+                        reporter_user_id,
+                        target_type,
+                        target_message_id,
+                        target_user_id,
+                        reason,
+                        category,
+                        status,
+                        reviewed_at,
+                        reviewed_by_user_id,
+                        actioned_at,
+                        actioned_by_user_id,
+                        dismissed_at,
+                        dismissed_by_user_id,
+                        dismissal_reason,
+                        moderation_action_id,
+                        created_at,
+                        updated_at
+                 FROM reports
+                 WHERE id = $1
+                 LIMIT 1",
+            )
+            .bind(report_id)
+            .fetch_optional(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_as(
+                "SELECT id,
+                        guild_id,
+                        reporter_user_id,
+                        target_type,
+                        target_message_id,
+                        target_user_id,
+                        reason,
+                        category,
+                        status,
+                        reviewed_at,
+                        reviewed_by_user_id,
+                        actioned_at,
+                        actioned_by_user_id,
+                        dismissed_at,
+                        dismissed_by_user_id,
+                        dismissal_reason,
+                        moderation_action_id,
+                        created_at,
+                        updated_at
+                 FROM reports
+                 WHERE id = ?1
+                 LIMIT 1",
+            )
+            .bind(report_id)
+            .fetch_optional(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(report)
+}
+
+pub async fn find_report_queue_row_by_id(
+    pool: &DbPool,
+    report_id: &str,
+) -> Result<Option<ReportQueueRow>, AppError> {
+    let row = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_as(
+                "SELECT
+                    r.id,
+                    r.guild_id,
+                    r.reporter_user_id,
+                    reporter.username AS reporter_username,
+                    reporter.display_name AS reporter_display_name,
+                    reporter.avatar_color AS reporter_avatar_color,
+                    r.target_type,
+                    r.target_message_id,
+                    r.target_user_id,
+                    target.username AS target_username,
+                    target.display_name AS target_display_name,
+                    target.avatar_color AS target_avatar_color,
+                    msg.content AS target_message_content,
+                    r.reason,
+                    r.category,
+                    r.status,
+                    r.reviewed_at,
+                    r.reviewed_by_user_id,
+                    r.actioned_at,
+                    r.actioned_by_user_id,
+                    r.dismissed_at,
+                    r.dismissed_by_user_id,
+                    r.dismissal_reason,
+                    r.moderation_action_id,
+                    r.created_at,
+                    r.updated_at
+                 FROM reports r
+                 JOIN users reporter ON reporter.id = r.reporter_user_id
+                 LEFT JOIN messages msg ON msg.id = r.target_message_id
+                 LEFT JOIN users target ON target.id = COALESCE(r.target_user_id, msg.author_user_id)
+                 WHERE r.id = $1
+                 LIMIT 1",
+            )
+            .bind(report_id)
+            .fetch_optional(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_as(
+                "SELECT
+                    r.id,
+                    r.guild_id,
+                    r.reporter_user_id,
+                    reporter.username AS reporter_username,
+                    reporter.display_name AS reporter_display_name,
+                    reporter.avatar_color AS reporter_avatar_color,
+                    r.target_type,
+                    r.target_message_id,
+                    r.target_user_id,
+                    target.username AS target_username,
+                    target.display_name AS target_display_name,
+                    target.avatar_color AS target_avatar_color,
+                    msg.content AS target_message_content,
+                    r.reason,
+                    r.category,
+                    r.status,
+                    r.reviewed_at,
+                    r.reviewed_by_user_id,
+                    r.actioned_at,
+                    r.actioned_by_user_id,
+                    r.dismissed_at,
+                    r.dismissed_by_user_id,
+                    r.dismissal_reason,
+                    r.moderation_action_id,
+                    r.created_at,
+                    r.updated_at
+                 FROM reports r
+                 JOIN users reporter ON reporter.id = r.reporter_user_id
+                 LEFT JOIN messages msg ON msg.id = r.target_message_id
+                 LEFT JOIN users target ON target.id = COALESCE(r.target_user_id, msg.author_user_id)
+                 WHERE r.id = ?1
+                 LIMIT 1",
+            )
+            .bind(report_id)
+            .fetch_optional(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(row)
+}
+
+pub async fn list_report_queue_page_by_guild_id(
+    pool: &DbPool,
+    guild_id: &str,
+    status: Option<&str>,
+    cursor: Option<&ReportQueueCursor>,
+    limit: i64,
+) -> Result<ReportQueuePage, AppError> {
+    let normalized_limit = limit.clamp(1, 200);
+    let fetch_limit = normalized_limit + 1;
+    let mut entries = match pool {
+        DbPool::Postgres(pool) => {
+            let mut query = QueryBuilder::<sqlx::Postgres>::new(
+                "SELECT
+                    r.id,
+                    r.guild_id,
+                    r.reporter_user_id,
+                    reporter.username AS reporter_username,
+                    reporter.display_name AS reporter_display_name,
+                    reporter.avatar_color AS reporter_avatar_color,
+                    r.target_type,
+                    r.target_message_id,
+                    r.target_user_id,
+                    target.username AS target_username,
+                    target.display_name AS target_display_name,
+                    target.avatar_color AS target_avatar_color,
+                    msg.content AS target_message_content,
+                    r.reason,
+                    r.category,
+                    r.status,
+                    r.reviewed_at,
+                    r.reviewed_by_user_id,
+                    r.actioned_at,
+                    r.actioned_by_user_id,
+                    r.dismissed_at,
+                    r.dismissed_by_user_id,
+                    r.dismissal_reason,
+                    r.moderation_action_id,
+                    r.created_at,
+                    r.updated_at
+                 FROM reports r
+                 JOIN users reporter ON reporter.id = r.reporter_user_id
+                 LEFT JOIN messages msg ON msg.id = r.target_message_id
+                 LEFT JOIN users target ON target.id = COALESCE(r.target_user_id, msg.author_user_id)
+                 WHERE r.guild_id = ",
+            );
+            query.push_bind(guild_id);
+            if let Some(status) = status {
+                query.push(" AND r.status = ");
+                query.push_bind(status);
+            }
+            if let Some(cursor) = cursor {
+                query.push(" AND (r.created_at < ");
+                query.push_bind(&cursor.created_at);
+                query.push(" OR (r.created_at = ");
+                query.push_bind(&cursor.created_at);
+                query.push(" AND r.id < ");
+                query.push_bind(&cursor.id);
+                query.push("))");
+            }
+            query.push(" ORDER BY r.created_at DESC, r.id DESC LIMIT ");
+            query.push_bind(fetch_limit);
+            query.build_query_as().fetch_all(pool).await
+        }
+        DbPool::Sqlite(pool) => {
+            let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+                "SELECT
+                    r.id,
+                    r.guild_id,
+                    r.reporter_user_id,
+                    reporter.username AS reporter_username,
+                    reporter.display_name AS reporter_display_name,
+                    reporter.avatar_color AS reporter_avatar_color,
+                    r.target_type,
+                    r.target_message_id,
+                    r.target_user_id,
+                    target.username AS target_username,
+                    target.display_name AS target_display_name,
+                    target.avatar_color AS target_avatar_color,
+                    msg.content AS target_message_content,
+                    r.reason,
+                    r.category,
+                    r.status,
+                    r.reviewed_at,
+                    r.reviewed_by_user_id,
+                    r.actioned_at,
+                    r.actioned_by_user_id,
+                    r.dismissed_at,
+                    r.dismissed_by_user_id,
+                    r.dismissal_reason,
+                    r.moderation_action_id,
+                    r.created_at,
+                    r.updated_at
+                 FROM reports r
+                 JOIN users reporter ON reporter.id = r.reporter_user_id
+                 LEFT JOIN messages msg ON msg.id = r.target_message_id
+                 LEFT JOIN users target ON target.id = COALESCE(r.target_user_id, msg.author_user_id)
+                 WHERE r.guild_id = ",
+            );
+            query.push_bind(guild_id);
+            if let Some(status) = status {
+                query.push(" AND r.status = ");
+                query.push_bind(status);
+            }
+            if let Some(cursor) = cursor {
+                query.push(" AND (r.created_at < ");
+                query.push_bind(&cursor.created_at);
+                query.push(" OR (r.created_at = ");
+                query.push_bind(&cursor.created_at);
+                query.push(" AND r.id < ");
+                query.push_bind(&cursor.id);
+                query.push("))");
+            }
+            query.push(" ORDER BY r.created_at DESC, r.id DESC LIMIT ");
+            query.push_bind(fetch_limit);
+            query.build_query_as().fetch_all(pool).await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    let page_limit = usize::try_from(normalized_limit).unwrap_or(200);
+    let has_more = entries.len() > page_limit;
+    if has_more {
+        entries.truncate(page_limit);
+    }
+
+    Ok(ReportQueuePage { entries, has_more })
+}
+
+pub async fn update_report_reviewed(
+    pool: &DbPool,
+    report_id: &str,
+    reviewed_at: &str,
+    reviewed_by_user_id: &str,
+    updated_at: &str,
+) -> Result<bool, AppError> {
+    let rows_affected = match pool {
+        DbPool::Postgres(pool) => sqlx::query(
+            "UPDATE reports
+                 SET status = $1,
+                     reviewed_at = $2,
+                     reviewed_by_user_id = $3,
+                     actioned_at = NULL,
+                     actioned_by_user_id = NULL,
+                     dismissed_at = NULL,
+                     dismissed_by_user_id = NULL,
+                     dismissal_reason = NULL,
+                     moderation_action_id = NULL,
+                     updated_at = $4
+                 WHERE id = $5
+                   AND status = $6",
+        )
+        .bind(REPORT_STATUS_REVIEWED)
+        .bind(reviewed_at)
+        .bind(reviewed_by_user_id)
+        .bind(updated_at)
+        .bind(report_id)
+        .bind(REPORT_STATUS_PENDING)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+        DbPool::Sqlite(pool) => sqlx::query(
+            "UPDATE reports
+                 SET status = ?1,
+                     reviewed_at = ?2,
+                     reviewed_by_user_id = ?3,
+                     actioned_at = NULL,
+                     actioned_by_user_id = NULL,
+                     dismissed_at = NULL,
+                     dismissed_by_user_id = NULL,
+                     dismissal_reason = NULL,
+                     moderation_action_id = NULL,
+                     updated_at = ?4
+                 WHERE id = ?5
+                   AND status = ?6",
+        )
+        .bind(REPORT_STATUS_REVIEWED)
+        .bind(reviewed_at)
+        .bind(reviewed_by_user_id)
+        .bind(updated_at)
+        .bind(report_id)
+        .bind(REPORT_STATUS_PENDING)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(rows_affected == 1)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_report_dismissed(
+    pool: &DbPool,
+    report_id: &str,
+    expected_status: &str,
+    reviewed_at: &str,
+    reviewed_by_user_id: &str,
+    dismissed_at: &str,
+    dismissed_by_user_id: &str,
+    dismissal_reason: Option<&str>,
+    updated_at: &str,
+) -> Result<bool, AppError> {
+    let rows_affected = match pool {
+        DbPool::Postgres(pool) => sqlx::query(
+            "UPDATE reports
+                 SET status = $1,
+                     reviewed_at = $2,
+                     reviewed_by_user_id = $3,
+                     actioned_at = NULL,
+                     actioned_by_user_id = NULL,
+                     dismissed_at = $4,
+                     dismissed_by_user_id = $5,
+                     dismissal_reason = $6,
+                     moderation_action_id = NULL,
+                     updated_at = $7
+                 WHERE id = $8
+                   AND status = $9",
+        )
+        .bind(REPORT_STATUS_DISMISSED)
+        .bind(reviewed_at)
+        .bind(reviewed_by_user_id)
+        .bind(dismissed_at)
+        .bind(dismissed_by_user_id)
+        .bind(dismissal_reason)
+        .bind(updated_at)
+        .bind(report_id)
+        .bind(expected_status)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+        DbPool::Sqlite(pool) => sqlx::query(
+            "UPDATE reports
+                 SET status = ?1,
+                     reviewed_at = ?2,
+                     reviewed_by_user_id = ?3,
+                     actioned_at = NULL,
+                     actioned_by_user_id = NULL,
+                     dismissed_at = ?4,
+                     dismissed_by_user_id = ?5,
+                     dismissal_reason = ?6,
+                     moderation_action_id = NULL,
+                     updated_at = ?7
+                 WHERE id = ?8
+                   AND status = ?9",
+        )
+        .bind(REPORT_STATUS_DISMISSED)
+        .bind(reviewed_at)
+        .bind(reviewed_by_user_id)
+        .bind(dismissed_at)
+        .bind(dismissed_by_user_id)
+        .bind(dismissal_reason)
+        .bind(updated_at)
+        .bind(report_id)
+        .bind(expected_status)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(rows_affected == 1)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_report_actioned(
+    pool: &DbPool,
+    report_id: &str,
+    expected_status: &str,
+    reviewed_at: &str,
+    reviewed_by_user_id: &str,
+    actioned_at: &str,
+    actioned_by_user_id: &str,
+    moderation_action_id: Option<&str>,
+    updated_at: &str,
+) -> Result<bool, AppError> {
+    let rows_affected = match pool {
+        DbPool::Postgres(pool) => sqlx::query(
+            "UPDATE reports
+                 SET status = $1,
+                     reviewed_at = $2,
+                     reviewed_by_user_id = $3,
+                     actioned_at = $4,
+                     actioned_by_user_id = $5,
+                     dismissed_at = NULL,
+                     dismissed_by_user_id = NULL,
+                     dismissal_reason = NULL,
+                     moderation_action_id = $6,
+                     updated_at = $7
+                 WHERE id = $8
+                   AND status = $9",
+        )
+        .bind(REPORT_STATUS_ACTIONED)
+        .bind(reviewed_at)
+        .bind(reviewed_by_user_id)
+        .bind(actioned_at)
+        .bind(actioned_by_user_id)
+        .bind(moderation_action_id)
+        .bind(updated_at)
+        .bind(report_id)
+        .bind(expected_status)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+        DbPool::Sqlite(pool) => sqlx::query(
+            "UPDATE reports
+                 SET status = ?1,
+                     reviewed_at = ?2,
+                     reviewed_by_user_id = ?3,
+                     actioned_at = ?4,
+                     actioned_by_user_id = ?5,
+                     dismissed_at = NULL,
+                     dismissed_by_user_id = NULL,
+                     dismissal_reason = NULL,
+                     moderation_action_id = ?6,
+                     updated_at = ?7
+                 WHERE id = ?8
+                   AND status = ?9",
+        )
+        .bind(REPORT_STATUS_ACTIONED)
+        .bind(reviewed_at)
+        .bind(reviewed_by_user_id)
+        .bind(actioned_at)
+        .bind(actioned_by_user_id)
+        .bind(moderation_action_id)
+        .bind(updated_at)
+        .bind(report_id)
+        .bind(expected_status)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(rows_affected == 1)
+}
+
+pub async fn revert_report_actioned_to_reviewed(
+    pool: &DbPool,
+    report_id: &str,
+    reviewed_at: &str,
+    reviewed_by_user_id: &str,
+    updated_at: &str,
+) -> Result<bool, AppError> {
+    let rows_affected = match pool {
+        DbPool::Postgres(pool) => sqlx::query(
+            "UPDATE reports
+                 SET status = $1,
+                     reviewed_at = $2,
+                     reviewed_by_user_id = $3,
+                     actioned_at = NULL,
+                     actioned_by_user_id = NULL,
+                     dismissed_at = NULL,
+                     dismissed_by_user_id = NULL,
+                     dismissal_reason = NULL,
+                     moderation_action_id = NULL,
+                     updated_at = $4
+                 WHERE id = $5
+                   AND status = $6",
+        )
+        .bind(REPORT_STATUS_REVIEWED)
+        .bind(reviewed_at)
+        .bind(reviewed_by_user_id)
+        .bind(updated_at)
+        .bind(report_id)
+        .bind(REPORT_STATUS_ACTIONED)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+        DbPool::Sqlite(pool) => sqlx::query(
+            "UPDATE reports
+                 SET status = ?1,
+                     reviewed_at = ?2,
+                     reviewed_by_user_id = ?3,
+                     actioned_at = NULL,
+                     actioned_by_user_id = NULL,
+                     dismissed_at = NULL,
+                     dismissed_by_user_id = NULL,
+                     dismissal_reason = NULL,
+                     moderation_action_id = NULL,
+                     updated_at = ?4
+                 WHERE id = ?5
+                   AND status = ?6",
+        )
+        .bind(REPORT_STATUS_REVIEWED)
+        .bind(reviewed_at)
+        .bind(reviewed_by_user_id)
+        .bind(updated_at)
+        .bind(report_id)
+        .bind(REPORT_STATUS_ACTIONED)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(rows_affected == 1)
+}
+
+pub async fn reconcile_stale_report_action_reservations(
+    pool: &DbPool,
+    guild_id: &str,
+    stale_before: &str,
+    updated_at: &str,
+) -> Result<u64, AppError> {
+    let rows_affected = match pool {
+        DbPool::Postgres(pool) => sqlx::query(
+            "UPDATE reports
+                 SET status = $1,
+                     actioned_at = NULL,
+                     actioned_by_user_id = NULL,
+                     moderation_action_id = NULL,
+                     updated_at = $2
+                 WHERE guild_id = $3
+                   AND status = $4
+                   AND moderation_action_id IS NULL
+                   AND actioned_at IS NOT NULL
+                   AND actioned_at < $5",
+        )
+        .bind(REPORT_STATUS_REVIEWED)
+        .bind(updated_at)
+        .bind(guild_id)
+        .bind(REPORT_STATUS_ACTIONED)
+        .bind(stale_before)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+        DbPool::Sqlite(pool) => sqlx::query(
+            "UPDATE reports
+                 SET status = ?1,
+                     actioned_at = NULL,
+                     actioned_by_user_id = NULL,
+                     moderation_action_id = NULL,
+                     updated_at = ?2
+                 WHERE guild_id = ?3
+                   AND status = ?4
+                   AND moderation_action_id IS NULL
+                   AND actioned_at IS NOT NULL
+                   AND actioned_at < ?5",
+        )
+        .bind(REPORT_STATUS_REVIEWED)
+        .bind(updated_at)
+        .bind(guild_id)
+        .bind(REPORT_STATUS_ACTIONED)
+        .bind(stale_before)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected()),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(rows_affected)
 }
 
 #[allow(clippy::too_many_arguments)]

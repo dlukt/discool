@@ -13,9 +13,10 @@ use crate::{
     AppError, AppState,
     middleware::auth::AuthenticatedUser,
     services::moderation_service::{
-        self, CreateBanInput, CreateKickInput, CreateMessageDeleteInput, CreateMessageReportInput,
-        CreateMuteInput, CreateUserReportInput, CreateVoiceKickInput, ListModerationLogInput,
-        ListUserMessageHistoryInput,
+        self, ActOnReportInput, CreateBanInput, CreateKickInput, CreateMessageDeleteInput,
+        CreateMessageReportInput, CreateMuteInput, CreateUserReportInput, CreateVoiceKickInput,
+        DismissReportInput, ListModerationLogInput, ListReportQueueInput,
+        ListUserMessageHistoryInput, ReviewReportInput,
     },
     ws::{protocol::ServerOp, registry},
 };
@@ -87,6 +88,33 @@ pub struct ListUserMessageHistoryQuery {
     pub from: Option<String>,
     #[serde(default)]
     pub to: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListReportQueueQuery {
+    #[serde(default)]
+    pub limit: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DismissReportRequest {
+    #[serde(default)]
+    pub dismissal_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ActOnReportRequest {
+    pub action_type: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub duration_seconds: Option<i64>,
+    #[serde(default)]
+    pub delete_message_window: Option<String>,
 }
 
 pub async fn create_mute(
@@ -243,6 +271,93 @@ pub async fn create_user_report(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(json!({ "data": created }))).into_response())
+}
+
+pub async fn list_report_queue(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(guild_slug): Path<String>,
+    query: Result<Query<ListReportQueueQuery>, QueryRejection>,
+) -> Result<Response, AppError> {
+    let Query(query) =
+        query.map_err(|_| AppError::ValidationError("Invalid query parameters".to_string()))?;
+    let page = moderation_service::list_report_queue(
+        &state.pool,
+        &user.user_id,
+        &guild_slug,
+        to_list_report_queue_input(query),
+    )
+    .await?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "data": page.entries, "cursor": page.cursor })),
+    )
+        .into_response())
+}
+
+pub async fn review_report(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path((guild_slug, report_id)): Path<(String, String)>,
+) -> Result<Response, AppError> {
+    let reviewed = moderation_service::review_report(
+        &state.pool,
+        &user.user_id,
+        &guild_slug,
+        ReviewReportInput { report_id },
+    )
+    .await?;
+    Ok((StatusCode::OK, Json(json!({ "data": reviewed }))).into_response())
+}
+
+pub async fn dismiss_report(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path((guild_slug, report_id)): Path<(String, String)>,
+    payload: Result<Json<DismissReportRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+    let dismissed = moderation_service::dismiss_report(
+        &state.pool,
+        &user.user_id,
+        &guild_slug,
+        to_dismiss_report_input(report_id, req)?,
+    )
+    .await?;
+    Ok((StatusCode::OK, Json(json!({ "data": dismissed }))).into_response())
+}
+
+pub async fn act_on_report(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path((guild_slug, report_id)): Path<(String, String)>,
+    payload: Result<Json<ActOnReportRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+    let input = to_act_on_report_input(report_id, req)?;
+    let action_type = input.action_type.clone();
+    let acted = moderation_service::act_on_report(
+        &state.pool,
+        &state.config.attachments,
+        &user.user_id,
+        &guild_slug,
+        input,
+    )
+    .await?;
+    if (action_type == "kick" || action_type == "ban")
+        && let Some(target_user_id) = acted.target_user_id.as_deref()
+    {
+        emit_guild_member_update(
+            &guild_slug,
+            &user.user_id,
+            target_user_id,
+            &action_type,
+            true,
+        );
+    }
+    Ok((StatusCode::OK, Json(json!({ "data": acted }))).into_response())
 }
 
 pub async fn list_bans(
@@ -473,6 +588,73 @@ fn to_create_report_payload(
         .filter(|value| !value.is_empty())
         .map(ToString::to_string);
     Ok((reason.to_string(), category))
+}
+
+fn to_list_report_queue_input(query: ListReportQueueQuery) -> ListReportQueueInput {
+    ListReportQueueInput {
+        limit: query.limit,
+        cursor: query.cursor,
+        status: query.status,
+    }
+}
+
+fn to_dismiss_report_input(
+    report_id: String,
+    req: DismissReportRequest,
+) -> Result<DismissReportInput, AppError> {
+    let normalized_report_id = report_id.trim();
+    if normalized_report_id.is_empty() {
+        return Err(AppError::ValidationError(
+            "report_id is required".to_string(),
+        ));
+    }
+    let dismissal_reason = req
+        .dismissal_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    Ok(DismissReportInput {
+        report_id: normalized_report_id.to_string(),
+        dismissal_reason,
+    })
+}
+
+fn to_act_on_report_input(
+    report_id: String,
+    req: ActOnReportRequest,
+) -> Result<ActOnReportInput, AppError> {
+    let normalized_report_id = report_id.trim();
+    if normalized_report_id.is_empty() {
+        return Err(AppError::ValidationError(
+            "report_id is required".to_string(),
+        ));
+    }
+    let action_type = req.action_type.as_deref().unwrap_or("").trim();
+    if action_type.is_empty() {
+        return Err(AppError::ValidationError(
+            "action_type is required".to_string(),
+        ));
+    }
+    let reason = req
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let delete_message_window = req
+        .delete_message_window
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    Ok(ActOnReportInput {
+        report_id: normalized_report_id.to_string(),
+        action_type: action_type.to_string(),
+        reason,
+        duration_seconds: req.duration_seconds,
+        delete_message_window,
+    })
 }
 
 fn to_list_user_message_history_input(

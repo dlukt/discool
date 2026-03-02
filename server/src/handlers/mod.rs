@@ -145,6 +145,22 @@ pub fn router(state: AppState) -> Router {
             post(moderation::create_user_report),
         )
         .route(
+            "/guilds/{guild_slug}/moderation/reports",
+            get(moderation::list_report_queue),
+        )
+        .route(
+            "/guilds/{guild_slug}/moderation/reports/{report_id}/review",
+            post(moderation::review_report),
+        )
+        .route(
+            "/guilds/{guild_slug}/moderation/reports/{report_id}/dismiss",
+            post(moderation::dismiss_report),
+        )
+        .route(
+            "/guilds/{guild_slug}/moderation/reports/{report_id}/actions",
+            post(moderation::act_on_report),
+        )
+        .route(
             "/guilds/{guild_slug}/moderation/log",
             get(moderation::list_moderation_log),
         )

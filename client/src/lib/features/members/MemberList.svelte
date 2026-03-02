@@ -25,6 +25,7 @@ import {
   type ReportCategory,
 } from '$lib/features/moderation/moderationApi'
 import ReportDialog from '$lib/features/moderation/ReportDialog.svelte'
+import ReportQueuePanel from '$lib/features/moderation/ReportQueuePanel.svelte'
 import UserMessageHistoryPanel from '$lib/features/moderation/UserMessageHistoryPanel.svelte'
 import { toastState } from '$lib/feedback/toastStore.svelte'
 import { presenceState } from './presenceStore.svelte'
@@ -58,7 +59,7 @@ type MemberGroup = {
   offlineCount: number
 }
 
-type MemberSidebarPanel = 'members' | 'mod-log'
+type MemberSidebarPanel = 'members' | 'mod-log' | 'report-queue'
 
 type VirtualRow = {
   id: string
@@ -476,6 +477,8 @@ function setActivePanel(panel: MemberSidebarPanel): void {
   closeMuteDialog()
   closeKickDialog()
   closeBanDialog()
+  closeMessageHistory()
+  closeReportDialog()
   errorMessage = null
   statusMessage = null
 }
@@ -936,7 +939,7 @@ $effect(() => {
 })
 
 $effect(() => {
-  if (canViewModerationLog || activePanel !== 'mod-log') return
+  if (canViewModerationLog || activePanel === 'members') return
   activePanel = 'members'
 })
 
@@ -972,7 +975,7 @@ $effect(() => {
   {/if}
 
   {#if canViewModerationLog}
-    <div class="mb-3 grid grid-cols-2 gap-2" data-testid="member-list-panel-tabs">
+    <div class="mb-3 grid grid-cols-3 gap-2" data-testid="member-list-panel-tabs">
       <button
         type="button"
         class={`rounded-md border px-2 py-1.5 text-xs font-medium ${
@@ -997,11 +1000,25 @@ $effect(() => {
       >
         Moderation log
       </button>
+      <button
+        type="button"
+        class={`rounded-md border px-2 py-1.5 text-xs font-medium ${
+          activePanel === 'report-queue'
+            ? 'border-border bg-muted text-foreground'
+            : 'border-border/60 text-muted-foreground hover:bg-muted/70'
+        }`}
+        onclick={() => setActivePanel('report-queue')}
+        data-testid="member-list-tab-report-queue"
+      >
+        Report queue
+      </button>
     </div>
   {/if}
 
   {#if activePanel === 'mod-log'}
     <ModLogPanel activeGuild={activeGuild} />
+  {:else if activePanel === 'report-queue'}
+    <ReportQueuePanel activeGuild={activeGuild} />
   {:else if loading && membersWithPresence.length === 0}
     <p class="text-xs text-muted-foreground">Loading members…</p>
   {:else if membersWithPresence.length === 0}

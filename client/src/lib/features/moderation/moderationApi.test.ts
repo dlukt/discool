@@ -16,12 +16,16 @@ vi.mock('$lib/api', () => ({
 
 import { apiFetch, apiFetchCursorList } from '$lib/api'
 import {
+  actOnReport,
   createMessageDelete,
   createMessageReport,
   createUserReport,
   createVoiceKick,
+  dismissReport,
   fetchModerationLog,
+  fetchReportQueue,
   fetchUserMessageHistory,
+  reviewReport,
 } from './moderationApi'
 
 describe('moderationApi voice kick', () => {
@@ -232,6 +236,199 @@ describe('moderationApi user report', () => {
         }),
       },
     )
+  })
+})
+
+describe('moderationApi report queue', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('maps report queue query params and response entries', async () => {
+    vi.mocked(apiFetchCursorList).mockResolvedValue({
+      data: [
+        {
+          id: 'report-1',
+          guild_slug: 'lobby',
+          reporter_user_id: 'reporter-id',
+          reporter_username: 'reporter',
+          reporter_display_name: 'Reporter',
+          reporter_avatar_color: '#3366ff',
+          target_type: 'message',
+          target_message_id: 'message-1',
+          target_username: 'target-user',
+          target_display_name: 'Target User',
+          target_avatar_color: '#99aab5',
+          target_message_preview: 'message preview',
+          reason: 'spam',
+          category: 'spam',
+          status: 'pending',
+          created_at: '2026-03-02T00:00:00.000Z',
+          updated_at: '2026-03-02T00:00:00.000Z',
+        },
+      ],
+      cursor: 'cursor-next',
+    })
+
+    await expect(
+      fetchReportQueue(' lobby ', {
+        limit: 20.4,
+        cursor: ' cursor-1 ',
+        status: 'pending',
+      }),
+    ).resolves.toEqual({
+      entries: [
+        {
+          id: 'report-1',
+          guildSlug: 'lobby',
+          reporterUserId: 'reporter-id',
+          reporterUsername: 'reporter',
+          reporterDisplayName: 'Reporter',
+          reporterAvatarColor: '#3366ff',
+          targetType: 'message',
+          targetMessageId: 'message-1',
+          targetUserId: null,
+          targetUsername: 'target-user',
+          targetDisplayName: 'Target User',
+          targetAvatarColor: '#99aab5',
+          targetMessagePreview: 'message preview',
+          reason: 'spam',
+          category: 'spam',
+          status: 'pending',
+          reviewedAt: null,
+          actionedAt: null,
+          dismissedAt: null,
+          dismissalReason: null,
+          moderationActionId: null,
+          createdAt: '2026-03-02T00:00:00.000Z',
+          updatedAt: '2026-03-02T00:00:00.000Z',
+        },
+      ],
+      cursor: 'cursor-next',
+    })
+
+    expect(apiFetchCursorList).toHaveBeenCalledWith(
+      '/api/v1/guilds/lobby/moderation/reports?limit=20&cursor=cursor-1&status=pending',
+    )
+  })
+
+  it('reviews a report and maps response', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      id: 'report-1',
+      guild_slug: 'lobby',
+      reporter_user_id: 'reporter-id',
+      reporter_username: 'reporter',
+      reporter_display_name: 'Reporter',
+      target_type: 'user',
+      target_user_id: 'target-user-id',
+      reason: 'abuse',
+      status: 'reviewed',
+      reviewed_at: '2026-03-02T00:01:00.000Z',
+      created_at: '2026-03-02T00:00:00.000Z',
+      updated_at: '2026-03-02T00:01:00.000Z',
+    })
+
+    await expect(reviewReport(' lobby ', ' report-1 ')).resolves.toMatchObject({
+      id: 'report-1',
+      guildSlug: 'lobby',
+      status: 'reviewed',
+      reviewedAt: '2026-03-02T00:01:00.000Z',
+    })
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/guilds/lobby/moderation/reports/report-1/review',
+      {
+        method: 'POST',
+      },
+    )
+  })
+
+  it('dismisses a report with optional reason', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      id: 'report-1',
+      guild_slug: 'lobby',
+      reporter_user_id: 'reporter-id',
+      reporter_username: 'reporter',
+      reporter_display_name: 'Reporter',
+      target_type: 'user',
+      target_user_id: 'target-user-id',
+      reason: 'abuse',
+      status: 'dismissed',
+      dismissed_at: '2026-03-02T00:01:00.000Z',
+      dismissal_reason: 'not actionable',
+      created_at: '2026-03-02T00:00:00.000Z',
+      updated_at: '2026-03-02T00:01:00.000Z',
+    })
+
+    await expect(
+      dismissReport(' lobby ', ' report-1 ', {
+        dismissalReason: ' not actionable ',
+      }),
+    ).resolves.toMatchObject({
+      id: 'report-1',
+      status: 'dismissed',
+      dismissalReason: 'not actionable',
+    })
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/guilds/lobby/moderation/reports/report-1/dismiss',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          dismissal_reason: 'not actionable',
+        }),
+      },
+    )
+  })
+
+  it('acts on report and validates action type', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      id: 'report-1',
+      guild_slug: 'lobby',
+      reporter_user_id: 'reporter-id',
+      reporter_username: 'reporter',
+      reporter_display_name: 'Reporter',
+      target_type: 'user',
+      target_user_id: 'target-user-id',
+      reason: 'abuse',
+      status: 'actioned',
+      actioned_at: '2026-03-02T00:01:00.000Z',
+      moderation_action_id: 'mod-action-1',
+      created_at: '2026-03-02T00:00:00.000Z',
+      updated_at: '2026-03-02T00:01:00.000Z',
+    })
+
+    await expect(
+      actOnReport(' lobby ', ' report-1 ', {
+        actionType: 'ban',
+        reason: ' repeat abuse ',
+        deleteMessageWindow: '24h',
+      }),
+    ).resolves.toMatchObject({
+      id: 'report-1',
+      status: 'actioned',
+      moderationActionId: 'mod-action-1',
+    })
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/guilds/lobby/moderation/reports/report-1/actions',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          action_type: 'ban',
+          reason: 'repeat abuse',
+          delete_message_window: '24h',
+        }),
+      },
+    )
+
+    await expect(
+      actOnReport('lobby', 'report-1', {
+        actionType: 'invalid' as never,
+      }),
+    ).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+    })
   })
 })
 

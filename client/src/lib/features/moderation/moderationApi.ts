@@ -60,6 +60,62 @@ export type UserContentReport = {
   updatedAt: string
 }
 
+export type ReportQueueStatus =
+  | 'pending'
+  | 'reviewed'
+  | 'actioned'
+  | 'dismissed'
+
+export type ReportQueueActionType = 'warn' | 'mute' | 'kick' | 'ban'
+
+export type FetchReportQueueInput = {
+  limit?: number
+  cursor?: string | null
+  status?: ReportQueueStatus | null
+}
+
+export type DismissReportInput = {
+  dismissalReason?: string | null
+}
+
+export type ActOnReportInput = {
+  actionType: ReportQueueActionType
+  reason?: string | null
+  durationSeconds?: number | null
+  deleteMessageWindow?: BanDeleteMessageWindow | null
+}
+
+export type ReportQueueItem = {
+  id: string
+  guildSlug: string
+  reporterUserId: string
+  reporterUsername: string
+  reporterDisplayName: string
+  reporterAvatarColor: string | null
+  targetType: 'message' | 'user'
+  targetMessageId: string | null
+  targetUserId: string | null
+  targetUsername: string | null
+  targetDisplayName: string | null
+  targetAvatarColor: string | null
+  targetMessagePreview: string | null
+  reason: string
+  category: ReportCategory | null
+  status: ReportQueueStatus
+  reviewedAt: string | null
+  actionedAt: string | null
+  dismissedAt: string | null
+  dismissalReason: string | null
+  moderationActionId: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export type ReportQueuePage = {
+  entries: ReportQueueItem[]
+  cursor: string | null
+}
+
 export type MuteAction = {
   id: string
   guildSlug: string
@@ -299,6 +355,43 @@ type UserContentReportWire = {
   updated_at: string
 }
 
+type ReportQueueItemWire = {
+  id: string
+  guild_slug: string
+  reporter_user_id: string
+  reporter_username: string
+  reporter_display_name: string
+  reporter_avatar_color?: string
+  target_type: 'message' | 'user'
+  target_message_id?: string
+  target_user_id?: string
+  target_username?: string
+  target_display_name?: string
+  target_avatar_color?: string
+  target_message_preview?: string
+  reason: string
+  category?: ReportCategory
+  status: ReportQueueStatus
+  reviewed_at?: string
+  actioned_at?: string
+  dismissed_at?: string
+  dismissal_reason?: string
+  moderation_action_id?: string
+  created_at: string
+  updated_at: string
+}
+
+type DismissReportWire = {
+  dismissal_reason?: string
+}
+
+type ActOnReportWire = {
+  action_type: ReportQueueActionType
+  reason?: string
+  duration_seconds?: number
+  delete_message_window?: BanDeleteMessageWindow
+}
+
 type ModerationLogEntryWire = {
   id: string
   action_type: ModerationLogActionType
@@ -450,6 +543,42 @@ function normalizeOptionalReportCategory(
   )
 }
 
+function normalizeReportQueueStatus(
+  value: string | null | undefined,
+): ReportQueueStatus | null {
+  if (value === undefined || value === null) return null
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) return null
+  if (
+    normalized === 'pending' ||
+    normalized === 'reviewed' ||
+    normalized === 'actioned' ||
+    normalized === 'dismissed'
+  ) {
+    return normalized
+  }
+  throw new ApiError(
+    'VALIDATION_ERROR',
+    'status must be one of: pending, reviewed, actioned, dismissed',
+  )
+}
+
+function normalizeReportQueueActionType(value: string): ReportQueueActionType {
+  const normalized = value.trim().toLowerCase()
+  if (
+    normalized === 'warn' ||
+    normalized === 'mute' ||
+    normalized === 'kick' ||
+    normalized === 'ban'
+  ) {
+    return normalized
+  }
+  throw new ApiError(
+    'VALIDATION_ERROR',
+    'actionType must be one of: warn, mute, kick, ban',
+  )
+}
+
 function toBanAction(wire: BanActionWire): BanAction {
   return {
     id: wire.id,
@@ -496,6 +625,34 @@ function toUserContentReport(wire: UserContentReportWire): UserContentReport {
     reason: wire.reason,
     category: wire.category ?? null,
     status: wire.status,
+    createdAt: wire.created_at,
+    updatedAt: wire.updated_at,
+  }
+}
+
+function toReportQueueItem(wire: ReportQueueItemWire): ReportQueueItem {
+  return {
+    id: wire.id,
+    guildSlug: wire.guild_slug,
+    reporterUserId: wire.reporter_user_id,
+    reporterUsername: wire.reporter_username,
+    reporterDisplayName: wire.reporter_display_name,
+    reporterAvatarColor: wire.reporter_avatar_color ?? null,
+    targetType: wire.target_type,
+    targetMessageId: wire.target_message_id ?? null,
+    targetUserId: wire.target_user_id ?? null,
+    targetUsername: wire.target_username ?? null,
+    targetDisplayName: wire.target_display_name ?? null,
+    targetAvatarColor: wire.target_avatar_color ?? null,
+    targetMessagePreview: wire.target_message_preview ?? null,
+    reason: wire.reason,
+    category: wire.category ?? null,
+    status: wire.status,
+    reviewedAt: wire.reviewed_at ?? null,
+    actionedAt: wire.actioned_at ?? null,
+    dismissedAt: wire.dismissed_at ?? null,
+    dismissalReason: wire.dismissal_reason ?? null,
+    moderationActionId: wire.moderation_action_id ?? null,
     createdAt: wire.created_at,
     updatedAt: wire.updated_at,
   }
@@ -573,6 +730,63 @@ function userReportCreatePath(guildSlug: string, targetUserId: string): string {
   const guild = normalizePathPart(guildSlug, 'guildSlug')
   const target = normalizePathPart(targetUserId, 'targetUserId')
   return `/api/v1/guilds/${guild}/moderation/reports/users/${target}`
+}
+
+function reportQueuePath(
+  guildSlug: string,
+  input: FetchReportQueueInput,
+): string {
+  const guild = normalizePathPart(guildSlug, 'guildSlug')
+  const params = new URLSearchParams()
+
+  if (input.limit !== undefined) {
+    if (!Number.isFinite(input.limit)) {
+      throw new ApiError('VALIDATION_ERROR', 'limit must be finite')
+    }
+    const normalizedLimit = Math.trunc(input.limit)
+    if (normalizedLimit <= 0) {
+      throw new ApiError('VALIDATION_ERROR', 'limit must be greater than zero')
+    }
+    params.set('limit', String(normalizedLimit))
+  }
+
+  if (input.cursor !== undefined && input.cursor !== null) {
+    const normalizedCursor = input.cursor.trim()
+    if (normalizedCursor) {
+      params.set('cursor', normalizedCursor)
+    }
+  }
+
+  if (input.status !== undefined && input.status !== null) {
+    const status = normalizeReportQueueStatus(input.status)
+    if (status !== null) {
+      params.set('status', status)
+    }
+  }
+
+  const query = params.toString()
+  if (!query) {
+    return `/api/v1/guilds/${guild}/moderation/reports`
+  }
+  return `/api/v1/guilds/${guild}/moderation/reports?${query}`
+}
+
+function reportReviewPath(guildSlug: string, reportId: string): string {
+  const guild = normalizePathPart(guildSlug, 'guildSlug')
+  const report = normalizePathPart(reportId, 'reportId')
+  return `/api/v1/guilds/${guild}/moderation/reports/${report}/review`
+}
+
+function reportDismissPath(guildSlug: string, reportId: string): string {
+  const guild = normalizePathPart(guildSlug, 'guildSlug')
+  const report = normalizePathPart(reportId, 'reportId')
+  return `/api/v1/guilds/${guild}/moderation/reports/${report}/dismiss`
+}
+
+function reportActionPath(guildSlug: string, reportId: string): string {
+  const guild = normalizePathPart(guildSlug, 'guildSlug')
+  const report = normalizePathPart(reportId, 'reportId')
+  return `/api/v1/guilds/${guild}/moderation/reports/${report}/actions`
 }
 
 function moderationLogPath(
@@ -822,6 +1036,98 @@ export async function createUserReport(
     },
   )
   return toUserContentReport(wire)
+}
+
+export async function fetchReportQueue(
+  guildSlug: string,
+  input: FetchReportQueueInput = {},
+): Promise<ReportQueuePage> {
+  const path = reportQueuePath(guildSlug, input)
+  const page = await apiFetchCursorList<ReportQueueItemWire[]>(path)
+  return {
+    entries: page.data.map(toReportQueueItem),
+    cursor: page.cursor,
+  }
+}
+
+export async function reviewReport(
+  guildSlug: string,
+  reportId: string,
+): Promise<ReportQueueItem> {
+  const wire = await apiFetch<ReportQueueItemWire>(
+    reportReviewPath(guildSlug, reportId),
+    {
+      method: 'POST',
+    },
+  )
+  return toReportQueueItem(wire)
+}
+
+export async function dismissReport(
+  guildSlug: string,
+  reportId: string,
+  input: DismissReportInput = {},
+): Promise<ReportQueueItem> {
+  const payload: DismissReportWire = {}
+  if (input.dismissalReason !== undefined && input.dismissalReason !== null) {
+    const normalizedReason = input.dismissalReason.trim()
+    if (normalizedReason) {
+      payload.dismissal_reason = normalizedReason
+    }
+  }
+  const wire = await apiFetch<ReportQueueItemWire>(
+    reportDismissPath(guildSlug, reportId),
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
+  )
+  return toReportQueueItem(wire)
+}
+
+export async function actOnReport(
+  guildSlug: string,
+  reportId: string,
+  input: ActOnReportInput,
+): Promise<ReportQueueItem> {
+  const payload: ActOnReportWire = {
+    action_type: normalizeReportQueueActionType(input.actionType),
+  }
+  if (input.reason !== undefined && input.reason !== null) {
+    const normalizedReason = input.reason.trim()
+    if (normalizedReason) {
+      payload.reason = normalizedReason
+    }
+  }
+  if (input.durationSeconds !== undefined && input.durationSeconds !== null) {
+    if (!Number.isFinite(input.durationSeconds)) {
+      throw new ApiError('VALIDATION_ERROR', 'durationSeconds must be finite')
+    }
+    const normalized = Math.trunc(input.durationSeconds)
+    if (normalized <= 0) {
+      throw new ApiError(
+        'VALIDATION_ERROR',
+        'durationSeconds must be greater than zero',
+      )
+    }
+    payload.duration_seconds = normalized
+  }
+  if (
+    input.deleteMessageWindow !== undefined &&
+    input.deleteMessageWindow !== null
+  ) {
+    payload.delete_message_window = normalizeDeleteMessageWindow(
+      input.deleteMessageWindow,
+    )
+  }
+  const wire = await apiFetch<ReportQueueItemWire>(
+    reportActionPath(guildSlug, reportId),
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
+  )
+  return toReportQueueItem(wire)
 }
 
 export async function fetchModerationLog(

@@ -15,13 +15,16 @@ use crate::{
         guild_ban, guild_member, message, message_attachment, moderation,
     },
     permissions,
-    services::file_storage_service::FileStorageProvider,
+    services::{dm_service, file_storage_service::FileStorageProvider},
 };
 
 const MAX_MUTE_REASON_CHARS: usize = 500;
 const MAX_MUTE_DURATION_SECONDS: i64 = 315_360_000; // 10 years
 const DEFAULT_MODERATION_LOG_LIMIT: i64 = 50;
 const MAX_MODERATION_LOG_LIMIT: i64 = 200;
+const DEFAULT_REPORT_QUEUE_LIMIT: i64 = 50;
+const MAX_REPORT_QUEUE_LIMIT: i64 = 200;
+const REPORT_ACTION_RESERVATION_STALE_SECONDS: i64 = 30;
 
 #[derive(Debug, Clone)]
 pub struct CreateMuteInput {
@@ -87,6 +90,33 @@ pub struct ListUserMessageHistoryInput {
     pub channel_slug: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListReportQueueInput {
+    pub limit: Option<String>,
+    pub cursor: Option<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReviewReportInput {
+    pub report_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DismissReportInput {
+    pub report_id: String,
+    pub dismissal_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActOnReportInput {
+    pub report_id: String,
+    pub action_type: String,
+    pub reason: Option<String>,
+    pub duration_seconds: Option<i64>,
+    pub delete_message_window: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -248,6 +278,52 @@ pub struct UserMessageHistoryEntryResponse {
 #[derive(Debug, Clone)]
 pub struct ListUserMessageHistoryResult {
     pub entries: Vec<UserMessageHistoryEntryResponse>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportQueueItemResponse {
+    pub id: String,
+    pub guild_slug: String,
+    pub reporter_user_id: String,
+    pub reporter_username: String,
+    pub reporter_display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reporter_avatar_color: Option<String>,
+    pub target_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_avatar_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_message_preview: Option<String>,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actioned_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dismissed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dismissal_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moderation_action_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListReportQueueResult {
+    pub entries: Vec<ReportQueueItemResponse>,
     pub cursor: Option<String>,
 }
 
@@ -692,6 +768,378 @@ pub async fn create_user_report(
     })
 }
 
+pub async fn list_report_queue(
+    pool: &DbPool,
+    actor_user_id: &str,
+    guild_slug: &str,
+    input: ListReportQueueInput,
+) -> Result<ListReportQueueResult, AppError> {
+    let actor_user_id = normalize_id(actor_user_id, "actor_user_id")?;
+    let guild_slug = normalize_slug(guild_slug, "guild_slug")?;
+    let limit = normalize_report_queue_limit(input.limit.as_deref())?;
+    let status = normalize_report_queue_status(input.status.as_deref())?;
+    let cursor = decode_report_queue_cursor(input.cursor.as_deref())?;
+
+    let guild = guild::find_guild_by_slug(pool, &guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    permissions::require_guild_permission(
+        pool,
+        &guild,
+        &actor_user_id,
+        permissions::VIEW_MOD_LOG,
+        "VIEW_MOD_LOG",
+    )
+    .await?;
+    reconcile_stale_report_action_reservations(pool, &guild.id).await?;
+
+    let page = moderation::list_report_queue_page_by_guild_id(
+        pool,
+        &guild.id,
+        status.as_deref(),
+        cursor.as_ref(),
+        limit,
+    )
+    .await?;
+    let next_cursor = if page.has_more {
+        page.entries.last().map(|entry| {
+            encode_report_queue_cursor(&moderation::ReportQueueCursor {
+                created_at: entry.created_at.clone(),
+                id: entry.id.clone(),
+            })
+        })
+    } else {
+        None
+    };
+    let entries = page
+        .entries
+        .into_iter()
+        .map(|entry| to_report_queue_item_response(&guild.slug, entry))
+        .collect();
+    Ok(ListReportQueueResult {
+        entries,
+        cursor: next_cursor,
+    })
+}
+
+pub async fn review_report(
+    pool: &DbPool,
+    actor_user_id: &str,
+    guild_slug: &str,
+    input: ReviewReportInput,
+) -> Result<ReportQueueItemResponse, AppError> {
+    let actor_user_id = normalize_id(actor_user_id, "actor_user_id")?;
+    let guild_slug = normalize_slug(guild_slug, "guild_slug")?;
+    let report_id = normalize_id(&input.report_id, "report_id")?;
+
+    let guild = guild::find_guild_by_slug(pool, &guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    permissions::require_guild_permission(
+        pool,
+        &guild,
+        &actor_user_id,
+        permissions::VIEW_MOD_LOG,
+        "VIEW_MOD_LOG",
+    )
+    .await?;
+    reconcile_stale_report_action_reservations(pool, &guild.id).await?;
+
+    let report = moderation::find_report_by_id(pool, &report_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if report.guild_id != guild.id {
+        return Err(AppError::NotFound);
+    }
+    if report.status != moderation::REPORT_STATUS_PENDING {
+        return Err(AppError::Conflict(
+            "Report can only be reviewed from pending status".to_string(),
+        ));
+    }
+
+    let now_str = Utc::now().to_rfc3339();
+    let updated =
+        moderation::update_report_reviewed(pool, &report_id, &now_str, &actor_user_id, &now_str)
+            .await?;
+    if !updated {
+        return Err(AppError::Conflict(
+            "Report status changed before review could be applied".to_string(),
+        ));
+    }
+
+    let queue_row = moderation::find_report_queue_row_by_id(pool, &report_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(to_report_queue_item_response(&guild.slug, queue_row))
+}
+
+pub async fn dismiss_report(
+    pool: &DbPool,
+    actor_user_id: &str,
+    guild_slug: &str,
+    input: DismissReportInput,
+) -> Result<ReportQueueItemResponse, AppError> {
+    let actor_user_id = normalize_id(actor_user_id, "actor_user_id")?;
+    let guild_slug = normalize_slug(guild_slug, "guild_slug")?;
+    let report_id = normalize_id(&input.report_id, "report_id")?;
+    let dismissal_reason =
+        normalize_optional_lifecycle_reason(input.dismissal_reason.as_deref(), "dismissal_reason")?;
+
+    let guild = guild::find_guild_by_slug(pool, &guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    permissions::require_guild_permission(
+        pool,
+        &guild,
+        &actor_user_id,
+        permissions::VIEW_MOD_LOG,
+        "VIEW_MOD_LOG",
+    )
+    .await?;
+    reconcile_stale_report_action_reservations(pool, &guild.id).await?;
+
+    let report = moderation::find_report_by_id(pool, &report_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if report.guild_id != guild.id {
+        return Err(AppError::NotFound);
+    }
+    if report.status != moderation::REPORT_STATUS_PENDING
+        && report.status != moderation::REPORT_STATUS_REVIEWED
+    {
+        return Err(AppError::Conflict(
+            "Report can only be dismissed from pending or reviewed status".to_string(),
+        ));
+    }
+
+    let now_str = Utc::now().to_rfc3339();
+    let reviewed_at = report.reviewed_at.unwrap_or_else(|| now_str.clone());
+    let reviewed_by_user_id = report
+        .reviewed_by_user_id
+        .unwrap_or_else(|| actor_user_id.clone());
+    let updated = moderation::update_report_dismissed(
+        pool,
+        &report_id,
+        &report.status,
+        &reviewed_at,
+        &reviewed_by_user_id,
+        &now_str,
+        &actor_user_id,
+        dismissal_reason.as_deref(),
+        &now_str,
+    )
+    .await?;
+    if !updated {
+        return Err(AppError::Conflict(
+            "Report status changed before dismiss could be applied".to_string(),
+        ));
+    }
+
+    let queue_row = moderation::find_report_queue_row_by_id(pool, &report_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(to_report_queue_item_response(&guild.slug, queue_row))
+}
+
+pub async fn act_on_report(
+    pool: &DbPool,
+    attachment_config: &AttachmentConfig,
+    actor_user_id: &str,
+    guild_slug: &str,
+    input: ActOnReportInput,
+) -> Result<ReportQueueItemResponse, AppError> {
+    let actor_user_id = normalize_id(actor_user_id, "actor_user_id")?;
+    let guild_slug = normalize_slug(guild_slug, "guild_slug")?;
+    let report_id = normalize_id(&input.report_id, "report_id")?;
+    let action_type = normalize_report_action_type(&input.action_type)?;
+
+    let guild = guild::find_guild_by_slug(pool, &guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    permissions::require_guild_permission(
+        pool,
+        &guild,
+        &actor_user_id,
+        permissions::VIEW_MOD_LOG,
+        "VIEW_MOD_LOG",
+    )
+    .await?;
+    reconcile_stale_report_action_reservations(pool, &guild.id).await?;
+
+    let report = moderation::find_report_by_id(pool, &report_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if report.guild_id != guild.id {
+        return Err(AppError::NotFound);
+    }
+    if report.status != moderation::REPORT_STATUS_PENDING
+        && report.status != moderation::REPORT_STATUS_REVIEWED
+    {
+        return Err(AppError::Conflict(
+            "Report can only be actioned from pending or reviewed status".to_string(),
+        ));
+    }
+
+    let target_user_id = resolve_report_target_user_id(pool, &guild, &report).await?;
+    let action_reason = match input.reason.as_deref() {
+        Some(reason) => normalize_reason(reason)?,
+        None => report.reason.clone(),
+    };
+    let now_str = Utc::now().to_rfc3339();
+    let reviewed_at = report.reviewed_at.unwrap_or_else(|| now_str.clone());
+    let reviewed_by_user_id = report
+        .reviewed_by_user_id
+        .unwrap_or_else(|| actor_user_id.clone());
+    let reserved = moderation::update_report_actioned(
+        pool,
+        &report_id,
+        &report.status,
+        &reviewed_at,
+        &reviewed_by_user_id,
+        &now_str,
+        &actor_user_id,
+        None,
+        &now_str,
+    )
+    .await?;
+    if !reserved {
+        return Err(AppError::Conflict(
+            "Report status changed before action could be applied".to_string(),
+        ));
+    }
+
+    let moderation_action_id_result: Result<Option<String>, AppError> = match action_type {
+        moderation::MODERATION_ACTION_TYPE_WARN => create_warn_action(
+            pool,
+            &actor_user_id,
+            &guild,
+            &target_user_id,
+            &action_reason,
+        )
+        .await
+        .map(Some),
+        moderation::MODERATION_ACTION_TYPE_MUTE => {
+            let duration_seconds = normalize_duration_seconds(input.duration_seconds)?;
+            create_mute(
+                pool,
+                &actor_user_id,
+                &guild.slug,
+                CreateMuteInput {
+                    target_user_id: target_user_id.clone(),
+                    reason: action_reason.clone(),
+                    duration_seconds,
+                },
+            )
+            .await
+            .map(|created| Some(created.id))
+        }
+        moderation::MODERATION_ACTION_TYPE_KICK => create_kick(
+            pool,
+            &actor_user_id,
+            &guild.slug,
+            CreateKickInput {
+                target_user_id: target_user_id.clone(),
+                reason: action_reason.clone(),
+            },
+        )
+        .await
+        .map(|created| Some(created.id)),
+        moderation::MODERATION_ACTION_TYPE_BAN => {
+            let delete_message_window = input
+                .delete_message_window
+                .as_deref()
+                .unwrap_or("none")
+                .to_string();
+            create_ban(
+                pool,
+                attachment_config,
+                &actor_user_id,
+                &guild.slug,
+                CreateBanInput {
+                    target_user_id: target_user_id.clone(),
+                    reason: action_reason,
+                    delete_message_window,
+                },
+            )
+            .await
+            .map(|created| Some(created.id))
+        }
+        _ => Err(AppError::ValidationError(
+            "action_type must be one of: warn, mute, kick, ban".to_string(),
+        )),
+    };
+
+    let moderation_action_id = match moderation_action_id_result {
+        Ok(action_id) => action_id,
+        Err(action_error) => {
+            let rollback_now = Utc::now().to_rfc3339();
+            let reverted = moderation::revert_report_actioned_to_reviewed(
+                pool,
+                &report_id,
+                &reviewed_at,
+                &reviewed_by_user_id,
+                &rollback_now,
+            )
+            .await?;
+            if !reverted {
+                return Err(AppError::Conflict(
+                    "Report action failed and review state could not be restored".to_string(),
+                ));
+            }
+            return Err(action_error);
+        }
+    };
+
+    let finalized_at = Utc::now().to_rfc3339();
+    let finalized = moderation::update_report_actioned(
+        pool,
+        &report_id,
+        moderation::REPORT_STATUS_ACTIONED,
+        &reviewed_at,
+        &reviewed_by_user_id,
+        &finalized_at,
+        &actor_user_id,
+        moderation_action_id.as_deref(),
+        &finalized_at,
+    )
+    .await?;
+    if !finalized {
+        return Err(AppError::Conflict(
+            "Report status changed before action could be finalized".to_string(),
+        ));
+    }
+
+    let queue_row = moderation::find_report_queue_row_by_id(pool, &report_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(to_report_queue_item_response(&guild.slug, queue_row))
+}
+
+async fn reconcile_stale_report_action_reservations(
+    pool: &DbPool,
+    guild_id: &str,
+) -> Result<(), AppError> {
+    let now = Utc::now();
+    let stale_before =
+        (now - Duration::seconds(REPORT_ACTION_RESERVATION_STALE_SECONDS)).to_rfc3339();
+    let updated_at = now.to_rfc3339();
+    let repaired = moderation::reconcile_stale_report_action_reservations(
+        pool,
+        guild_id,
+        &stale_before,
+        &updated_at,
+    )
+    .await?;
+    if repaired > 0 {
+        tracing::warn!(
+            guild_id = %guild_id,
+            repaired_count = repaired,
+            "Reconciled stale report action reservations"
+        );
+    }
+    Ok(())
+}
+
 pub async fn create_ban(
     pool: &DbPool,
     attachment_config: &AttachmentConfig,
@@ -1122,6 +1570,159 @@ fn to_mute_status_response(
     }
 }
 
+fn to_report_queue_item_response(
+    guild_slug: &str,
+    entry: moderation::ReportQueueRow,
+) -> ReportQueueItemResponse {
+    ReportQueueItemResponse {
+        id: entry.id,
+        guild_slug: guild_slug.to_string(),
+        reporter_user_id: entry.reporter_user_id,
+        reporter_username: entry.reporter_username.clone(),
+        reporter_display_name: profile_display_name(
+            entry.reporter_display_name.as_deref(),
+            &entry.reporter_username,
+        ),
+        reporter_avatar_color: entry.reporter_avatar_color,
+        target_type: entry.target_type,
+        target_message_id: entry.target_message_id,
+        target_user_id: entry.target_user_id,
+        target_username: entry.target_username.clone(),
+        target_display_name: entry
+            .target_display_name
+            .as_deref()
+            .or(entry.target_username.as_deref())
+            .map(str::to_string),
+        target_avatar_color: entry.target_avatar_color,
+        target_message_preview: to_report_target_message_preview(entry.target_message_content),
+        reason: entry.reason,
+        category: entry.category,
+        status: entry.status,
+        reviewed_at: entry.reviewed_at,
+        actioned_at: entry.actioned_at,
+        dismissed_at: entry.dismissed_at,
+        dismissal_reason: entry.dismissal_reason,
+        moderation_action_id: entry.moderation_action_id,
+        created_at: entry.created_at,
+        updated_at: entry.updated_at,
+    }
+}
+
+async fn resolve_report_target_user_id(
+    pool: &DbPool,
+    guild: &Guild,
+    report: &moderation::ReportRecord,
+) -> Result<String, AppError> {
+    match report.target_type.as_str() {
+        moderation::REPORT_TARGET_TYPE_USER => {
+            let target_user_id = report.target_user_id.as_deref().ok_or_else(|| {
+                AppError::Internal("User report missing target_user_id".to_string())
+            })?;
+            Ok(target_user_id.to_string())
+        }
+        moderation::REPORT_TARGET_TYPE_MESSAGE => {
+            let message_id = report.target_message_id.as_deref().ok_or_else(|| {
+                AppError::Internal("Message report missing target_message_id".to_string())
+            })?;
+            let target_message = message::find_message_by_id(pool, message_id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            if target_message.guild_id != guild.id {
+                return Err(AppError::NotFound);
+            }
+            Ok(target_message.author_user_id)
+        }
+        _ => Err(AppError::ValidationError(
+            "Report target_type is invalid".to_string(),
+        )),
+    }
+}
+
+async fn create_warn_action(
+    pool: &DbPool,
+    actor_user_id: &str,
+    guild: &Guild,
+    target_user_id: &str,
+    reason: &str,
+) -> Result<String, AppError> {
+    if actor_user_id == target_user_id {
+        return Err(AppError::ValidationError(
+            "Cannot warn yourself".to_string(),
+        ));
+    }
+    if !guild_member::is_guild_member(pool, &guild.id, target_user_id).await? {
+        return Err(AppError::ValidationError(
+            "target_user_id must belong to a guild member".to_string(),
+        ));
+    }
+    if target_user_id == guild.owner_id && actor_user_id != guild.owner_id {
+        return Err(AppError::Forbidden(
+            "Cannot warn the guild owner".to_string(),
+        ));
+    }
+    if actor_user_id != guild.owner_id
+        && !permissions::actor_outranks_target_member(pool, guild, actor_user_id, target_user_id)
+            .await?
+    {
+        return Err(AppError::Forbidden(
+            "You can only warn members below your highest role".to_string(),
+        ));
+    }
+
+    let dm_channel = dm_service::open_or_create_dm(
+        pool,
+        actor_user_id,
+        dm_service::OpenDmInput {
+            user_id: target_user_id.to_string(),
+        },
+    )
+    .await?;
+    let dm_content = format!("Moderator warning: {reason}");
+    let _ = dm_service::create_dm_message(
+        pool,
+        actor_user_id,
+        dm_service::CreateDmMessageInput {
+            dm_slug: dm_channel.dm_slug,
+            content: dm_content,
+            client_nonce: None,
+        },
+    )
+    .await?;
+
+    let now_str = Utc::now().to_rfc3339();
+    let action_id = Uuid::new_v4().to_string();
+    moderation::insert_moderation_action(
+        pool,
+        &action_id,
+        moderation::MODERATION_ACTION_TYPE_WARN,
+        &guild.id,
+        actor_user_id,
+        target_user_id,
+        reason,
+        None,
+        None,
+        false,
+        &now_str,
+        &now_str,
+    )
+    .await?;
+
+    Ok(action_id)
+}
+
+fn to_report_target_message_preview(content: Option<String>) -> Option<String> {
+    let content = content?;
+    let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return None;
+    }
+    let mut preview = compact.chars().take(140).collect::<String>();
+    if compact.chars().count() > 140 {
+        preview.push_str("...");
+    }
+    Some(preview)
+}
+
 fn normalize_id(value: &str, field: &str) -> Result<String, AppError> {
     let normalized = value.trim();
     if normalized.is_empty() {
@@ -1181,6 +1782,78 @@ fn normalize_report_category(value: Option<&str>) -> Result<Option<String>, AppE
             "category must be one of: spam, harassment, rule_violation, other".to_string(),
         )),
     }
+}
+
+fn normalize_report_queue_status(raw: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    match normalized.as_str() {
+        moderation::REPORT_STATUS_PENDING
+        | moderation::REPORT_STATUS_REVIEWED
+        | moderation::REPORT_STATUS_ACTIONED
+        | moderation::REPORT_STATUS_DISMISSED => Ok(Some(normalized)),
+        _ => Err(AppError::ValidationError(
+            "status must be one of: pending, reviewed, actioned, dismissed".to_string(),
+        )),
+    }
+}
+
+fn normalize_report_action_type(value: &str) -> Result<&'static str, AppError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        moderation::MODERATION_ACTION_TYPE_WARN => Ok(moderation::MODERATION_ACTION_TYPE_WARN),
+        moderation::MODERATION_ACTION_TYPE_MUTE => Ok(moderation::MODERATION_ACTION_TYPE_MUTE),
+        moderation::MODERATION_ACTION_TYPE_KICK => Ok(moderation::MODERATION_ACTION_TYPE_KICK),
+        moderation::MODERATION_ACTION_TYPE_BAN => Ok(moderation::MODERATION_ACTION_TYPE_BAN),
+        _ => Err(AppError::ValidationError(
+            "action_type must be one of: warn, mute, kick, ban".to_string(),
+        )),
+    }
+}
+
+fn normalize_report_queue_limit(raw: Option<&str>) -> Result<i64, AppError> {
+    let Some(raw) = raw else {
+        return Ok(DEFAULT_REPORT_QUEUE_LIMIT);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_REPORT_QUEUE_LIMIT);
+    }
+    let parsed = trimmed
+        .parse::<i64>()
+        .map_err(|_| AppError::ValidationError("limit must be a valid integer".to_string()))?;
+    Ok(parsed.clamp(1, MAX_REPORT_QUEUE_LIMIT))
+}
+
+fn normalize_optional_lifecycle_reason(
+    raw: Option<&str>,
+    field: &str,
+) -> Result<Option<String>, AppError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > MAX_MUTE_REASON_CHARS {
+        return Err(AppError::ValidationError(format!(
+            "{field} must be {MAX_MUTE_REASON_CHARS} characters or less"
+        )));
+    }
+    if trimmed
+        .chars()
+        .any(|ch| ch.is_control() && ch != '\n' && ch != '\t')
+    {
+        return Err(AppError::ValidationError(format!(
+            "{field} contains invalid characters"
+        )));
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
 fn normalize_duration_seconds(value: Option<i64>) -> Result<Option<i64>, AppError> {
@@ -1305,6 +1978,19 @@ fn decode_moderation_log_cursor(
     decode_moderation_log_cursor_value(trimmed).map(Some)
 }
 
+fn decode_report_queue_cursor(
+    value: Option<&str>,
+) -> Result<Option<moderation::ReportQueueCursor>, AppError> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    decode_report_queue_cursor_value(trimmed).map(Some)
+}
+
 fn decode_user_message_history_cursor(
     value: Option<&str>,
 ) -> Result<Option<message::GuildAuthorMessageHistoryCursor>, AppError> {
@@ -1340,6 +2026,28 @@ fn decode_moderation_log_cursor_value(
     })
 }
 
+fn decode_report_queue_cursor_value(
+    encoded: &str,
+) -> Result<moderation::ReportQueueCursor, AppError> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| AppError::ValidationError("cursor is invalid".to_string()))?;
+    let decoded_str = std::str::from_utf8(&decoded)
+        .map_err(|_| AppError::ValidationError("cursor is invalid".to_string()))?;
+    let (created_at, id) = decoded_str
+        .split_once('|')
+        .ok_or_else(|| AppError::ValidationError("cursor is invalid".to_string()))?;
+    if id.trim().is_empty() {
+        return Err(AppError::ValidationError("cursor is invalid".to_string()));
+    }
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .map_err(|_| AppError::ValidationError("cursor is invalid".to_string()))?;
+    Ok(moderation::ReportQueueCursor {
+        created_at: created_at.to_string(),
+        id: id.to_string(),
+    })
+}
+
 fn decode_user_message_history_cursor_value(
     encoded: &str,
 ) -> Result<message::GuildAuthorMessageHistoryCursor, AppError> {
@@ -1363,6 +2071,10 @@ fn decode_user_message_history_cursor_value(
 }
 
 fn encode_moderation_log_cursor(cursor: &moderation::ModerationLogCursor) -> String {
+    URL_SAFE_NO_PAD.encode(format!("{}|{}", cursor.created_at, cursor.id))
+}
+
+fn encode_report_queue_cursor(cursor: &moderation::ReportQueueCursor) -> String {
     URL_SAFE_NO_PAD.encode(format!("{}|{}", cursor.created_at, cursor.id))
 }
 
@@ -2450,6 +3162,188 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn act_on_report_restores_review_state_when_action_fails_after_reserve() {
+        let pool = setup_service_pool().await;
+        let attachment_config = crate::config::AttachmentConfig::default();
+
+        let created = create_user_report(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateUserReportInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "needs a warning".to_string(),
+                category: Some("other".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        guild_member::remove_guild_member(&pool, "guild-id", "target-user-id")
+            .await
+            .unwrap();
+
+        let err = act_on_report(
+            &pool,
+            &attachment_config,
+            "mod-user-id",
+            "test-guild",
+            ActOnReportInput {
+                report_id: created.id.clone(),
+                action_type: moderation::MODERATION_ACTION_TYPE_WARN.to_string(),
+                reason: None,
+                duration_seconds: None,
+                delete_message_window: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::ValidationError(_)));
+
+        let stored = moderation::find_report_by_id(&pool, &created.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, moderation::REPORT_STATUS_REVIEWED);
+        assert!(stored.reviewed_at.is_some());
+        assert_eq!(stored.reviewed_by_user_id.as_deref(), Some("mod-user-id"));
+        assert!(stored.actioned_at.is_none());
+        assert!(stored.actioned_by_user_id.is_none());
+        assert!(stored.moderation_action_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_report_queue_reconciles_stale_action_reservations() {
+        let pool = setup_service_pool().await;
+        let created = create_user_report(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateUserReportInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "stale reservation".to_string(),
+                category: Some("other".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let DbPool::Sqlite(sqlite_pool) = &pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+        sqlx::query(
+            "UPDATE reports
+             SET status = ?1,
+                 reviewed_at = ?2,
+                 reviewed_by_user_id = ?3,
+                 actioned_at = ?4,
+                 actioned_by_user_id = ?5,
+                 dismissal_reason = NULL,
+                 moderation_action_id = NULL,
+                 updated_at = ?6
+             WHERE id = ?7",
+        )
+        .bind(moderation::REPORT_STATUS_ACTIONED)
+        .bind("2026-03-01T00:00:00Z")
+        .bind("mod-user-id")
+        .bind("2026-03-01T00:01:00Z")
+        .bind("mod-user-id")
+        .bind("2026-03-01T00:01:00Z")
+        .bind(&created.id)
+        .execute(sqlite_pool)
+        .await
+        .unwrap();
+
+        let queue = list_report_queue(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            ListReportQueueInput {
+                limit: Some("10".to_string()),
+                cursor: None,
+                status: Some(moderation::REPORT_STATUS_REVIEWED.to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(queue.entries.len(), 1);
+        assert_eq!(queue.entries[0].id, created.id);
+        assert_eq!(queue.entries[0].status, moderation::REPORT_STATUS_REVIEWED);
+
+        let stored = moderation::find_report_by_id(&pool, &created.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, moderation::REPORT_STATUS_REVIEWED);
+        assert!(stored.actioned_at.is_none());
+        assert!(stored.actioned_by_user_id.is_none());
+        assert!(stored.moderation_action_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn act_on_report_reconciles_stale_action_reservations_before_processing() {
+        let pool = setup_service_pool().await;
+        let attachment_config = crate::config::AttachmentConfig::default();
+        let created = create_user_report(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateUserReportInput {
+                target_user_id: "target-user-id".to_string(),
+                reason: "stale reservation".to_string(),
+                category: Some("other".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let DbPool::Sqlite(sqlite_pool) = &pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+        sqlx::query(
+            "UPDATE reports
+             SET status = ?1,
+                 reviewed_at = ?2,
+                 reviewed_by_user_id = ?3,
+                 actioned_at = ?4,
+                 actioned_by_user_id = ?5,
+                 dismissal_reason = NULL,
+                 moderation_action_id = NULL,
+                 updated_at = ?6
+             WHERE id = ?7",
+        )
+        .bind(moderation::REPORT_STATUS_ACTIONED)
+        .bind("2026-03-01T00:00:00Z")
+        .bind("mod-user-id")
+        .bind("2026-03-01T00:01:00Z")
+        .bind("mod-user-id")
+        .bind("2026-03-01T00:01:00Z")
+        .bind(&created.id)
+        .execute(sqlite_pool)
+        .await
+        .unwrap();
+
+        let acted = act_on_report(
+            &pool,
+            &attachment_config,
+            "mod-user-id",
+            "test-guild",
+            ActOnReportInput {
+                report_id: created.id.clone(),
+                action_type: moderation::MODERATION_ACTION_TYPE_MUTE.to_string(),
+                reason: None,
+                duration_seconds: Some(60),
+                delete_message_window: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(acted.id, created.id);
+        assert_eq!(acted.status, moderation::REPORT_STATUS_ACTIONED);
+        assert!(acted.moderation_action_id.is_some());
+    }
+
+    #[tokio::test]
     async fn apply_kick_action_rolls_back_when_membership_delete_fails() {
         let pool = setup_service_pool().await;
         moderation::insert_moderation_action(
@@ -2931,11 +3825,13 @@ mod tests {
         .await
         .unwrap();
 
+        permissions::invalidate_guild_permission_cache("guild-id");
         let bans = list_bans(&pool, "mod-user-id", "test-guild").await.unwrap();
         assert_eq!(bans.len(), 1);
         assert_eq!(bans[0].id, created.ban_id);
         assert_eq!(bans[0].target_user_id, "target-user-id");
 
+        permissions::invalidate_guild_permission_cache("guild-id");
         let unbanned = unban(&pool, "mod-user-id", "test-guild", &created.ban_id)
             .await
             .unwrap();
@@ -3000,6 +3896,7 @@ mod tests {
         assert!(matches!(forbidden, AppError::Forbidden(_)));
 
         grant_view_mod_log_permission(&pool).await;
+        permissions::invalidate_guild_permission_cache("guild-id");
 
         let first_page = list_moderation_log(
             &pool,

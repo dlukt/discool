@@ -187,6 +187,37 @@ const moderationApi = vi.hoisted(() => ({
     entries: [],
     cursor: null,
   })),
+  fetchReportQueue: vi.fn(async () => ({
+    entries: [],
+    cursor: null,
+  })),
+  reviewReport: vi.fn(async () => ({
+    id: 'report-1',
+    guildSlug: 'lobby',
+    reporterUserId: 'user-viewer',
+    reporterUsername: 'viewer',
+    reporterDisplayName: 'Role Manager',
+    reporterAvatarColor: '#3366ff',
+    targetType: 'user' as const,
+    targetMessageId: null,
+    targetUserId: 'user-default',
+    targetUsername: 'general-user',
+    targetDisplayName: 'General User',
+    targetAvatarColor: '#99aab5',
+    targetMessagePreview: null,
+    reason: 'abusive behavior',
+    category: 'harassment' as const,
+    status: 'reviewed' as const,
+    reviewedAt: '2026-03-01T00:00:00.000Z',
+    actionedAt: null,
+    dismissedAt: null,
+    dismissalReason: null,
+    moderationActionId: null,
+    createdAt: '2026-03-01T00:00:00.000Z',
+    updatedAt: '2026-03-01T00:00:00.000Z',
+  })),
+  dismissReport: vi.fn(),
+  actOnReport: vi.fn(),
   fetchUserMessageHistory: vi.fn(async () => ({
     entries: [
       {
@@ -378,6 +409,10 @@ describe('MemberList', () => {
     moderationApi.createKick.mockClear()
     moderationApi.createBan.mockClear()
     moderationApi.fetchModerationLog.mockClear()
+    moderationApi.fetchReportQueue.mockClear()
+    moderationApi.reviewReport.mockClear()
+    moderationApi.dismissReport.mockClear()
+    moderationApi.actOnReport.mockClear()
     moderationApi.fetchUserMessageHistory.mockClear()
   })
 
@@ -606,6 +641,35 @@ describe('MemberList', () => {
         cursor: null,
         order: 'desc',
         actionType: null,
+      })
+    })
+  })
+
+  it('loads report queue panel from moderation tabs', async () => {
+    memberDataByGuild.lobby.roles = memberDataByGuild.lobby.roles.map((role) =>
+      role.id === 'role-manager'
+        ? {
+            ...role,
+            permissionsBitflag: role.permissionsBitflag | (1 << 8), // VIEW_MOD_LOG
+          }
+        : role,
+    )
+
+    const { getByTestId } = render(MemberList, {
+      activeGuild: 'lobby',
+    })
+
+    await waitFor(() => {
+      expect(guildState.loadMembers).toHaveBeenCalledWith('lobby', true)
+    })
+
+    await fireEvent.click(getByTestId('member-list-tab-report-queue'))
+    expect(getByTestId('report-queue-panel')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(moderationApi.fetchReportQueue).toHaveBeenCalledWith('lobby', {
+        limit: 50,
+        cursor: null,
+        status: 'pending',
       })
     })
   })
