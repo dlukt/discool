@@ -22,6 +22,7 @@ import {
   createKick,
   createMute,
 } from '$lib/features/moderation/moderationApi'
+import UserMessageHistoryPanel from '$lib/features/moderation/UserMessageHistoryPanel.svelte'
 import { toastState } from '$lib/feedback/toastStore.svelte'
 import { presenceState } from './presenceStore.svelte'
 
@@ -78,7 +79,6 @@ const MODERATION_ACTIONS: Array<{
   { permission: 'MUTE_MEMBERS', label: 'Mute member' },
   { permission: 'KICK_MEMBERS', label: 'Kick member' },
   { permission: 'BAN_MEMBERS', label: 'Ban member' },
-  { permission: 'MANAGE_MESSAGES', label: 'Moderate messages' },
 ]
 
 const MUTE_DURATION_PRESET_OPTIONS: Array<{
@@ -113,6 +113,7 @@ let banDialogMemberId = $state<string | null>(null)
 let banReason = $state('')
 let banDeleteWindow = $state<BanDeletePreset>('none')
 let banSubmitting = $state(false)
+let messageHistoryMemberId = $state<string | null>(null)
 let roleOverridesByMember = $state<Record<string, string[]>>({})
 let scrollTop = $state(0)
 let viewportHeight = $state(240)
@@ -155,6 +156,9 @@ let viewerPermissionBitflag = $derived(
 )
 let moderationActions = $derived(
   MODERATION_ACTIONS.filter((action) => viewerHasPermission(action.permission)),
+)
+let canViewUserMessageHistory = $derived(
+  viewerHasPermission('MANAGE_MESSAGES') || viewerHasPermission('KICK_MEMBERS'),
 )
 let canViewModerationLog = $derived(viewerHasPermission('VIEW_MOD_LOG'))
 
@@ -262,6 +266,13 @@ let banDialogMember = $derived(
   banDialogMemberId
     ? (membersWithPresence.find(
         (member) => member.userId === banDialogMemberId,
+      ) ?? null)
+    : null,
+)
+let messageHistoryMember = $derived(
+  messageHistoryMemberId
+    ? (membersWithPresence.find(
+        (member) => member.userId === messageHistoryMemberId,
       ) ?? null)
     : null,
 )
@@ -565,10 +576,6 @@ function triggerSendDm(member: GuildMember): void {
   statusMessage = `DM intent opened for ${member.displayName}.`
 }
 
-function triggerModerationAction(label: string, member: GuildMember): void {
-  statusMessage = `${label} for ${member.displayName} will be available in Epic 8.`
-}
-
 function resetMuteDialogState(): void {
   muteDurationPreset = '24h'
   muteCustomMinutes = '60'
@@ -633,6 +640,17 @@ function openBanDialog(member: GuildMember): void {
 function closeBanDialog(): void {
   banDialogMemberId = null
   resetBanDialogState()
+}
+
+function openMessageHistory(member: GuildMember): void {
+  if (!canViewUserMessageHistory) return
+  messageHistoryMemberId = member.userId
+  errorMessage = null
+  statusMessage = null
+}
+
+function closeMessageHistory(): void {
+  messageHistoryMemberId = null
 }
 
 function durationSecondsForPreset(preset: MuteDurationPreset): number | null {
@@ -832,6 +850,7 @@ $effect(() => {
   resetKickDialogState()
   banDialogMemberId = null
   resetBanDialogState()
+  messageHistoryMemberId = null
   roleOverridesByMember = {}
   scrollTop = 0
   activePanel = 'members'
@@ -1060,11 +1079,22 @@ $effect(() => {
             </button>
           {/if}
 
-          {#if moderationActions.length === 0}
+          {#if moderationActions.length === 0 && !canViewUserMessageHistory}
             <span class="rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground">
               Moderation actions unavailable
             </span>
           {:else}
+            {#if canViewUserMessageHistory}
+              <button
+                type="button"
+                class="rounded-md border border-border px-2 py-1 text-xs hover:bg-muted"
+                onclick={() => openMessageHistory(selectedMember)}
+                disabled={selectedMember.userId === currentUserId}
+                data-testid="view-message-history-button"
+              >
+                View message history
+              </button>
+            {/if}
             {#each moderationActions as action (action.permission)}
               {#if action.permission === 'MUTE_MEMBERS'}
                 <button
@@ -1092,14 +1122,6 @@ $effect(() => {
                   disabled={selectedMember.userId === currentUserId}
                 >
                   Ban member
-                </button>
-              {:else}
-                <button
-                  type="button"
-                  class="rounded-md border border-border px-2 py-1 text-xs hover:bg-muted"
-                  onclick={() => triggerModerationAction(action.label, selectedMember)}
-                >
-                  {action.label} (coming soon)
                 </button>
               {/if}
             {/each}
@@ -1367,4 +1389,13 @@ $effect(() => {
       </div>
     </div>
   </div>
+{/if}
+
+{#if messageHistoryMember}
+  <UserMessageHistoryPanel
+    activeGuild={activeGuild}
+    targetUserId={messageHistoryMember.userId}
+    targetDisplayName={messageHistoryMember.displayName}
+    onClose={closeMessageHistory}
+  />
 {/if}

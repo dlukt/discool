@@ -25,6 +25,27 @@ pub struct MessagePage {
     pub has_more: bool,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct GuildAuthorMessageHistoryRow {
+    pub id: String,
+    pub channel_slug: String,
+    pub channel_name: String,
+    pub content: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuildAuthorMessageHistoryCursor {
+    pub created_at: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GuildAuthorMessageHistoryPage {
+    pub entries: Vec<GuildAuthorMessageHistoryRow>,
+    pub has_more: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_message(
     pool: &DbPool,
@@ -401,6 +422,122 @@ pub async fn list_message_ids_by_guild_and_author_since(
     Ok(message_ids)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn list_message_history_page_by_guild_and_author(
+    pool: &DbPool,
+    guild_id: &str,
+    author_user_id: &str,
+    channel_slug: Option<&str>,
+    from_created_at: Option<&str>,
+    to_created_at: Option<&str>,
+    before: Option<&GuildAuthorMessageHistoryCursor>,
+    limit: i64,
+) -> Result<GuildAuthorMessageHistoryPage, AppError> {
+    let normalized_limit = limit.clamp(1, 200);
+    let fetch_limit = normalized_limit + 1;
+    let mut entries = match pool {
+        DbPool::Postgres(pool) => {
+            let mut query_builder = QueryBuilder::<sqlx::Postgres>::new(
+                "SELECT m.id,
+                        c.slug AS channel_slug,
+                        c.name AS channel_name,
+                        m.content,
+                        m.created_at
+                 FROM messages m
+                 JOIN channels c ON c.id = m.channel_id
+                 WHERE m.guild_id = ",
+            );
+            query_builder.push_bind(guild_id);
+            query_builder.push(" AND c.guild_id = ");
+            query_builder.push_bind(guild_id);
+            query_builder.push(" AND m.author_user_id = ");
+            query_builder.push_bind(author_user_id);
+            query_builder.push(" AND m.deleted_at IS NULL");
+            if let Some(channel_slug) = channel_slug {
+                query_builder.push(" AND c.slug = ");
+                query_builder.push_bind(channel_slug);
+            }
+            if let Some(from_created_at) = from_created_at {
+                query_builder.push(" AND m.created_at >= ");
+                query_builder.push_bind(from_created_at);
+            }
+            if let Some(to_created_at) = to_created_at {
+                query_builder.push(" AND m.created_at <= ");
+                query_builder.push_bind(to_created_at);
+            }
+            if let Some(cursor) = before {
+                query_builder.push(" AND (m.created_at < ");
+                query_builder.push_bind(&cursor.created_at);
+                query_builder.push(" OR (m.created_at = ");
+                query_builder.push_bind(&cursor.created_at);
+                query_builder.push(" AND m.id < ");
+                query_builder.push_bind(&cursor.id);
+                query_builder.push("))");
+            }
+            query_builder.push(" ORDER BY m.created_at DESC, m.id DESC LIMIT ");
+            query_builder.push_bind(fetch_limit);
+            query_builder
+                .build_query_as::<GuildAuthorMessageHistoryRow>()
+                .fetch_all(pool)
+                .await
+        }
+        DbPool::Sqlite(pool) => {
+            let mut query_builder = QueryBuilder::<sqlx::Sqlite>::new(
+                "SELECT m.id,
+                        c.slug AS channel_slug,
+                        c.name AS channel_name,
+                        m.content,
+                        m.created_at
+                 FROM messages m
+                 JOIN channels c ON c.id = m.channel_id
+                 WHERE m.guild_id = ",
+            );
+            query_builder.push_bind(guild_id);
+            query_builder.push(" AND c.guild_id = ");
+            query_builder.push_bind(guild_id);
+            query_builder.push(" AND m.author_user_id = ");
+            query_builder.push_bind(author_user_id);
+            query_builder.push(" AND m.deleted_at IS NULL");
+            if let Some(channel_slug) = channel_slug {
+                query_builder.push(" AND c.slug = ");
+                query_builder.push_bind(channel_slug);
+            }
+            if let Some(from_created_at) = from_created_at {
+                query_builder.push(" AND m.created_at >= ");
+                query_builder.push_bind(from_created_at);
+            }
+            if let Some(to_created_at) = to_created_at {
+                query_builder.push(" AND m.created_at <= ");
+                query_builder.push_bind(to_created_at);
+            }
+            if let Some(cursor) = before {
+                query_builder.push(" AND (m.created_at < ");
+                query_builder.push_bind(&cursor.created_at);
+                query_builder.push(" OR (m.created_at = ");
+                query_builder.push_bind(&cursor.created_at);
+                query_builder.push(" AND m.id < ");
+                query_builder.push_bind(&cursor.id);
+                query_builder.push("))");
+            }
+            query_builder.push(" ORDER BY m.created_at DESC, m.id DESC LIMIT ");
+            query_builder.push_bind(fetch_limit);
+            query_builder
+                .build_query_as::<GuildAuthorMessageHistoryRow>()
+                .fetch_all(pool)
+                .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    let page_limit = usize::try_from(normalized_limit).unwrap_or(200);
+    let has_more = entries.len() > page_limit;
+    if has_more {
+        entries.truncate(page_limit);
+    }
+
+    Ok(GuildAuthorMessageHistoryPage { entries, has_more })
+}
+
 pub async fn delete_messages_by_ids(
     pool: &DbPool,
     message_ids: &[String],
@@ -726,6 +863,218 @@ mod tests {
             .unwrap();
         assert_eq!(clamped_page.messages.len(), 1);
         assert_eq!(clamped_page.messages[0].id, "msg-004");
+    }
+
+    #[tokio::test]
+    async fn sqlite_message_history_page_filters_and_skips_soft_deleted_rows() {
+        let pool = init_pool(&DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 1,
+        })
+        .await
+        .unwrap();
+        run_migrations(&pool).await.unwrap();
+        seed_message_fixture(&pool).await;
+
+        let DbPool::Sqlite(sqlite_pool) = &pool else {
+            panic!("test fixture expects sqlite pool");
+        };
+        sqlx::query(
+            "INSERT INTO channels (id, guild_id, slug, name, channel_type, position, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind("channel-random")
+        .bind("guild-id")
+        .bind("random")
+        .bind("random")
+        .bind("text")
+        .bind(1_i64)
+        .bind("2026-02-28T00:00:00Z")
+        .bind("2026-02-28T00:00:00Z")
+        .execute(sqlite_pool)
+        .await
+        .unwrap();
+
+        for (id, channel_id, author_user_id, content, created_at) in [
+            (
+                "history-001",
+                "channel-id",
+                "author-user-id",
+                "first",
+                "2026-02-28T00:00:01Z",
+            ),
+            (
+                "history-002",
+                "channel-random",
+                "author-user-id",
+                "second",
+                "2026-02-28T00:00:02Z",
+            ),
+            (
+                "history-003",
+                "channel-id",
+                "author-user-id",
+                "third",
+                "2026-02-28T00:00:03Z",
+            ),
+            (
+                "history-004",
+                "channel-id",
+                "owner-user-id",
+                "owner-message",
+                "2026-02-28T00:00:04Z",
+            ),
+            (
+                "history-soft-deleted",
+                "channel-id",
+                "author-user-id",
+                "soft-deleted",
+                "2026-02-28T00:00:05Z",
+            ),
+        ] {
+            insert_message(
+                &pool,
+                id,
+                "guild-id",
+                channel_id,
+                author_user_id,
+                content,
+                false,
+                created_at,
+                created_at,
+            )
+            .await
+            .unwrap();
+        }
+
+        sqlx::query(
+            "INSERT INTO moderation_actions (
+                id,
+                action_type,
+                guild_id,
+                actor_user_id,
+                target_user_id,
+                reason,
+                duration_seconds,
+                expires_at,
+                is_active,
+                created_at,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )
+        .bind("mod-action-history")
+        .bind("message_delete")
+        .bind("guild-id")
+        .bind("owner-user-id")
+        .bind("author-user-id")
+        .bind("cleanup")
+        .bind(None::<i64>)
+        .bind(None::<&str>)
+        .bind(0_i64)
+        .bind("2026-02-28T00:00:06Z")
+        .bind("2026-02-28T00:00:06Z")
+        .execute(sqlite_pool)
+        .await
+        .unwrap();
+
+        soft_delete_message_by_id_for_moderation(
+            &pool,
+            "history-soft-deleted",
+            "guild-id",
+            "channel-id",
+            "owner-user-id",
+            "cleanup",
+            "mod-action-history",
+            "2026-02-28T00:00:06Z",
+            "2026-02-28T00:00:06Z",
+        )
+        .await
+        .unwrap();
+
+        let first_page = list_message_history_page_by_guild_and_author(
+            &pool,
+            "guild-id",
+            "author-user-id",
+            None,
+            None,
+            None,
+            None,
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(first_page.has_more);
+        assert_eq!(
+            first_page
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["history-003", "history-002"]
+        );
+        assert_eq!(first_page.entries[0].channel_slug, "general");
+        assert_eq!(first_page.entries[1].channel_slug, "random");
+
+        let second_page = list_message_history_page_by_guild_and_author(
+            &pool,
+            "guild-id",
+            "author-user-id",
+            None,
+            None,
+            None,
+            Some(&GuildAuthorMessageHistoryCursor {
+                created_at: "2026-02-28T00:00:02Z".to_string(),
+                id: "history-002".to_string(),
+            }),
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(!second_page.has_more);
+        assert_eq!(second_page.entries.len(), 1);
+        assert_eq!(second_page.entries[0].id, "history-001");
+
+        let filtered_by_channel = list_message_history_page_by_guild_and_author(
+            &pool,
+            "guild-id",
+            "author-user-id",
+            Some("general"),
+            None,
+            None,
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            filtered_by_channel
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["history-003", "history-001"]
+        );
+
+        let filtered_by_time = list_message_history_page_by_guild_and_author(
+            &pool,
+            "guild-id",
+            "author-user-id",
+            None,
+            Some("2026-02-28T00:00:02Z"),
+            Some("2026-02-28T00:00:03Z"),
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            filtered_by_time
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["history-003", "history-002"]
+        );
     }
 
     #[tokio::test]

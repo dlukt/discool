@@ -163,6 +163,8 @@ let operationStatusText = $state<string | null>(null)
 let operationStatusTone = $state<'default' | 'error'>('default')
 let operationStatusResetTimer: ReturnType<typeof setTimeout> | null = null
 let muteStatusRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let highlightResetTimer: ReturnType<typeof setTimeout> | null = null
+let highlightedMessageId = $state<string | null>(null)
 let voiceKickDialogParticipant = $state<VoiceParticipant | null>(null)
 let voiceKickReason = $state('')
 let voiceKickSubmitting = $state(false)
@@ -489,6 +491,12 @@ function clearMuteStatusRefreshTimer(): void {
   if (muteStatusRefreshTimer === null) return
   clearTimeout(muteStatusRefreshTimer)
   muteStatusRefreshTimer = null
+}
+
+function clearHighlightResetTimer(): void {
+  if (highlightResetTimer === null) return
+  clearTimeout(highlightResetTimer)
+  highlightResetTimer = null
 }
 
 function setOperationStatus(
@@ -1182,6 +1190,55 @@ function jumpToPresent(): void {
   }
 }
 
+async function jumpToChannelMessage(messageId: string): Promise<void> {
+  if (!isChannelMode) return
+  const normalizedMessageId = messageId.trim()
+  if (!normalizedMessageId) return
+
+  const jumpGuild = activeGuild
+  const jumpChannel = activeChannel
+  await messageState.ensureHistoryLoaded(jumpGuild, jumpChannel)
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const hasMessage = messageState
+      .timeline(jumpGuild, jumpChannel)
+      .some((entry) => entry.id === normalizedMessageId)
+    if (hasMessage) break
+    const historyState = messageState.historyStateForChannel(
+      jumpGuild,
+      jumpChannel,
+    )
+    if (!historyState.hasMoreHistory || historyState.loadingHistory) break
+    await messageState.loadOlderHistory(jumpGuild, jumpChannel)
+  }
+
+  await tick()
+  if (
+    !isChannelMode ||
+    activeGuild !== jumpGuild ||
+    activeChannel !== jumpChannel
+  )
+    return
+  const viewport = timelineViewport
+  const row = virtualRows.rows.find((entry) => entry.id === normalizedMessageId)
+  if (!viewport || !row) {
+    setOperationStatus('Message not found in this channel history.', 'error')
+    return
+  }
+
+  const centeredTop = Math.max(
+    0,
+    row.top - Math.max(0, Math.round((viewport.clientHeight - row.height) / 2)),
+  )
+  viewport.scrollTop = centeredTop
+  updateViewportMetrics(viewport, jumpGuild, jumpChannel)
+  clearHighlightResetTimer()
+  highlightedMessageId = normalizedMessageId
+  highlightResetTimer = setTimeout(() => {
+    highlightedMessageId = null
+    highlightResetTimer = null
+  }, 2_500)
+}
+
 $effect(() => {
   if (!isConversationMode) return
   activeGuild
@@ -1247,6 +1304,8 @@ $effect(() => {
     clearSelectedAttachment()
     attachmentError = null
     attachmentUploadInFlight = false
+    highlightedMessageId = null
+    clearHighlightResetTimer()
     return
   }
   if (!isChannelMode) {
@@ -1295,6 +1354,18 @@ $effect(() => {
   if (!exists) {
     composerEdit = null
   }
+})
+
+$effect(() => {
+  if (!isChannelMode) return
+  const _messageVersion = messageState.version
+  void _messageVersion
+  const pendingMessageId = messageState.consumePendingChannelMessageJump(
+    activeGuild,
+    activeChannel,
+  )
+  if (!pendingMessageId) return
+  void jumpToChannelMessage(pendingMessageId)
 })
 
 $effect(() => {
@@ -1470,6 +1541,7 @@ onMount(() => {
   return () => {
     clearOperationStatusTimer()
     clearMuteStatusRefreshTimer()
+    clearHighlightResetTimer()
     unsubscribeLifecycle()
     unsubscribeEnvelopes()
   }
@@ -1588,7 +1660,11 @@ onMount(() => {
             <div class="relative" style={`height: ${virtualRows.totalHeight}px;`}>
               {#each visibleRows as row (row.id)}
                 <div
-                  class="absolute inset-x-0"
+                  class={`absolute inset-x-0 rounded-md transition-colors ${
+                    highlightedMessageId === row.message.id
+                      ? 'bg-fire/10 ring-1 ring-fire/40'
+                      : ''
+                  }`}
                   style={`top: ${row.top}px; height: ${row.height}px;`}
                   data-testid={`message-window-row-${row.message.id}`}
                 >

@@ -966,4 +966,22 @@ describe('messageState', () => {
 
     expect(dmStoreMock.dmState.setDmUnreadActivity).not.toHaveBeenCalled()
   })
+
+  it('queues and consumes pending channel message jump intents', () => {
+    messageState.requestChannelMessageJump(
+      ' lobby ',
+      ' general ',
+      ' message-1 ',
+    )
+
+    expect(
+      messageState.consumePendingChannelMessageJump('lobby', 'random'),
+    ).toBeNull()
+    expect(
+      messageState.consumePendingChannelMessageJump('lobby', 'general'),
+    ).toBe('message-1')
+    expect(
+      messageState.consumePendingChannelMessageJump('lobby', 'general'),
+    ).toBeNull()
+  })
 })

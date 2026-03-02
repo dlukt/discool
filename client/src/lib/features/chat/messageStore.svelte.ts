@@ -95,6 +95,12 @@ type PendingOptimisticEntry = {
   messageId: string
 }
 
+type PendingChannelMessageJump = {
+  guildSlug: string
+  channelSlug: string
+  messageId: string
+}
+
 type ChannelHistoryState = {
   initialized: boolean
   loadingHistory: boolean
@@ -611,6 +617,7 @@ export const messageState = $state({
   optimisticByNonce: {} as Record<string, PendingOptimisticEntry>,
   historyByChannel: {} as Record<string, ChannelHistoryState>,
   typingByChannel: {} as Record<string, Record<string, number>>,
+  pendingChannelMessageJump: null as PendingChannelMessageJump | null,
 
   timeline: (guildSlug: string, channelSlug: string): ChatMessage[] => {
     const _blockVersion = blockState.version
@@ -848,6 +855,42 @@ export const messageState = $state({
     const normalized = userId?.trim() || null
     if (messageState.currentUserId === normalized) return
     messageState.currentUserId = normalized
+  },
+
+  requestChannelMessageJump: (
+    guildSlug: string,
+    channelSlug: string,
+    messageId: string,
+  ): void => {
+    const normalizedGuild = guildSlug.trim()
+    const normalizedChannel = channelSlug.trim()
+    const normalizedMessageId = messageId.trim()
+    if (!normalizedGuild || !normalizedChannel || !normalizedMessageId) return
+    messageState.pendingChannelMessageJump = {
+      guildSlug: normalizedGuild,
+      channelSlug: normalizedChannel,
+      messageId: normalizedMessageId,
+    }
+    messageState.version += 1
+  },
+
+  consumePendingChannelMessageJump: (
+    guildSlug: string,
+    channelSlug: string,
+  ): string | null => {
+    const pending = messageState.pendingChannelMessageJump
+    if (!pending) return null
+    const normalizedGuild = guildSlug.trim()
+    const normalizedChannel = channelSlug.trim()
+    if (
+      pending.guildSlug !== normalizedGuild ||
+      pending.channelSlug !== normalizedChannel
+    ) {
+      return null
+    }
+    messageState.pendingChannelMessageJump = null
+    messageState.version += 1
+    return pending.messageId
   },
 
   ensureHistoryLoaded: async (
@@ -1620,6 +1663,7 @@ export const messageState = $state({
     messageState.optimisticByNonce = {}
     messageState.historyByChannel = {}
     messageState.typingByChannel = {}
+    messageState.pendingChannelMessageJump = null
     messageState.version += 1
   },
 })

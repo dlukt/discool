@@ -115,6 +115,14 @@ export type FetchModerationLogInput = {
   actionType?: ModerationLogActionType | null
 }
 
+export type FetchUserMessageHistoryInput = {
+  limit?: number
+  cursor?: string | null
+  channelSlug?: string | null
+  from?: string | null
+  to?: string | null
+}
+
 export type ModerationLogEntry = {
   id: string
   actionType: ModerationLogActionType
@@ -132,6 +140,19 @@ export type ModerationLogEntry = {
 
 export type ModerationLogPage = {
   entries: ModerationLogEntry[]
+  cursor: string | null
+}
+
+export type UserMessageHistoryEntry = {
+  id: string
+  channelSlug: string
+  channelName: string
+  content: string
+  createdAt: string
+}
+
+export type UserMessageHistoryPage = {
+  entries: UserMessageHistoryEntry[]
   cursor: string | null
 }
 
@@ -244,6 +265,14 @@ type ModerationLogEntryWire = {
   target_username: string
   target_display_name: string
   target_avatar_color?: string
+}
+
+type UserMessageHistoryEntryWire = {
+  id: string
+  channel_slug: string
+  channel_name: string
+  content: string
+  created_at: string
 }
 
 function normalizePathPart(value: string, field: string): string {
@@ -408,6 +437,18 @@ function toModerationLogEntry(
   }
 }
 
+function toUserMessageHistoryEntry(
+  wire: UserMessageHistoryEntryWire,
+): UserMessageHistoryEntry {
+  return {
+    id: wire.id,
+    channelSlug: wire.channel_slug,
+    channelName: wire.channel_name,
+    content: wire.content,
+    createdAt: wire.created_at,
+  }
+}
+
 function muteCreatePath(guildSlug: string): string {
   const guild = normalizePathPart(guildSlug, 'guildSlug')
   return `/api/v1/guilds/${guild}/moderation/mutes`
@@ -484,6 +525,61 @@ function moderationLogPath(
     return `/api/v1/guilds/${guild}/moderation/log`
   }
   return `/api/v1/guilds/${guild}/moderation/log?${query}`
+}
+
+function userMessageHistoryPath(
+  guildSlug: string,
+  targetUserId: string,
+  input: FetchUserMessageHistoryInput,
+): string {
+  const guild = normalizePathPart(guildSlug, 'guildSlug')
+  const target = normalizePathPart(targetUserId, 'targetUserId')
+  const params = new URLSearchParams()
+
+  if (input.limit !== undefined) {
+    if (!Number.isFinite(input.limit)) {
+      throw new ApiError('VALIDATION_ERROR', 'limit must be finite')
+    }
+    const normalizedLimit = Math.trunc(input.limit)
+    if (normalizedLimit <= 0) {
+      throw new ApiError('VALIDATION_ERROR', 'limit must be greater than zero')
+    }
+    params.set('limit', String(normalizedLimit))
+  }
+
+  if (input.cursor !== undefined && input.cursor !== null) {
+    const normalizedCursor = input.cursor.trim()
+    if (normalizedCursor) {
+      params.set('cursor', normalizedCursor)
+    }
+  }
+
+  if (input.channelSlug !== undefined && input.channelSlug !== null) {
+    const normalizedChannelSlug = input.channelSlug.trim()
+    if (normalizedChannelSlug) {
+      params.set('channel_slug', normalizedChannelSlug)
+    }
+  }
+
+  if (input.from !== undefined && input.from !== null) {
+    const normalizedFrom = input.from.trim()
+    if (normalizedFrom) {
+      params.set('from', normalizedFrom)
+    }
+  }
+
+  if (input.to !== undefined && input.to !== null) {
+    const normalizedTo = input.to.trim()
+    if (normalizedTo) {
+      params.set('to', normalizedTo)
+    }
+  }
+
+  const query = params.toString()
+  if (!query) {
+    return `/api/v1/guilds/${guild}/moderation/users/${target}/messages`
+  }
+  return `/api/v1/guilds/${guild}/moderation/users/${target}/messages?${query}`
 }
 
 export async function createMute(
@@ -599,6 +695,19 @@ export async function fetchModerationLog(
   const page = await apiFetchCursorList<ModerationLogEntryWire[]>(path)
   return {
     entries: page.data.map(toModerationLogEntry),
+    cursor: page.cursor,
+  }
+}
+
+export async function fetchUserMessageHistory(
+  guildSlug: string,
+  targetUserId: string,
+  input: FetchUserMessageHistoryInput = {},
+): Promise<UserMessageHistoryPage> {
+  const path = userMessageHistoryPath(guildSlug, targetUserId, input)
+  const page = await apiFetchCursorList<UserMessageHistoryEntryWire[]>(path)
+  return {
+    entries: page.data.map(toUserMessageHistoryEntry),
     cursor: page.cursor,
   }
 }

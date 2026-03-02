@@ -65,6 +65,16 @@ pub struct ListModerationLogInput {
     pub action_type: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ListUserMessageHistoryInput {
+    pub target_user_id: String,
+    pub limit: Option<String>,
+    pub cursor: Option<String>,
+    pub channel_slug: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MuteActionResponse {
     pub id: String,
@@ -191,6 +201,21 @@ pub struct ModerationLogEntryResponse {
 #[derive(Debug, Clone)]
 pub struct ListModerationLogResult {
     pub entries: Vec<ModerationLogEntryResponse>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UserMessageHistoryEntryResponse {
+    pub id: String,
+    pub channel_slug: String,
+    pub channel_name: String,
+    pub content: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListUserMessageHistoryResult {
+    pub entries: Vec<UserMessageHistoryEntryResponse>,
     pub cursor: Option<String>,
 }
 
@@ -713,6 +738,83 @@ pub async fn list_moderation_log(
     })
 }
 
+pub async fn list_user_message_history(
+    pool: &DbPool,
+    actor_user_id: &str,
+    guild_slug: &str,
+    input: ListUserMessageHistoryInput,
+) -> Result<ListUserMessageHistoryResult, AppError> {
+    let actor_user_id = normalize_id(actor_user_id, "actor_user_id")?;
+    let guild_slug = normalize_slug(guild_slug, "guild_slug")?;
+    let target_user_id = normalize_id(&input.target_user_id, "target_user_id")?;
+    let limit = normalize_moderation_log_limit(input.limit.as_deref())?;
+    let cursor = decode_user_message_history_cursor(input.cursor.as_deref())?;
+    let channel_slug = normalize_optional_slug(input.channel_slug.as_deref(), "channel_slug")?;
+    let from = normalize_optional_rfc3339(input.from.as_deref(), "from")?;
+    let to = normalize_optional_rfc3339(input.to.as_deref(), "to")?;
+    if let (Some(from), Some(to)) = (&from, &to)
+        && from > to
+    {
+        return Err(AppError::ValidationError(
+            "from must be less than or equal to to".to_string(),
+        ));
+    }
+
+    let guild = guild::find_guild_by_slug(pool, &guild_slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let effective_permissions =
+        permissions::effective_guild_permissions(pool, &guild, &actor_user_id).await?;
+    let can_manage_messages =
+        permissions::has_permission(effective_permissions, permissions::MANAGE_MESSAGES);
+    let can_kick_members =
+        permissions::has_permission(effective_permissions, permissions::KICK_MEMBERS);
+    if !can_manage_messages && !can_kick_members {
+        return Err(AppError::Forbidden(
+            "Missing MANAGE_MESSAGES or KICK_MEMBERS permission in this guild".to_string(),
+        ));
+    }
+
+    let page = message::list_message_history_page_by_guild_and_author(
+        pool,
+        &guild.id,
+        &target_user_id,
+        channel_slug.as_deref(),
+        from.as_deref(),
+        to.as_deref(),
+        cursor.as_ref(),
+        limit,
+    )
+    .await?;
+    let next_cursor = if page.has_more {
+        page.entries.last().map(|entry| {
+            encode_user_message_history_cursor(&message::GuildAuthorMessageHistoryCursor {
+                created_at: entry.created_at.clone(),
+                id: entry.id.clone(),
+            })
+        })
+    } else {
+        None
+    };
+
+    let entries = page
+        .entries
+        .into_iter()
+        .map(|entry| UserMessageHistoryEntryResponse {
+            id: entry.id,
+            channel_slug: entry.channel_slug,
+            channel_name: entry.channel_name,
+            content: entry.content,
+            created_at: entry.created_at,
+        })
+        .collect();
+
+    Ok(ListUserMessageHistoryResult {
+        entries,
+        cursor: next_cursor,
+    })
+}
+
 pub async fn unban(
     pool: &DbPool,
     actor_user_id: &str,
@@ -984,6 +1086,31 @@ fn normalize_moderation_log_action_type(raw: Option<&str>) -> Result<Option<Stri
     }
 }
 
+fn normalize_optional_slug(raw: Option<&str>, field: &str) -> Result<Option<String>, AppError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(normalize_slug(trimmed, field)?))
+}
+
+fn normalize_optional_rfc3339(raw: Option<&str>, field: &str) -> Result<Option<String>, AppError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    chrono::DateTime::parse_from_rfc3339(trimmed).map_err(|_| {
+        AppError::ValidationError(format!("{field} must be a valid RFC3339 timestamp"))
+    })?;
+    Ok(Some(trimmed.to_string()))
+}
+
 fn decode_moderation_log_cursor(
     value: Option<&str>,
 ) -> Result<Option<moderation::ModerationLogCursor>, AppError> {
@@ -995,6 +1122,19 @@ fn decode_moderation_log_cursor(
         return Ok(None);
     }
     decode_moderation_log_cursor_value(trimmed).map(Some)
+}
+
+fn decode_user_message_history_cursor(
+    value: Option<&str>,
+) -> Result<Option<message::GuildAuthorMessageHistoryCursor>, AppError> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    decode_user_message_history_cursor_value(trimmed).map(Some)
 }
 
 fn decode_moderation_log_cursor_value(
@@ -1019,7 +1159,33 @@ fn decode_moderation_log_cursor_value(
     })
 }
 
+fn decode_user_message_history_cursor_value(
+    encoded: &str,
+) -> Result<message::GuildAuthorMessageHistoryCursor, AppError> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| AppError::ValidationError("cursor is invalid".to_string()))?;
+    let decoded_str = std::str::from_utf8(&decoded)
+        .map_err(|_| AppError::ValidationError("cursor is invalid".to_string()))?;
+    let (created_at, id) = decoded_str
+        .split_once('|')
+        .ok_or_else(|| AppError::ValidationError("cursor is invalid".to_string()))?;
+    if id.trim().is_empty() {
+        return Err(AppError::ValidationError("cursor is invalid".to_string()));
+    }
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .map_err(|_| AppError::ValidationError("cursor is invalid".to_string()))?;
+    Ok(message::GuildAuthorMessageHistoryCursor {
+        created_at: created_at.to_string(),
+        id: id.to_string(),
+    })
+}
+
 fn encode_moderation_log_cursor(cursor: &moderation::ModerationLogCursor) -> String {
+    URL_SAFE_NO_PAD.encode(format!("{}|{}", cursor.created_at, cursor.id))
+}
+
+fn encode_user_message_history_cursor(cursor: &message::GuildAuthorMessageHistoryCursor) -> String {
     URL_SAFE_NO_PAD.encode(format!("{}|{}", cursor.created_at, cursor.id))
 }
 
@@ -2549,6 +2715,207 @@ mod tests {
                 .map(|entry| entry.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["log-001", "log-002", "log-003"]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_user_message_history_supports_permissions_and_filters() {
+        let pool = setup_service_pool().await;
+        seed_voice_channels(&pool).await;
+
+        for (id, channel_id, author_user_id, content, created_at) in [
+            (
+                "history-001",
+                "channel-general",
+                "target-user-id",
+                "first",
+                "2026-03-01T00:00:01Z",
+            ),
+            (
+                "history-002",
+                "channel-voice-room",
+                "target-user-id",
+                "second",
+                "2026-03-01T00:00:02Z",
+            ),
+            (
+                "history-003",
+                "channel-general",
+                "target-user-id",
+                "third",
+                "2026-03-01T00:00:03Z",
+            ),
+            (
+                "history-soft-deleted",
+                "channel-general",
+                "target-user-id",
+                "soft-deleted",
+                "2026-03-01T00:00:04Z",
+            ),
+            (
+                "history-peer",
+                "channel-general",
+                "peer-user-id",
+                "peer",
+                "2026-03-01T00:00:05Z",
+            ),
+        ] {
+            message::insert_message(
+                &pool,
+                id,
+                "guild-id",
+                channel_id,
+                author_user_id,
+                content,
+                false,
+                created_at,
+                created_at,
+            )
+            .await
+            .unwrap();
+        }
+
+        let _ = create_message_delete(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            CreateMessageDeleteInput {
+                message_id: "history-soft-deleted".to_string(),
+                channel_slug: "general".to_string(),
+                reason: "cleanup".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let forbidden = list_user_message_history(
+            &pool,
+            "peer-user-id",
+            "test-guild",
+            ListUserMessageHistoryInput {
+                target_user_id: "target-user-id".to_string(),
+                limit: Some("2".to_string()),
+                cursor: None,
+                channel_slug: None,
+                from: None,
+                to: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(forbidden, AppError::Forbidden(_)));
+
+        let DbPool::Sqlite(sqlite_pool) = &pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+        sqlx::query(
+            "UPDATE roles
+             SET permissions_bitflag = ?1
+             WHERE id = ?2",
+        )
+        .bind(permissions::KICK_MEMBERS as i64)
+        .bind("role-moderator")
+        .execute(sqlite_pool)
+        .await
+        .unwrap();
+        permissions::invalidate_guild_permission_cache("guild-id");
+
+        let first_page = list_user_message_history(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            ListUserMessageHistoryInput {
+                target_user_id: "target-user-id".to_string(),
+                limit: Some("2".to_string()),
+                cursor: None,
+                channel_slug: None,
+                from: None,
+                to: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            first_page
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["history-003", "history-002"]
+        );
+        assert!(first_page.cursor.is_some());
+
+        let second_page = list_user_message_history(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            ListUserMessageHistoryInput {
+                target_user_id: "target-user-id".to_string(),
+                limit: Some("2".to_string()),
+                cursor: first_page.cursor.clone(),
+                channel_slug: None,
+                from: None,
+                to: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            second_page
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["history-001"]
+        );
+        assert!(second_page.cursor.is_none());
+
+        let filtered_by_channel = list_user_message_history(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            ListUserMessageHistoryInput {
+                target_user_id: "target-user-id".to_string(),
+                limit: Some("10".to_string()),
+                cursor: None,
+                channel_slug: Some("general".to_string()),
+                from: None,
+                to: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            filtered_by_channel
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["history-003", "history-001"]
+        );
+
+        let filtered_by_date = list_user_message_history(
+            &pool,
+            "mod-user-id",
+            "test-guild",
+            ListUserMessageHistoryInput {
+                target_user_id: "target-user-id".to_string(),
+                limit: Some("10".to_string()),
+                cursor: None,
+                channel_slug: None,
+                from: Some("2026-03-01T00:00:02Z".to_string()),
+                to: Some("2026-03-01T00:00:03Z".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            filtered_by_date
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["history-003", "history-002"]
         );
     }
 

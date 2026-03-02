@@ -215,6 +215,9 @@ const {
     addPendingNewForDm: vi.fn((_dmSlug: string, _count = 1) => {}),
     clearPendingNewForDm: vi.fn((_dmSlug: string) => {}),
     typingUserIdsForChannel: vi.fn(() => [] as string[]),
+    consumePendingChannelMessageJump: vi.fn(
+      (_guildSlug: string, _channelSlug: string) => null,
+    ),
   }
 
   const muteStatusesByGuild: Record<

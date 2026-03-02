@@ -5528,6 +5528,225 @@ async fn moderation_log_lists_real_actions_and_enforces_view_permission() {
 }
 
 #[tokio::test]
+async fn moderation_user_message_history_lists_entries_and_enforces_permissions() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    write_server_config_with_db_url(
+        &dir.join("config.toml"),
+        "127.0.0.1",
+        port,
+        None,
+        "sqlite://./discool.db",
+    );
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "modhist-owner", [224u8; 32]).await;
+    let member_token = register_and_authenticate(&addr, "modhist-member", [225u8; 32]).await;
+
+    let guild_res = http_post_with_bearer(
+        &addr,
+        "/api/v1/guilds",
+        &json!({ "name": "Moderation History Guild" }).to_string(),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_slug = guild_json["data"]["slug"].as_str().unwrap().to_string();
+
+    let invite_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/invites"),
+        &json!({ "type": "reusable" }).to_string(),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&invite_res), 201);
+    let invite_json: serde_json::Value = serde_json::from_str(response_body(&invite_res)).unwrap();
+    let invite_code = invite_json["data"]["code"].as_str().unwrap().to_string();
+
+    let join_member = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/invites/{invite_code}/join"),
+        "{}",
+        &member_token,
+    )
+    .await;
+    assert_eq!(response_status(&join_member), 200);
+
+    let db_url = format!("sqlite:{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&db_url).await.unwrap();
+    let guild_id = sqlx::query_scalar::<_, String>("SELECT id FROM guilds WHERE slug = ?1")
+        .bind(&guild_slug)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let owner_user_id = user_id_by_username(&pool, "modhist-owner").await;
+    let member_user_id = user_id_by_username(&pool, "modhist-member").await;
+    let general_channel_id = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM channels WHERE guild_id = ?1 AND slug = ?2 LIMIT 1",
+    )
+    .bind(&guild_id)
+    .bind("general")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO channels (id, guild_id, slug, name, channel_type, position, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )
+    .bind("history-random-channel")
+    .bind(&guild_id)
+    .bind("random")
+    .bind("random")
+    .bind("text")
+    .bind(1_i64)
+    .bind("2026-03-01T00:00:00Z")
+    .bind("2026-03-01T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for (id, channel_id, author_user_id, content, created_at) in [
+        (
+            "history-message-001",
+            general_channel_id.as_str(),
+            member_user_id.as_str(),
+            "message one",
+            "2026-03-01T00:00:01Z",
+        ),
+        (
+            "history-message-002",
+            "history-random-channel",
+            member_user_id.as_str(),
+            "message two",
+            "2026-03-01T00:00:02Z",
+        ),
+        (
+            "history-message-003",
+            general_channel_id.as_str(),
+            member_user_id.as_str(),
+            "message three",
+            "2026-03-01T00:00:03Z",
+        ),
+        (
+            "history-message-soft-deleted",
+            general_channel_id.as_str(),
+            member_user_id.as_str(),
+            "soft deleted",
+            "2026-03-01T00:00:04Z",
+        ),
+        (
+            "history-message-owner",
+            general_channel_id.as_str(),
+            owner_user_id.as_str(),
+            "owner message",
+            "2026-03-01T00:00:05Z",
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO messages (id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind(id)
+        .bind(&guild_id)
+        .bind(channel_id)
+        .bind(author_user_id)
+        .bind(content)
+        .bind(0_i64)
+        .bind(created_at)
+        .bind(created_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "UPDATE messages
+         SET deleted_at = ?1,
+             deleted_by_user_id = ?2,
+             deleted_reason = ?3,
+             updated_at = ?4
+         WHERE id = ?5",
+    )
+    .bind("2026-03-01T00:00:06Z")
+    .bind(owner_user_id.as_str())
+    .bind("cleanup")
+    .bind("2026-03-01T00:00:06Z")
+    .bind("history-message-soft-deleted")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let first_page = http_response_with_bearer(
+        &addr,
+        &format!(
+            "/api/v1/guilds/{guild_slug}/moderation/users/{}/messages?limit=2",
+            member_user_id
+        ),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&first_page), 200);
+    let first_page_json: serde_json::Value =
+        serde_json::from_str(response_body(&first_page)).unwrap();
+    let first_entries = first_page_json["data"].as_array().unwrap();
+    assert_eq!(first_entries.len(), 2);
+    assert_eq!(first_entries[0]["id"], json!("history-message-003"));
+    assert_eq!(first_entries[1]["id"], json!("history-message-002"));
+    let cursor = first_page_json["cursor"].as_str().unwrap().to_string();
+
+    let second_page = http_response_with_bearer(
+        &addr,
+        &format!(
+            "/api/v1/guilds/{guild_slug}/moderation/users/{}/messages?limit=2&cursor={}",
+            member_user_id, cursor
+        ),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&second_page), 200);
+    let second_page_json: serde_json::Value =
+        serde_json::from_str(response_body(&second_page)).unwrap();
+    let second_entries = second_page_json["data"].as_array().unwrap();
+    assert_eq!(second_entries.len(), 1);
+    assert_eq!(second_entries[0]["id"], json!("history-message-001"));
+
+    let filtered_page = http_response_with_bearer(
+        &addr,
+        &format!(
+            "/api/v1/guilds/{guild_slug}/moderation/users/{}/messages?channel_slug=random",
+            member_user_id
+        ),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&filtered_page), 200);
+    let filtered_page_json: serde_json::Value =
+        serde_json::from_str(response_body(&filtered_page)).unwrap();
+    let filtered_entries = filtered_page_json["data"].as_array().unwrap();
+    assert_eq!(filtered_entries.len(), 1);
+    assert_eq!(filtered_entries[0]["id"], json!("history-message-002"));
+
+    let forbidden = http_response_with_bearer(
+        &addr,
+        &format!(
+            "/api/v1/guilds/{guild_slug}/moderation/users/{}/messages",
+            member_user_id
+        ),
+        &member_token,
+    )
+    .await;
+    assert_eq!(response_status(&forbidden), 403);
+}
+
+#[tokio::test]
 async fn moderation_message_delete_soft_deletes_broadcasts_and_enforces_permissions() {
     use serde_json::json;
     use std::io::Write;

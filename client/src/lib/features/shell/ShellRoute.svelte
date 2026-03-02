@@ -508,6 +508,31 @@ onMount(() => {
       .then((conversation) => goto(`/dm/${conversation.dmSlug}`))
       .catch(() => {})
   }
+  const handleOpenMessageHistoryIntent = (
+    event: Event & {
+      detail?: {
+        guildSlug?: unknown
+        channelSlug?: unknown
+        messageId?: unknown
+      }
+    },
+  ) => {
+    const detail = event.detail
+    if (
+      !detail ||
+      typeof detail.guildSlug !== 'string' ||
+      typeof detail.channelSlug !== 'string' ||
+      typeof detail.messageId !== 'string'
+    ) {
+      return
+    }
+    const guildSlug = detail.guildSlug.trim()
+    const channelSlug = detail.channelSlug.trim()
+    const messageId = detail.messageId.trim()
+    if (!guildSlug || !channelSlug || !messageId) return
+    messageState.requestChannelMessageJump(guildSlug, channelSlug, messageId)
+    void goto(`/${guildSlug}/${channelSlug}`)
+  }
   window.addEventListener('resize', syncViewport)
   window.addEventListener('keydown', handleUnreadHotkey)
   window.addEventListener('keydown', handleQuickSwitcherHotkey)
@@ -515,6 +540,10 @@ onMount(() => {
   window.addEventListener(
     'discool:open-dm-intent',
     handleOpenDmIntent as EventListener,
+  )
+  window.addEventListener(
+    'discool:open-message-history-intent',
+    handleOpenMessageHistoryIntent as EventListener,
   )
   return () => {
     unsubscribeLifecycle()
@@ -525,6 +554,10 @@ onMount(() => {
     window.removeEventListener(
       'discool:open-dm-intent',
       handleOpenDmIntent as EventListener,
+    )
+    window.removeEventListener(
+      'discool:open-message-history-intent',
+      handleOpenMessageHistoryIntent as EventListener,
     )
   }
 })

@@ -938,6 +938,28 @@ describe('ShellRoute', () => {
     })
   })
 
+  it('opens channel route from member message-history intent events', async () => {
+    const jumpSpy = vi.spyOn(messageState, 'requestChannelMessageJump')
+    const props = buildProps()
+    render(ShellRoute, props)
+
+    window.dispatchEvent(
+      new CustomEvent('discool:open-message-history-intent', {
+        detail: {
+          guildSlug: 'lobby',
+          channelSlug: 'random',
+          messageId: 'message-1',
+        },
+      }),
+    )
+
+    await waitFor(() => {
+      expect(jumpSpy).toHaveBeenCalledWith('lobby', 'random', 'message-1')
+      expect(routerGoto).toHaveBeenCalledWith('/lobby/random')
+    })
+    jumpSpy.mockRestore()
+  })
+
   it('opens quick switcher with Ctrl+K and Cmd+K and autofocuses input', async () => {
     const props = buildProps()
     const view = render(ShellRoute, props)

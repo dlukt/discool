@@ -165,6 +165,18 @@ const moderationApi = vi.hoisted(() => ({
     entries: [],
     cursor: null,
   })),
+  fetchUserMessageHistory: vi.fn(async () => ({
+    entries: [
+      {
+        id: 'history-1',
+        channelSlug: 'general',
+        channelName: 'general',
+        content: 'hello',
+        createdAt: '2026-03-01T00:00:00.000Z',
+      },
+    ],
+    cursor: null,
+  })),
 }))
 
 const presenceState = vi.hoisted(() => ({
@@ -343,6 +355,7 @@ describe('MemberList', () => {
     moderationApi.createKick.mockClear()
     moderationApi.createBan.mockClear()
     moderationApi.fetchModerationLog.mockClear()
+    moderationApi.fetchUserMessageHistory.mockClear()
   })
 
   it('groups by highest role, sorts online first, and renders status dots', async () => {
@@ -411,7 +424,12 @@ describe('MemberList', () => {
 
   it('shows DM intent and moderation actions only for available permissions', async () => {
     const dmIntentHandler = vi.fn()
+    const historyIntentHandler = vi.fn()
     window.addEventListener('discool:open-dm-intent', dmIntentHandler)
+    window.addEventListener(
+      'discool:open-message-history-intent',
+      historyIntentHandler,
+    )
 
     const { getByTestId, getByRole, queryByRole } = render(MemberList, {
       activeGuild: 'lobby',
@@ -428,7 +446,7 @@ describe('MemberList', () => {
     expect(getByRole('button', { name: 'Mute member' })).toBeInTheDocument()
     expect(getByRole('button', { name: 'Kick member' })).toBeInTheDocument()
     expect(
-      getByRole('button', { name: 'Moderate messages (coming soon)' }),
+      getByRole('button', { name: 'View message history' }),
     ).toBeInTheDocument()
     expect(
       queryByRole('button', { name: 'Ban member (coming soon)' }),
@@ -462,7 +480,35 @@ describe('MemberList', () => {
       },
     })
 
+    await fireEvent.click(getByRole('button', { name: 'View message history' }))
+    await waitFor(() => {
+      expect(moderationApi.fetchUserMessageHistory).toHaveBeenCalledWith(
+        'lobby',
+        'user-default',
+        {
+          limit: 50,
+          cursor: null,
+          channelSlug: null,
+          from: null,
+          to: null,
+        },
+      )
+    })
+    await fireEvent.click(getByTestId('user-message-history-row-history-1'))
+    expect(historyIntentHandler).toHaveBeenCalledTimes(1)
+    expect(historyIntentHandler.mock.calls[0][0]).toMatchObject({
+      detail: {
+        guildSlug: 'lobby',
+        channelSlug: 'general',
+        messageId: 'history-1',
+      },
+    })
+
     window.removeEventListener('discool:open-dm-intent', dmIntentHandler)
+    window.removeEventListener(
+      'discool:open-message-history-intent',
+      historyIntentHandler,
+    )
   })
 
   it('shows moderation-log panel tab only when VIEW_MOD_LOG is available', async () => {

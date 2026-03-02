@@ -19,6 +19,7 @@ import {
   createMessageDelete,
   createVoiceKick,
   fetchModerationLog,
+  fetchUserMessageHistory,
 } from './moderationApi'
 
 describe('moderationApi voice kick', () => {
@@ -195,6 +196,79 @@ describe('moderationApi moderation log', () => {
   it('rejects invalid limit values before issuing request', async () => {
     await expect(
       fetchModerationLog('lobby', { limit: Number.NaN }),
+    ).rejects.toMatchObject({
+      code: 'VALIDATION_ERROR',
+    })
+    expect(apiFetchCursorList).not.toHaveBeenCalled()
+  })
+})
+
+describe('moderationApi user message history', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('maps query params and converts history entries', async () => {
+    vi.mocked(apiFetchCursorList).mockResolvedValue({
+      data: [
+        {
+          id: 'history-1',
+          channel_slug: 'general',
+          channel_name: 'general',
+          content: 'hello',
+          created_at: '2026-03-02T00:00:00.000Z',
+        },
+      ],
+      cursor: 'history-cursor-2',
+    })
+
+    await expect(
+      fetchUserMessageHistory(' lobby ', ' user-123 ', {
+        limit: 25.2,
+        cursor: ' cursor-1 ',
+        channelSlug: ' general ',
+        from: ' 2026-03-01T00:00:00.000Z ',
+        to: ' 2026-03-02T00:00:00.000Z ',
+      }),
+    ).resolves.toEqual({
+      entries: [
+        {
+          id: 'history-1',
+          channelSlug: 'general',
+          channelName: 'general',
+          content: 'hello',
+          createdAt: '2026-03-02T00:00:00.000Z',
+        },
+      ],
+      cursor: 'history-cursor-2',
+    })
+
+    expect(apiFetchCursorList).toHaveBeenCalledWith(
+      '/api/v1/guilds/lobby/moderation/users/user-123/messages?limit=25&cursor=cursor-1&channel_slug=general&from=2026-03-01T00%3A00%3A00.000Z&to=2026-03-02T00%3A00%3A00.000Z',
+    )
+  })
+
+  it('uses base path when no query options are passed', async () => {
+    vi.mocked(apiFetchCursorList).mockResolvedValue({
+      data: [],
+      cursor: null,
+    })
+
+    await expect(fetchUserMessageHistory('lobby', 'user-123')).resolves.toEqual(
+      {
+        entries: [],
+        cursor: null,
+      },
+    )
+
+    expect(apiFetchCursorList).toHaveBeenCalledWith(
+      '/api/v1/guilds/lobby/moderation/users/user-123/messages',
+    )
+  })
+
+  it('rejects invalid limit values before issuing request', async () => {
+    await expect(
+      fetchUserMessageHistory('lobby', 'user-123', { limit: Number.NaN }),
     ).rejects.toMatchObject({
       code: 'VALIDATION_ERROR',
     })

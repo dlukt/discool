@@ -14,7 +14,7 @@ use crate::{
     middleware::auth::AuthenticatedUser,
     services::moderation_service::{
         self, CreateBanInput, CreateKickInput, CreateMessageDeleteInput, CreateMuteInput,
-        CreateVoiceKickInput, ListModerationLogInput,
+        CreateVoiceKickInput, ListModerationLogInput, ListUserMessageHistoryInput,
     },
     ws::{protocol::ServerOp, registry},
 };
@@ -65,6 +65,20 @@ pub struct ListModerationLogQuery {
     pub order: Option<String>,
     #[serde(default)]
     pub action_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListUserMessageHistoryQuery {
+    #[serde(default)]
+    pub limit: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub channel_slug: Option<String>,
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
 }
 
 pub async fn create_mute(
@@ -204,6 +218,29 @@ pub async fn list_moderation_log(
             order: query.order,
             action_type: query.action_type,
         },
+    )
+    .await?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "data": page.entries, "cursor": page.cursor })),
+    )
+        .into_response())
+}
+
+pub async fn list_user_message_history(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path((guild_slug, target_user_id)): Path<(String, String)>,
+    query: Result<Query<ListUserMessageHistoryQuery>, QueryRejection>,
+) -> Result<Response, AppError> {
+    let Query(query) =
+        query.map_err(|_| AppError::ValidationError("Invalid query parameters".to_string()))?;
+    let input = to_list_user_message_history_input(target_user_id, query)?;
+    let page = moderation_service::list_user_message_history(
+        &state.pool,
+        &user.user_id,
+        &guild_slug,
+        input,
     )
     .await?;
     Ok((
@@ -365,6 +402,26 @@ fn to_create_message_delete_input(
         message_id: normalized_message_id.to_string(),
         channel_slug: channel_slug.to_string(),
         reason: reason.to_string(),
+    })
+}
+
+fn to_list_user_message_history_input(
+    target_user_id: String,
+    query: ListUserMessageHistoryQuery,
+) -> Result<ListUserMessageHistoryInput, AppError> {
+    let normalized_target_user_id = target_user_id.trim();
+    if normalized_target_user_id.is_empty() {
+        return Err(AppError::ValidationError(
+            "target_user_id is required".to_string(),
+        ));
+    }
+    Ok(ListUserMessageHistoryInput {
+        target_user_id: normalized_target_user_id.to_string(),
+        limit: query.limit,
+        cursor: query.cursor,
+        channel_slug: query.channel_slug,
+        from: query.from,
+        to: query.to,
     })
 }
 
@@ -883,6 +940,21 @@ mod tests {
         assert!(matches!(missing_reason, Err(AppError::ValidationError(_))));
     }
 
+    #[test]
+    fn to_list_user_message_history_input_validates_target_user_id() {
+        let missing_target = to_list_user_message_history_input(
+            "   ".to_string(),
+            ListUserMessageHistoryQuery {
+                limit: Some("10".to_string()),
+                cursor: None,
+                channel_slug: None,
+                from: None,
+                to: None,
+            },
+        );
+        assert!(matches!(missing_target, Err(AppError::ValidationError(_))));
+    }
+
     #[tokio::test]
     async fn create_mute_returns_data_envelope() {
         let state = test_state().await;
@@ -1154,6 +1226,80 @@ mod tests {
         assert_eq!(
             payload["data"][0]["action_type"],
             Value::String("kick".to_string())
+        );
+        assert!(payload.get("cursor").is_some());
+    }
+
+    #[tokio::test]
+    async fn list_user_message_history_returns_data_envelope_with_cursor() {
+        let state = test_state().await;
+        seed_guild_fixture(&state).await;
+        seed_text_channel_message(&state, "history-message-1", "target-user-id").await;
+
+        match &state.pool {
+            crate::db::DbPool::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO messages (id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                )
+                .bind("history-message-2")
+                .bind("guild-id")
+                .bind("text-channel-id")
+                .bind("target-user-id")
+                .bind("message-2")
+                .bind(0_i64)
+                .bind("2026-03-01T00:00:01Z")
+                .bind("2026-03-01T00:00:01Z")
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            crate::db::DbPool::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO messages (id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                )
+                .bind("history-message-2")
+                .bind("guild-id")
+                .bind("text-channel-id")
+                .bind("target-user-id")
+                .bind("message-2")
+                .bind(0_i64)
+                .bind("2026-03-01T00:00:01Z")
+                .bind("2026-03-01T00:00:01Z")
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+
+        let response = list_user_message_history(
+            State(state),
+            mod_user(),
+            Path(("test-guild".to_string(), "target-user-id".to_string())),
+            Ok(Query(ListUserMessageHistoryQuery {
+                limit: Some("1".to_string()),
+                cursor: None,
+                channel_slug: None,
+                from: None,
+                to: None,
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert!(payload.get("data").is_some());
+        assert_eq!(payload["data"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            payload["data"][0]["channel_slug"],
+            Value::String("general".to_string())
+        );
+        assert_eq!(
+            payload["data"][0]["id"],
+            Value::String("history-message-2".to_string())
         );
         assert!(payload.get("cursor").is_some());
     }
