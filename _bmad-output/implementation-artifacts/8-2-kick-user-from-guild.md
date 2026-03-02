@@ -1,6 +1,6 @@
 # Story 8.2: Kick User from Guild
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -275,3 +275,30 @@ GPT-5.3-Codex (model ID: gpt-5.3-codex)
 - client/src/lib/features/shell/ShellRoute.svelte
 - client/src/lib/features/shell/ShellRoute.test.ts
 - _bmad-output/implementation-artifacts/8-2-kick-user-from-guild.md
+- _bmad-output/implementation-artifacts/sprint-status.yaml
+
+## Senior Developer Review (AI)
+
+### Outcome
+
+Approved after fixes.
+
+### Findings and Resolutions
+
+- **[HIGH][Fixed]** Kick execution in `create_kick` was not atomic: moderation action insert, role cleanup, and membership removal happened in separate operations, allowing partial persistence on failure/race paths.  
+  **Fix:** Added transactional `moderation::apply_kick_action` in `server/src/models/moderation.rs` and switched `create_kick` to use it so mute deactivation, role cleanup, membership delete, and kick audit insert commit or roll back together.
+- **[HIGH][Fixed]** Kick hierarchy checks were vulnerable to time-of-check/time-of-use races because role hierarchy validation happened before entering the transactional kick mutation path.  
+  **Fix:** Added hierarchy/ownership revalidation inside `moderation::apply_kick_action` transaction for both Postgres and SQLite so role changes between pre-check and mutation cannot bypass `actor_outranks_target_member` constraints.
+
+### Verification
+
+- `cd server && cargo test create_kick && cargo test apply_kick_action_rolls_back_when_membership_delete_fails`
+- `cd server && cargo test apply_kick_action_revalidates_hierarchy_within_transaction`
+- `cd server && cargo fmt --check && cargo clippy -- -D warnings && cargo test`
+
+## Change Log
+
+- 2026-03-02: Senior AI code review found and fixed non-atomic kick persistence in `create_kick` by introducing transactional `moderation::apply_kick_action`.
+- 2026-03-02: Added rollback regression test `apply_kick_action_rolls_back_when_membership_delete_fails` in `server/src/services/moderation_service.rs`.
+- 2026-03-02: Revalidated kick hierarchy inside transaction to close TOCTOU race windows, with regression test `apply_kick_action_revalidates_hierarchy_within_transaction`.
+- 2026-03-02: Story status updated to `done` and sprint status synced for `8-2-kick-user-from-guild`.

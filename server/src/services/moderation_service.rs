@@ -2,12 +2,14 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
+#[cfg(test)]
+use crate::models::{guild_member, role};
 use crate::{
     AppError,
     db::DbPool,
     models::{
         guild::{self, Guild},
-        guild_member, moderation, role,
+        moderation,
     },
     permissions,
 };
@@ -174,48 +176,20 @@ pub async fn create_kick(
             "Cannot kick the guild owner".to_string(),
         ));
     }
-    if !guild_member::is_guild_member(pool, &guild.id, &target_user_id).await? {
-        return Err(AppError::ValidationError(
-            "target_user_id must belong to a guild member".to_string(),
-        ));
-    }
-    if !permissions::actor_outranks_target_member(pool, &guild, &actor_user_id, &target_user_id)
-        .await?
-    {
-        return Err(AppError::Forbidden(
-            "You can only kick members below your highest role".to_string(),
-        ));
-    }
 
     let now = Utc::now();
     let now_str = now.to_rfc3339();
-    moderation::deactivate_active_mutes_for_target(pool, &guild.id, &target_user_id, &now_str)
-        .await?;
-
     let id = Uuid::new_v4().to_string();
-    moderation::insert_moderation_action(
+    moderation::apply_kick_action(
         pool,
         &id,
-        moderation::MODERATION_ACTION_TYPE_KICK,
         &guild.id,
         &actor_user_id,
         &target_user_id,
         &reason,
-        None,
-        None,
-        false,
-        &now_str,
         &now_str,
     )
     .await?;
-    role::remove_role_assignments_for_member(pool, &guild.id, &target_user_id).await?;
-    let removed_membership =
-        guild_member::remove_guild_member(pool, &guild.id, &target_user_id).await?;
-    if removed_membership != 1 {
-        return Err(AppError::ValidationError(
-            "target_user_id must belong to a guild member".to_string(),
-        ));
-    }
 
     Ok(KickActionResponse {
         id,
@@ -836,6 +810,109 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn apply_kick_action_rolls_back_when_membership_delete_fails() {
+        let pool = setup_service_pool().await;
+        moderation::insert_moderation_action(
+            &pool,
+            "mute-before-failed-kick",
+            moderation::MODERATION_ACTION_TYPE_MUTE,
+            "guild-id",
+            "mod-user-id",
+            "target-user-id",
+            "active mute",
+            Some(3600),
+            Some("2030-01-01T00:00:00Z"),
+            true,
+            "2026-03-01T00:00:00Z",
+            "2026-03-01T00:00:00Z",
+        )
+        .await
+        .unwrap();
+
+        guild_member::remove_guild_member(&pool, "guild-id", "target-user-id")
+            .await
+            .unwrap();
+
+        let err = moderation::apply_kick_action(
+            &pool,
+            "failed-kick",
+            "guild-id",
+            "mod-user-id",
+            "target-user-id",
+            "reason",
+            "2026-03-01T01:00:00Z",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::ValidationError(_)));
+
+        let DbPool::Sqlite(sqlite_pool) = &pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+        let maybe_kick_id =
+            sqlx::query_scalar::<_, String>("SELECT id FROM moderation_actions WHERE id = ?1")
+                .bind("failed-kick")
+                .fetch_optional(sqlite_pool)
+                .await
+                .unwrap();
+        assert!(maybe_kick_id.is_none());
+
+        let role_ids = role::list_assigned_role_ids(&pool, "guild-id", "target-user-id")
+            .await
+            .unwrap();
+        assert!(role_ids.iter().any(|role_id| role_id == "role-target-low"));
+
+        let active_mute =
+            moderation::find_latest_active_mute_for_target(&pool, "guild-id", "target-user-id")
+                .await
+                .unwrap();
+        assert!(active_mute.is_some());
+    }
+
+    #[tokio::test]
+    async fn apply_kick_action_revalidates_hierarchy_within_transaction() {
+        let pool = setup_service_pool().await;
+        role::set_role_assignments_for_user(
+            &pool,
+            "guild-id",
+            "target-user-id",
+            &[String::from("role-target-high")],
+            "2026-03-01T00:00:00Z",
+        )
+        .await
+        .unwrap();
+
+        let err = moderation::apply_kick_action(
+            &pool,
+            "failed-kick-hierarchy",
+            "guild-id",
+            "mod-user-id",
+            "target-user-id",
+            "reason",
+            "2026-03-01T01:00:00Z",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::Forbidden(_)));
+
+        assert!(
+            guild_member::is_guild_member(&pool, "guild-id", "target-user-id")
+                .await
+                .unwrap()
+        );
+        let DbPool::Sqlite(sqlite_pool) = &pool else {
+            panic!("service test fixture expects sqlite pool");
+        };
+        let maybe_kick_id =
+            sqlx::query_scalar::<_, String>("SELECT id FROM moderation_actions WHERE id = ?1")
+                .bind("failed-kick-hierarchy")
+                .fetch_optional(sqlite_pool)
+                .await
+                .unwrap();
+        assert!(maybe_kick_id.is_none());
     }
 
     #[tokio::test]
