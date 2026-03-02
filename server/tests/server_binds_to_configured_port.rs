@@ -4139,6 +4139,28 @@ async fn users_profile_requires_authentication() {
 }
 
 #[tokio::test]
+async fn users_data_export_requires_authentication() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let res = http_post(&addr, "/api/v1/users/me/data-export", "{}").await;
+    assert_eq!(response_status(&res), 401);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({ "error": { "code": "UNAUTHORIZED", "message": "Missing Authorization header", "details": {} } })
+    );
+}
+
+#[tokio::test]
 async fn users_profile_patch_persists_display_name_and_avatar_color() {
     use serde_json::json;
 

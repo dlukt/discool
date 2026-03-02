@@ -1,8 +1,10 @@
 <script lang="ts">
 import { ApiError } from '$lib/api'
+import { toastState } from '$lib/feedback/toastStore.svelte'
 
 import { blockState } from './blockStore.svelte'
 import { identityState } from './identityStore.svelte'
+import type { PersonalDataExport } from './types'
 
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024
 const allowedAvatarTypes = new Set(['image/png', 'image/jpeg', 'image/webp'])
@@ -46,6 +48,12 @@ let blockActionPendingUserId = $state<string | null>(null)
 let blockActionStatusMessage = $state<string | null>(null)
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let blockActionErrorMessage = $state<string | null>(null)
+let exportingData = $state(false)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let exportProgressVisible = $state(false)
+let exportProgressTimerId = $state<number | null>(null)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let exportErrorMessage = $state<string | null>(null)
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let blockedUsers = $derived.by(() => {
@@ -89,6 +97,9 @@ $effect(() => {
   return () => {
     if (previewUrl) {
       URL.revokeObjectURL(previewUrl)
+    }
+    if (exportProgressTimerId !== null) {
+      clearTimeout(exportProgressTimerId)
     }
   }
 })
@@ -233,6 +244,74 @@ async function onRecoverySubmit(event: SubmitEvent) {
     }
   } finally {
     recoverySending = false
+  }
+}
+
+function dataExportFilename(exportedAt: string): string {
+  const compactTimestamp = exportedAt.replace(/[^0-9TZ]/g, '')
+  if (!compactTimestamp) {
+    return 'discool-personal-data-export.json'
+  }
+  return `discool-personal-data-export-${compactTimestamp}.json`
+}
+
+function triggerDataExportDownload(exportData: PersonalDataExport): void {
+  const blob = new Blob([JSON.stringify(exportData, null, 2)], {
+    type: 'application/json',
+  })
+  const url = URL.createObjectURL(blob)
+  try {
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = dataExportFilename(exportData.exportedAt)
+    anchor.hidden = true
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+async function onDataExportSubmit(event: SubmitEvent) {
+  event.preventDefault()
+  if (!sessionUser || exportingData) return
+
+  exportErrorMessage = null
+  exportProgressVisible = false
+  if (exportProgressTimerId !== null) {
+    clearTimeout(exportProgressTimerId)
+    exportProgressTimerId = null
+  }
+
+  exportingData = true
+  exportProgressTimerId = window.setTimeout(() => {
+    exportProgressVisible = true
+  }, 2000)
+
+  try {
+    const exportData = await identityState.requestPersonalDataExport()
+    triggerDataExportDownload(exportData)
+    toastState.show({
+      variant: 'success',
+      message: 'Your data export is ready for download',
+    })
+  } catch (err) {
+    if (err instanceof ApiError) {
+      exportErrorMessage = err.message
+    } else if (err instanceof Error) {
+      exportErrorMessage = err.message
+    } else {
+      exportErrorMessage = 'Failed to export your personal data.'
+    }
+  } finally {
+    exportingData = false
+    exportProgressVisible = false
+    if (exportProgressTimerId !== null) {
+      clearTimeout(exportProgressTimerId)
+      exportProgressTimerId = null
+    }
   }
 }
 
@@ -461,6 +540,40 @@ async function unblockFromSettings(userId: string, displayName: string) {
           {recoverySending || identityState.recoveryEmailLoading
             ? 'Sending...'
             : recoveryActionLabel()}
+        </button>
+      </form>
+    </section>
+
+    <section class="mt-6 rounded-md border border-border bg-muted p-4">
+      <header class="mb-3 space-y-1">
+        <h3 class="text-sm font-semibold">Privacy</h3>
+        <p class="text-sm text-muted-foreground">
+          Export your personal data as a JSON file.
+        </p>
+      </header>
+
+      {#if exportProgressVisible}
+        <p class="mb-3 rounded-md border border-border bg-background p-3 text-sm text-muted-foreground">
+          Preparing your data export...
+        </p>
+      {/if}
+      {#if exportErrorMessage}
+        <p class="mb-3 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive" role="alert">
+          {exportErrorMessage}
+        </p>
+      {/if}
+
+      <form onsubmit={onDataExportSubmit} novalidate>
+        <button
+          type="submit"
+          class="inline-flex items-center justify-center rounded-md bg-fire px-4 py-2 text-sm font-medium text-fire-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={exportingData}
+        >
+          {#if exportingData}
+            Exporting...
+          {:else}
+            Export my data
+          {/if}
         </button>
       </form>
     </section>

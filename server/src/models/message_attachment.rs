@@ -163,3 +163,40 @@ pub async fn list_message_attachments_by_message_ids(
     }
     Ok(grouped)
 }
+
+pub async fn list_message_attachments_by_author_user_id(
+    pool: &DbPool,
+    author_user_id: &str,
+) -> Result<Vec<MessageAttachment>, AppError> {
+    let attachments = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_as(
+                "SELECT ma.id, ma.message_id, ma.storage_key, ma.original_filename, ma.mime_type, ma.size_bytes, ma.created_at
+                 FROM message_attachments ma
+                 JOIN messages m ON m.id = ma.message_id
+                 WHERE m.author_user_id = $1
+                   AND m.deleted_at IS NULL
+                 ORDER BY ma.created_at ASC, ma.id ASC",
+            )
+            .bind(author_user_id)
+            .fetch_all(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_as(
+                "SELECT ma.id, ma.message_id, ma.storage_key, ma.original_filename, ma.mime_type, ma.size_bytes, ma.created_at
+                 FROM message_attachments ma
+                 JOIN messages m ON m.id = ma.message_id
+                 WHERE m.author_user_id = ?1
+                   AND m.deleted_at IS NULL
+                 ORDER BY ma.created_at ASC, ma.id ASC",
+            )
+            .bind(author_user_id)
+            .fetch_all(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(attachments)
+}

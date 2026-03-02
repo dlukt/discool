@@ -15,6 +15,7 @@ import {
   recoverIdentityByToken as recoverIdentityByTokenApi,
   register as registerApi,
   requestChallenge,
+  requestPersonalDataExport as requestPersonalDataExportApi,
   startIdentityRecovery as startIdentityRecoveryApi,
   startRecoveryEmailAssociation as startRecoveryEmailAssociationApi,
   updateProfile as updateProfileApi,
@@ -25,6 +26,7 @@ import { clearLastLocation } from './navigationState'
 import type {
   AuthSession,
   IdentityRecoveryStartResponse,
+  PersonalDataExport,
   RecoveryEmailStatus,
   StoredIdentity,
   UpdateProfileInput,
@@ -438,6 +440,13 @@ export const identityState = $state({
       identityState.setSessionUser(nextUser)
     }
     return nextUser
+  },
+
+  requestPersonalDataExport: async (): Promise<PersonalDataExport> => {
+    if (!identityState.session) {
+      throw new Error('No active session')
+    }
+    return requestPersonalDataExportApi()
   },
 
   loadRecoveryEmailStatus: async (): Promise<RecoveryEmailStatus | null> => {

@@ -25,6 +25,13 @@ pub struct MessageReactionEntry {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct UserMessageReaction {
+    pub message_id: String,
+    pub emoji: String,
+    pub created_at: String,
+}
+
 pub async fn has_message_reaction(
     pool: &DbPool,
     message_id: &str,
@@ -193,6 +200,43 @@ pub async fn list_reaction_entries_by_message_id(
             created_at,
         })
         .collect())
+}
+
+pub async fn list_message_reactions_by_user_id(
+    pool: &DbPool,
+    user_id: &str,
+) -> Result<Vec<UserMessageReaction>, AppError> {
+    let reactions = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_as(
+                "SELECT mr.message_id, mr.emoji, mr.created_at
+                 FROM message_reactions mr
+                 JOIN messages m ON m.id = mr.message_id
+                 WHERE mr.user_id = $1
+                   AND m.deleted_at IS NULL
+                 ORDER BY mr.created_at ASC, mr.message_id ASC, mr.emoji ASC",
+            )
+            .bind(user_id)
+            .fetch_all(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_as(
+                "SELECT mr.message_id, mr.emoji, mr.created_at
+                 FROM message_reactions mr
+                 JOIN messages m ON m.id = mr.message_id
+                 WHERE mr.user_id = ?1
+                   AND m.deleted_at IS NULL
+                 ORDER BY mr.created_at ASC, mr.message_id ASC, mr.emoji ASC",
+            )
+            .bind(user_id)
+            .fetch_all(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(reactions)
 }
 
 pub async fn list_reaction_summaries_by_message_ids(
@@ -465,5 +509,72 @@ mod tests {
         assert_eq!(smile.actors.len(), 1);
         assert_eq!(smile.actors[0].user_id, "peer-user-id");
         assert_eq!(smile.actors[0].created_at, "2026-02-28T00:00:04Z");
+    }
+
+    #[tokio::test]
+    async fn sqlite_list_message_reactions_by_user_id_filters_to_requester() {
+        let pool = setup_reaction_pool().await;
+
+        insert_message_reaction(
+            &pool,
+            "message-1",
+            "owner-user-id",
+            "😀",
+            "2026-02-28T00:00:02Z",
+        )
+        .await
+        .unwrap();
+        insert_message_reaction(
+            &pool,
+            "message-1",
+            "peer-user-id",
+            "🎉",
+            "2026-02-28T00:00:03Z",
+        )
+        .await
+        .unwrap();
+
+        let requester_reactions = list_message_reactions_by_user_id(&pool, "owner-user-id")
+            .await
+            .unwrap();
+        assert_eq!(requester_reactions.len(), 1);
+        assert_eq!(requester_reactions[0].emoji, "😀");
+        assert_eq!(requester_reactions[0].message_id, "message-1");
+    }
+
+    #[tokio::test]
+    async fn sqlite_list_message_reactions_by_user_id_excludes_soft_deleted_messages() {
+        let pool = setup_reaction_pool().await;
+
+        insert_message_reaction(
+            &pool,
+            "message-1",
+            "owner-user-id",
+            "😀",
+            "2026-02-28T00:00:02Z",
+        )
+        .await
+        .unwrap();
+
+        let DbPool::Sqlite(sqlite_pool) = &pool else {
+            panic!("reaction model tests expect sqlite pool");
+        };
+        sqlx::query(
+            "UPDATE messages
+             SET deleted_at = ?1,
+                 updated_at = ?2
+             WHERE id = ?3",
+        )
+        .bind("2026-02-28T00:00:03Z")
+        .bind("2026-02-28T00:00:03Z")
+        .bind("message-1")
+        .execute(sqlite_pool)
+        .await
+        .unwrap();
+
+        let requester_reactions = list_message_reactions_by_user_id(&pool, "owner-user-id")
+            .await
+            .unwrap();
+        assert!(requester_reactions.is_empty());
     }
 }

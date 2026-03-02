@@ -11,36 +11,47 @@ type BlockedUserRecord = {
   intervals: Array<{ blockedAt: string; unblockedAt: string | null }>
 }
 
-const { saveProfile, startRecoveryEmailAssociation, identityState } =
-  vi.hoisted(() => {
-    const saveProfile = vi.fn()
-    const startRecoveryEmailAssociation = vi.fn()
-    const identityState = {
-      session: {
-        token: 'token-1',
-        expiresAt: '2026-03-01T00:00:00.000Z',
-        user: {
-          id: 'user-1',
-          didKey: 'did:key:z6Mk-test',
-          username: 'alice',
-          displayName: 'Alice',
-          avatarColor: '#3b82f6' as string | null,
-          avatarUrl: null as string | null,
-          createdAt: '2026-02-24T00:00:00.000Z',
-        },
+const {
+  saveProfile,
+  startRecoveryEmailAssociation,
+  requestPersonalDataExport,
+  identityState,
+} = vi.hoisted(() => {
+  const saveProfile = vi.fn()
+  const startRecoveryEmailAssociation = vi.fn()
+  const requestPersonalDataExport = vi.fn()
+  const identityState = {
+    session: {
+      token: 'token-1',
+      expiresAt: '2026-03-01T00:00:00.000Z',
+      user: {
+        id: 'user-1',
+        didKey: 'did:key:z6Mk-test',
+        username: 'alice',
+        displayName: 'Alice',
+        avatarColor: '#3b82f6' as string | null,
+        avatarUrl: null as string | null,
+        createdAt: '2026-02-24T00:00:00.000Z',
       },
-      saveProfile,
-      startRecoveryEmailAssociation,
-      recoveryEmailStatus: null as {
-        associated: boolean
-        emailMasked: string | null
-        verified: boolean
-        verifiedAt: string | null
-      } | null,
-      recoveryEmailLoading: false,
-    }
-    return { saveProfile, startRecoveryEmailAssociation, identityState }
-  })
+    },
+    saveProfile,
+    startRecoveryEmailAssociation,
+    requestPersonalDataExport,
+    recoveryEmailStatus: null as {
+      associated: boolean
+      emailMasked: string | null
+      verified: boolean
+      verifiedAt: string | null
+    } | null,
+    recoveryEmailLoading: false,
+  }
+  return {
+    saveProfile,
+    startRecoveryEmailAssociation,
+    requestPersonalDataExport,
+    identityState,
+  }
+})
 
 const { blockState } = vi.hoisted(() => ({
   blockState: {
@@ -50,8 +61,15 @@ const { blockState } = vi.hoisted(() => ({
   },
 }))
 
+const { toastState } = vi.hoisted(() => ({
+  toastState: {
+    show: vi.fn(),
+  },
+}))
+
 vi.mock('./identityStore.svelte', () => ({ identityState }))
 vi.mock('./blockStore.svelte', () => ({ blockState }))
+vi.mock('$lib/feedback/toastStore.svelte', () => ({ toastState }))
 
 import ProfileSettingsView from './ProfileSettingsView.svelte'
 
@@ -73,10 +91,12 @@ describe('ProfileSettingsView', () => {
     }
     identityState.recoveryEmailStatus = null
     identityState.recoveryEmailLoading = false
+    requestPersonalDataExport.mockReset()
     blockState.version = 0
     blockState.blockedUsers.mockReset()
     blockState.blockedUsers.mockReturnValue([])
     blockState.unblockUser.mockClear()
+    toastState.show.mockReset()
   })
 
   it('validates display name on blur', async () => {
@@ -210,6 +230,133 @@ describe('ProfileSettingsView', () => {
         'Verification email sent. Check your inbox and click the link to verify.',
       ),
     ).toBeInTheDocument()
+  })
+
+  it('shows progress after 2 seconds for slow personal data export requests', async () => {
+    vi.useFakeTimers()
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => {})
+    try {
+      const exportPromise = new Promise((resolve) => {
+        setTimeout(
+          () =>
+            resolve({
+              profile: {
+                userId: 'user-1',
+                didKey: 'did:key:z6Mk-test',
+                username: 'alice',
+                displayName: 'Alice',
+                avatarColor: '#3b82f6',
+                avatarUrl: null,
+                email: null,
+                emailVerifiedAt: null,
+                createdAt: '2026-02-24T00:00:00.000Z',
+                updatedAt: '2026-02-24T00:00:00.000Z',
+              },
+              guildMemberships: [],
+              messages: [],
+              dmMessages: [],
+              reactions: [],
+              uploadedFiles: [],
+              blockList: [],
+              exportedAt: '2026-03-02T00:00:00.000Z',
+            }),
+          2500,
+        )
+      })
+      requestPersonalDataExport.mockReturnValue(exportPromise)
+
+      const { getByRole, queryByText } = render(ProfileSettingsView)
+      const button = getByRole('button', { name: 'Export my data' })
+
+      await fireEvent.click(button)
+      expect(requestPersonalDataExport).toHaveBeenCalledTimes(1)
+      expect(button).toBeDisabled()
+      expect(
+        queryByText('Preparing your data export...'),
+      ).not.toBeInTheDocument()
+
+      await vi.advanceTimersByTimeAsync(2001)
+      expect(queryByText('Preparing your data export...')).toBeInTheDocument()
+
+      await fireEvent.click(button)
+      expect(requestPersonalDataExport).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(600)
+      await waitFor(() => {
+        expect(button).not.toBeDisabled()
+      })
+    } finally {
+      clickSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('downloads personal data export and shows success toast copy', async () => {
+    vi.useFakeTimers()
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    try {
+      const createObjectURL = vi.fn(() => 'blob:personal-export')
+      const revokeObjectURL = vi.fn()
+      ;(
+        URL as unknown as { createObjectURL: typeof URL.createObjectURL }
+      ).createObjectURL = createObjectURL
+      ;(
+        URL as unknown as { revokeObjectURL: typeof URL.revokeObjectURL }
+      ).revokeObjectURL = revokeObjectURL
+
+      const clickSpy = vi
+        .spyOn(HTMLAnchorElement.prototype, 'click')
+        .mockImplementation(() => {})
+
+      requestPersonalDataExport.mockResolvedValue({
+        profile: {
+          userId: 'user-1',
+          didKey: 'did:key:z6Mk-test',
+          username: 'alice',
+          displayName: 'Alice',
+          avatarColor: '#3b82f6',
+          avatarUrl: null,
+          email: null,
+          emailVerifiedAt: null,
+          createdAt: '2026-02-24T00:00:00.000Z',
+          updatedAt: '2026-02-24T00:00:00.000Z',
+        },
+        guildMemberships: [],
+        messages: [],
+        dmMessages: [],
+        reactions: [],
+        uploadedFiles: [],
+        blockList: [],
+        exportedAt: '2026-03-02T00:00:00.000Z',
+      })
+
+      const { getByRole } = render(ProfileSettingsView)
+      await fireEvent.click(getByRole('button', { name: 'Export my data' }))
+
+      await waitFor(() => {
+        expect(requestPersonalDataExport).toHaveBeenCalledTimes(1)
+      })
+      await vi.runAllTimersAsync()
+
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(clickSpy).toHaveBeenCalledTimes(1)
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:personal-export')
+      expect(toastState.show).toHaveBeenCalledWith({
+        variant: 'success',
+        message: 'Your data export is ready for download',
+      })
+    } finally {
+      vi.useRealTimers()
+      ;(
+        URL as unknown as { createObjectURL: typeof URL.createObjectURL }
+      ).createObjectURL = originalCreateObjectURL
+      ;(
+        URL as unknown as { revokeObjectURL: typeof URL.revokeObjectURL }
+      ).revokeObjectURL = originalRevokeObjectURL
+    }
   })
 
   it('renders blocked users and unblocks entries from settings', async () => {

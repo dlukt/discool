@@ -1,3 +1,4 @@
+use crate::{AppError, db::DbPool};
 use serde::Serialize;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -89,6 +90,12 @@ pub struct RecoveryEmailEncryptionContextResponse {
     pub version: i64,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct UserRecoveryEmailExport {
+    pub normalized_email: String,
+    pub verified_at: Option<String>,
+}
+
 impl RecoveryEmailStatusResponse {
     pub fn none() -> Self {
         Self {
@@ -107,4 +114,37 @@ impl RecoveryEmailStatusResponse {
             verified_at: association.verified_at.clone(),
         }
     }
+}
+
+pub async fn find_recovery_email_for_user(
+    pool: &DbPool,
+    user_id: &str,
+) -> Result<Option<UserRecoveryEmailExport>, AppError> {
+    let record = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_as(
+                "SELECT normalized_email, verified_at
+                 FROM user_recovery_email
+                 WHERE user_id = $1
+                 LIMIT 1",
+            )
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_as(
+                "SELECT normalized_email, verified_at
+                 FROM user_recovery_email
+                 WHERE user_id = ?1
+                 LIMIT 1",
+            )
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(record)
 }

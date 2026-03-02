@@ -159,3 +159,32 @@ pub async fn list_messages_page_by_dm_channel_id(
 
     Ok(DmMessagePage { messages, has_more })
 }
+
+pub async fn list_dm_messages_by_author_user_id(
+    pool: &DbPool,
+    author_user_id: &str,
+) -> Result<Vec<DmMessage>, AppError> {
+    let messages = match pool {
+        DbPool::Postgres(pool) => sqlx::query_as(
+            "SELECT id, dm_channel_id, author_user_id, content, is_system, created_at, updated_at
+                 FROM dm_messages
+                 WHERE author_user_id = $1
+                 ORDER BY created_at ASC, id ASC",
+        )
+        .bind(author_user_id)
+        .fetch_all(pool)
+        .await,
+        DbPool::Sqlite(pool) => sqlx::query_as(
+            "SELECT id, dm_channel_id, author_user_id, content, is_system, created_at, updated_at
+                 FROM dm_messages
+                 WHERE author_user_id = ?1
+                 ORDER BY created_at ASC, id ASC",
+        )
+        .bind(author_user_id)
+        .fetch_all(pool)
+        .await,
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(messages)
+}

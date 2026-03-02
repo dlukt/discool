@@ -15,6 +15,7 @@ import {
   register,
   removeUserBlock,
   requestChallenge,
+  requestPersonalDataExport,
   startIdentityRecovery,
   startRecoveryEmailAssociation,
   updateProfile,
@@ -284,6 +285,38 @@ describe('identityApi', () => {
         },
       }),
     })
+  })
+
+  it('requestPersonalDataExport posts endpoint and maps response', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      profile: {
+        user_id: 'user-1',
+        did_key: 'did:key:z6Mk-test',
+        username: 'alice',
+        display_name: 'Alice',
+        avatar_color: '#3b82f6',
+        created_at: '2026-02-24T00:00:00.000Z',
+        updated_at: '2026-02-24T00:00:00.000Z',
+      },
+      guild_memberships: [
+        { guild_id: 'guild-1', joined_at: '2026-02-25T00:00:00.000Z' },
+      ],
+      messages: [],
+      dm_messages: [],
+      reactions: [],
+      uploaded_files: [],
+      block_list: [],
+      exported_at: '2026-03-02T00:00:00.000Z',
+    })
+
+    const data = await requestPersonalDataExport()
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/users/me/data-export', {
+      method: 'POST',
+    })
+    expect(data.profile.userId).toBe('user-1')
+    expect(data.guildMemberships[0]?.guildId).toBe('guild-1')
+    expect(data.exportedAt).toBe('2026-03-02T00:00:00.000Z')
   })
 
   it('startIdentityRecovery posts email and maps response', async () => {

@@ -5,6 +5,8 @@ import {
   type CrossInstanceChallengeInput,
   type IdentityRecoveryStartResponse,
   type IdentityRecoveryStartResponseWire,
+  type PersonalDataExport,
+  type PersonalDataExportWire,
   type RecoveryEmailStatus,
   type RecoveryEmailStatusWire,
   type RecoveryIdentityPayload,
@@ -13,6 +15,7 @@ import {
   type RegisteredUserWire,
   type StartRecoveryEmailInput,
   toIdentityRecoveryStartResponse,
+  toPersonalDataExport,
   toRecoveryEmailStatus,
   toRecoveryIdentityPayload,
   toRegisteredUser,
@@ -195,6 +198,12 @@ export function startRecoveryEmailAssociation(
     method: 'POST',
     body: JSON.stringify(toStartRecoveryEmailInputWire(input)),
   }).then(toRecoveryEmailStatus)
+}
+
+export function requestPersonalDataExport(): Promise<PersonalDataExport> {
+  return apiFetch<PersonalDataExportWire>('/api/v1/users/me/data-export', {
+    method: 'POST',
+  }).then(toPersonalDataExport)
 }
 
 export function startIdentityRecovery(

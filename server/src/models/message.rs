@@ -422,6 +422,41 @@ pub async fn list_message_ids_by_guild_and_author_since(
     Ok(message_ids)
 }
 
+pub async fn list_messages_by_author_user_id(
+    pool: &DbPool,
+    author_user_id: &str,
+) -> Result<Vec<Message>, AppError> {
+    let messages = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_as(
+                "SELECT id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at
+                 FROM messages
+                 WHERE author_user_id = $1
+                   AND deleted_at IS NULL
+                 ORDER BY created_at ASC, id ASC",
+            )
+            .bind(author_user_id)
+            .fetch_all(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_as(
+                "SELECT id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at
+                 FROM messages
+                 WHERE author_user_id = ?1
+                   AND deleted_at IS NULL
+                 ORDER BY created_at ASC, id ASC",
+            )
+            .bind(author_user_id)
+            .fetch_all(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(messages)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn list_message_history_page_by_guild_and_author(
     pool: &DbPool,
@@ -1298,5 +1333,50 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(author_message_ids, vec!["message-visible".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn sqlite_list_messages_by_author_user_id_filters_to_author() {
+        let pool = init_pool(&DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 1,
+        })
+        .await
+        .unwrap();
+        run_migrations(&pool).await.unwrap();
+        seed_message_fixture(&pool).await;
+
+        insert_message(
+            &pool,
+            "author-message",
+            "guild-id",
+            "channel-id",
+            "author-user-id",
+            "author-content",
+            false,
+            "2026-02-28T00:00:01Z",
+            "2026-02-28T00:00:01Z",
+        )
+        .await
+        .unwrap();
+        insert_message(
+            &pool,
+            "owner-message",
+            "guild-id",
+            "channel-id",
+            "owner-user-id",
+            "owner-content",
+            false,
+            "2026-02-28T00:00:02Z",
+            "2026-02-28T00:00:02Z",
+        )
+        .await
+        .unwrap();
+
+        let authored = list_messages_by_author_user_id(&pool, "author-user-id")
+            .await
+            .unwrap();
+        assert_eq!(authored.len(), 1);
+        assert_eq!(authored[0].id, "author-message");
     }
 }

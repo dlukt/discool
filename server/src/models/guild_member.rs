@@ -17,6 +17,13 @@ pub struct UserProfile {
     pub avatar_color: Option<String>,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct UserGuildMembership {
+    pub guild_id: String,
+    pub joined_at: String,
+    pub joined_via_invite_code: Option<String>,
+}
+
 pub async fn insert_guild_member(
     pool: &DbPool,
     guild_id: &str,
@@ -128,6 +135,39 @@ pub async fn list_guild_member_profiles(
     .map_err(|err| AppError::Internal(err.to_string()))?;
 
     Ok(members)
+}
+
+pub async fn list_guild_memberships_for_user(
+    pool: &DbPool,
+    user_id: &str,
+) -> Result<Vec<UserGuildMembership>, AppError> {
+    let memberships = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query_as(
+                "SELECT guild_id, joined_at, joined_via_invite_code
+                 FROM guild_members
+                 WHERE user_id = $1
+                 ORDER BY joined_at ASC, guild_id ASC",
+            )
+            .bind(user_id)
+            .fetch_all(pool)
+            .await
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query_as(
+                "SELECT guild_id, joined_at, joined_via_invite_code
+                 FROM guild_members
+                 WHERE user_id = ?1
+                 ORDER BY joined_at ASC, guild_id ASC",
+            )
+            .bind(user_id)
+            .fetch_all(pool)
+            .await
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(memberships)
 }
 
 pub async fn find_guild_member_profile(

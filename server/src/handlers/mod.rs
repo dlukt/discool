@@ -218,6 +218,7 @@ pub fn router(state: AppState) -> Router {
             "/users/me/blocks/{blocked_user_id}",
             delete(users::delete_user_block),
         )
+        .route("/users/me/data-export", post(users::create_data_export))
         .route("/admin/health", get(admin::get_health))
         .route("/admin/backup", post(admin::create_backup))
         .route("/instance", get(instance::get_instance))

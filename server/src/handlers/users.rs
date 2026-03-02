@@ -13,7 +13,7 @@ use crate::{
     AppError, AppState,
     middleware::auth::AuthenticatedUser,
     services::{
-        email_service, recovery_email_service, user_block_service,
+        email_service, recovery_email_service, user_block_service, user_data_export_service,
         user_profile_service::{self, UpdateProfileInput},
     },
 };
@@ -51,6 +51,15 @@ pub async fn get_profile(
 ) -> Result<Response, AppError> {
     let profile = user_profile_service::get_profile(&state.pool, &user.user_id).await?;
     Ok((StatusCode::OK, Json(json!({ "data": profile }))).into_response())
+}
+
+pub async fn create_data_export(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+) -> Result<Response, AppError> {
+    let export =
+        user_data_export_service::build_user_data_export(&state.pool, &user.user_id).await?;
+    Ok((StatusCode::OK, Json(json!({ "data": export }))).into_response())
 }
 
 pub async fn update_profile(
@@ -391,6 +400,25 @@ mod tests {
         let value = json_value(res).await;
         assert_eq!(value["data"]["display_name"], json!("Liam"));
         assert_eq!(value["data"]["avatar_color"], json!("#3B82F6"));
+    }
+
+    #[tokio::test]
+    async fn create_data_export_returns_enveloped_sections() {
+        let state = test_state().await;
+        let user = insert_user(&state).await;
+
+        let res = create_data_export(State(state), user).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let value = json_value(res).await;
+        assert_eq!(value["data"]["profile"]["username"], json!("liam"));
+        assert!(value["data"]["guild_memberships"].is_array());
+        assert!(value["data"]["messages"].is_array());
+        assert!(value["data"]["dm_messages"].is_array());
+        assert!(value["data"]["reactions"].is_array());
+        assert!(value["data"]["uploaded_files"].is_array());
+        assert!(value["data"]["block_list"].is_array());
+        assert!(value["data"]["exported_at"].is_string());
     }
 
     #[tokio::test]
