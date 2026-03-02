@@ -19,7 +19,7 @@ use crate::{
         signaling::{
             VoiceParticipantPayload, VoiceStateUpdatePayload as ServerVoiceStateUpdatePayload,
         },
-        voice_channel::{VoiceParticipantStateUpdate, VoiceRuntime},
+        voice_channel::{VoiceChannelRef, VoiceParticipantStateUpdate, VoiceRuntime},
     },
 };
 
@@ -707,6 +707,20 @@ async fn broadcast_voice_state_update(
     Ok(())
 }
 
+fn switched_channels_to_rebroadcast(
+    previous_channels: Vec<VoiceChannelRef>,
+    target_guild_slug: &str,
+    target_channel_slug: &str,
+) -> Vec<VoiceChannelRef> {
+    previous_channels
+        .into_iter()
+        .filter(|previous_channel| {
+            previous_channel.guild_slug == target_guild_slug
+                && previous_channel.channel_slug != target_channel_slug
+        })
+        .collect()
+}
+
 async fn handle_voice_join(
     pool: &DbPool,
     voice_runtime: &VoiceRuntime,
@@ -739,6 +753,11 @@ async fn handle_voice_join(
         ));
     }
 
+    let previous_channels = switched_channels_to_rebroadcast(
+        voice_runtime.channels_for_connection(connection_id),
+        &payload.guild_slug,
+        &payload.channel_slug,
+    );
     let start = voice_runtime
         .start_signaling(
             connection_id,
@@ -756,6 +775,15 @@ async fn handle_voice_join(
     registry::send_event(connection_id, ServerOp::VoiceOffer, &start.offer);
     for candidate in start.candidates {
         registry::send_event(connection_id, ServerOp::VoiceIceCandidate, &candidate);
+    }
+    for previous_channel in previous_channels {
+        broadcast_voice_state_update(
+            pool,
+            voice_runtime,
+            &previous_channel.guild_slug,
+            &previous_channel.channel_slug,
+        )
+        .await?;
     }
     broadcast_voice_state_update(
         pool,
@@ -1257,5 +1285,31 @@ mod tests {
         .expect_err("invalid voice state update payload should be rejected");
         assert_eq!(err.code, "VALIDATION_ERROR");
         assert_eq!(err.details["reason"], json!("invalid_payload_shape"));
+    }
+
+    #[test]
+    fn switched_channels_to_rebroadcast_filters_to_previous_same_guild_channels() {
+        let channels = vec![
+            VoiceChannelRef {
+                guild_slug: "guild".to_string(),
+                channel_slug: "voice-a".to_string(),
+            },
+            VoiceChannelRef {
+                guild_slug: "guild".to_string(),
+                channel_slug: "voice-b".to_string(),
+            },
+            VoiceChannelRef {
+                guild_slug: "other-guild".to_string(),
+                channel_slug: "voice-z".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            switched_channels_to_rebroadcast(channels, "guild", "voice-b"),
+            vec![VoiceChannelRef {
+                guild_slug: "guild".to_string(),
+                channel_slug: "voice-a".to_string(),
+            }]
+        );
     }
 }

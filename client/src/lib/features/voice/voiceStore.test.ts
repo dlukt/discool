@@ -96,6 +96,68 @@ describe('voiceState', () => {
     expect(voiceState.status).toBe('connecting')
   })
 
+  it('switches channels by leaving old context before joining the target channel', () => {
+    voiceState.activateVoiceChannel('lobby', 'voice-a')
+    wsSend.mockClear()
+
+    voiceState.activateVoiceChannel('lobby', 'voice-b')
+
+    expect(wsSend.mock.calls).toEqual([
+      [
+        'c_voice_leave',
+        {
+          guild_slug: 'lobby',
+          channel_slug: 'voice-a',
+        },
+      ],
+      [
+        'c_voice_join',
+        {
+          guild_slug: 'lobby',
+          channel_slug: 'voice-b',
+        },
+      ],
+    ])
+    expect(voiceState.activeChannelSlug).toBe('voice-b')
+    expect(voiceState.status).toBe('connecting')
+  })
+
+  it('is idempotent for repeated activation of the current active voice channel', () => {
+    voiceState.activateVoiceChannel('lobby', 'voice-room')
+    voiceState.activateVoiceChannel('lobby', 'voice-room')
+
+    const joinCalls = wsSend.mock.calls.filter(
+      (call) => call[0] === 'c_voice_join',
+    )
+    const leaveCalls = wsSend.mock.calls.filter(
+      (call) => call[0] === 'c_voice_leave',
+    )
+    expect(joinCalls).toHaveLength(1)
+    expect(leaveCalls).toHaveLength(0)
+  })
+
+  it('ignores stale join errors tied to a previous channel after switching', () => {
+    voiceState.activateVoiceChannel('lobby', 'voice-a')
+    voiceState.activateVoiceChannel('lobby', 'voice-b')
+
+    emitEnvelope({
+      op: 'error',
+      d: {
+        code: 'INTERNAL_ERROR',
+        message: 'voice signaling failed',
+        details: {
+          op: 'c_voice_join',
+          guild_slug: 'lobby',
+          channel_slug: 'voice-a',
+        },
+      },
+    })
+
+    expect(voiceState.activeChannelSlug).toBe('voice-b')
+    expect(voiceState.status).toBe('connecting')
+    expect(voiceState.statusMessage).toBeNull()
+  })
+
   it('ingests voice_state_update envelopes and exposes participant selectors', () => {
     emitEnvelope({
       op: 'voice_state_update',

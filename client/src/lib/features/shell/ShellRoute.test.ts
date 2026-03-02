@@ -581,6 +581,93 @@ describe('ShellRoute', () => {
     })
   })
 
+  it('activates voice when route switches between voice channels', async () => {
+    const voiceChannels = [
+      {
+        id: 'channel-voice-a',
+        guildId: 'guild-1',
+        slug: 'voice-a',
+        name: 'voice-a',
+        topic: null,
+        kind: 'voice',
+        position: 0,
+        categorySlug: null,
+        isDefault: true,
+      },
+      {
+        id: 'channel-voice-b',
+        guildId: 'guild-1',
+        slug: 'voice-b',
+        name: 'voice-b',
+        topic: null,
+        kind: 'voice',
+        position: 1,
+        categorySlug: null,
+        isDefault: false,
+      },
+    ]
+    channelState.channelsByGuild = { lobby: voiceChannels }
+    channelState.channels = [...voiceChannels]
+
+    const view = render(
+      ShellRoute,
+      buildProps({
+        route: {
+          result: {
+            path: {
+              condition: 'exact-match',
+              original: '/lobby/voice-a',
+              params: { guild: 'lobby', channel: 'voice-a' },
+            },
+            querystring: {
+              condition: 'exact-match',
+              original: {},
+              params: {},
+            },
+            status: 200,
+          },
+        },
+      }),
+    )
+
+    await waitFor(() => {
+      expect(voiceState.activateVoiceChannel).toHaveBeenCalledWith(
+        'lobby',
+        'voice-a',
+      )
+    })
+    voiceState.activateVoiceChannel.mockClear()
+    voiceState.clearActiveChannel.mockClear()
+
+    await view.rerender(
+      buildProps({
+        route: {
+          result: {
+            path: {
+              condition: 'exact-match',
+              original: '/lobby/voice-b',
+              params: { guild: 'lobby', channel: 'voice-b' },
+            },
+            querystring: {
+              condition: 'exact-match',
+              original: {},
+              params: {},
+            },
+            status: 200,
+          },
+        },
+      }),
+    )
+
+    await waitFor(() => {
+      expect(voiceState.activateVoiceChannel).toHaveBeenCalledWith(
+        'lobby',
+        'voice-b',
+      )
+    })
+    expect(voiceState.clearActiveChannel).not.toHaveBeenCalled()
+  })
+
   it('shows a non-blocking reconnecting status message while websocket reconnects', async () => {
     const props = buildProps()
     const view = render(ShellRoute, props)

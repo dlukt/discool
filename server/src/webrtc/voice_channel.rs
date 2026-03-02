@@ -84,8 +84,9 @@ impl VoiceRuntime {
         guild_slug: &str,
         channel_slug: &str,
     ) -> Result<SignalingStart, String> {
+        self.close_sessions_for_connection_guild(connection_id, guild_slug)
+            .await;
         let key = session_key(connection_id, guild_slug, channel_slug);
-        self.close_session_by_key(&key, connection_id).await;
         let peer_connection = create_peer_connection(ice_servers_from_config(&self.config)).await?;
         peer_connection
             .add_transceiver_from_kind(RTPCodecType::Audio, None)
@@ -304,6 +305,24 @@ impl VoiceRuntime {
         self.config.retry_max_attempts
     }
 
+    async fn close_sessions_for_connection_guild(&self, connection_id: &str, guild_slug: &str) {
+        let prefix = format!("{connection_id}:{guild_slug}:");
+        let keys = self
+            .sessions
+            .iter()
+            .filter_map(|entry| {
+                if entry.key().starts_with(&prefix) {
+                    Some(entry.key().clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.close_session_by_key(&key, connection_id).await;
+        }
+    }
+
     async fn close_session_by_key(&self, key: &str, connection_id: &str) {
         let Some((_, session)) = self.sessions.remove(key) else {
             return;
@@ -403,6 +422,35 @@ mod tests {
         runtime.leave_session("conn-1", "guild", "voice-room").await;
         runtime.leave_session("conn-1", "guild", "voice-room").await;
         assert!(runtime.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn start_signaling_switches_connection_to_latest_channel_within_guild() {
+        let runtime = VoiceRuntime::new(VoiceConfig::default());
+        runtime
+            .start_signaling("conn-1", "user-1", "guild", "voice-a")
+            .await
+            .expect("initial signaling should start");
+        runtime
+            .start_signaling("conn-1", "user-1", "guild", "voice-b")
+            .await
+            .expect("switch signaling should start");
+
+        assert!(
+            runtime
+                .participants_for_channel("guild", "voice-a")
+                .is_empty()
+        );
+        let participants = runtime.participants_for_channel("guild", "voice-b");
+        assert_eq!(participants.len(), 1);
+        assert_eq!(participants[0].user_id, "user-1");
+        assert_eq!(
+            runtime.channels_for_connection("conn-1"),
+            vec![VoiceChannelRef {
+                guild_slug: "guild".to_string(),
+                channel_slug: "voice-b".to_string(),
+            }]
+        );
     }
 
     #[tokio::test]

@@ -352,7 +352,8 @@ function markConnectedIfActive(context: VoiceJoinContext): void {
   sendVoiceStateUpdate(context)
 }
 
-function markFailed(): void {
+function markFailed(context: VoiceJoinContext): void {
+  if (!matchesActiveContext(context)) return
   clearRetryTimer()
   clearJoinTimeoutTimer()
   voiceClient.close()
@@ -360,11 +361,10 @@ function markFailed(): void {
   toastState.show({ variant: 'error', message: VOICE_FAILED_MESSAGE })
 }
 
-function scheduleRetry(): void {
-  const context = activeContext()
-  if (!context) return
+function scheduleRetry(context: VoiceJoinContext): void {
+  if (!matchesActiveContext(context)) return
   if (voiceState.attempt >= RETRY_MAX_ATTEMPTS) {
-    markFailed()
+    markFailed(context)
     return
   }
   const delay = retryDelayForAttempt(voiceState.attempt)
@@ -376,9 +376,12 @@ function scheduleRetry(): void {
   }, delay)
 }
 
-function handleJoinFailure(): void {
+function handleJoinFailure(
+  context: VoiceJoinContext | null = activeContext(),
+): void {
+  if (!context || !matchesActiveContext(context)) return
   if (voiceState.status === 'connected') return
-  scheduleRetry()
+  scheduleRetry(context)
 }
 
 function beginJoinAttempt(context: VoiceJoinContext, isRetry: boolean): void {
@@ -402,13 +405,13 @@ function beginJoinAttempt(context: VoiceJoinContext, isRetry: boolean): void {
     channel_slug: context.channelSlug,
   })
   if (!sent) {
-    handleJoinFailure()
+    handleJoinFailure(context)
     return
   }
 
   joinTimeoutTimer = setTimeout(() => {
     joinTimeoutTimer = null
-    handleJoinFailure()
+    handleJoinFailure(context)
   }, JOIN_TIMEOUT_MS)
 }
 
@@ -500,12 +503,12 @@ function handleVoiceOffer(payload: VoiceOfferWire): void {
   )
   if (!context || !matchesActiveContext(context)) return
   if (payload.sdp_type !== 'offer') {
-    handleJoinFailure()
+    handleJoinFailure(context)
     return
   }
   const sdp = payload.sdp?.trim()
   if (!sdp) {
-    handleJoinFailure()
+    handleJoinFailure(context)
     return
   }
 
@@ -519,11 +522,11 @@ function handleVoiceOffer(payload: VoiceOfferWire): void {
         state === 'disconnected' ||
         state === 'closed'
       ) {
-        handleJoinFailure()
+        handleJoinFailure(context)
       }
     })
     .catch(() => {
-      handleJoinFailure()
+      handleJoinFailure(context)
     })
 }
 
@@ -551,7 +554,7 @@ function handleVoiceIceCandidate(payload: VoiceIceCandidateWire): void {
       sdpMLineIndex,
     })
     .catch(() => {
-      handleJoinFailure()
+      handleJoinFailure(context)
     })
 }
 
@@ -571,13 +574,14 @@ function handleVoiceConnectionState(payload: VoiceConnectionStateWire): void {
     return
   }
   if (state === 'failed') {
-    handleJoinFailure()
+    handleJoinFailure(context)
   }
 }
 
 function handleVoiceWsError(envelope: WsEnvelope): void {
   if (!isRecord(envelope.d)) return
   const details = isRecord(envelope.d.details) ? envelope.d.details : null
+  const errorContext = details ? parseContextFromWire(details) : null
   const op = details && typeof details.op === 'string' ? details.op.trim() : ''
   const message =
     typeof envelope.d.message === 'string'
@@ -593,8 +597,9 @@ function handleVoiceWsError(envelope: WsEnvelope): void {
   ) {
     return
   }
+  if (errorContext && !matchesActiveContext(errorContext)) return
   if (voiceState.status === 'connecting' || voiceState.status === 'retrying') {
-    handleJoinFailure()
+    handleJoinFailure(errorContext ?? activeContext())
   }
 }
 

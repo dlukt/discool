@@ -1089,6 +1089,31 @@ describe('MessageArea', () => {
     expect(voiceState.disconnect).toHaveBeenCalledTimes(1)
   })
 
+  it('updates VoiceBar channel label when active channel changes', async () => {
+    voiceState.statusForChannel.mockReturnValue('connected')
+    const { getByTestId, rerender } = render(MessageArea, {
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'voice-a',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    expect(getByTestId('voice-bar-channel')).toHaveTextContent('#voice-a')
+
+    await rerender({
+      mode: 'channel',
+      activeGuild: 'lobby',
+      activeChannel: 'voice-b',
+      displayName: 'Alice',
+      isAdmin: false,
+      showRecoveryNudge: false,
+    })
+
+    expect(getByTestId('voice-bar-channel')).toHaveTextContent('#voice-b')
+  })
+
   it('toggles voice participant panel from VoiceBar expand control', async () => {
     voiceState.statusForChannel.mockReturnValue('connected')
     voiceState.activeChannelParticipants.mockReturnValue([

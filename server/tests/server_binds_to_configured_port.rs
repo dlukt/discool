@@ -4786,6 +4786,168 @@ async fn websocket_voice_join_emits_offer_and_candidate_and_rejects_invalid_answ
 }
 
 #[tokio::test]
+async fn websocket_voice_switch_rebroadcasts_leave_and_join_snapshots() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "voice-switch-owner", [203u8; 32]).await;
+    let guild_body = json!({ "name": "Voice Switch Guild" }).to_string();
+    let guild_res = http_post_with_bearer(&addr, "/api/v1/guilds", &guild_body, &owner_token).await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_slug = guild_json["data"]["slug"].as_str().unwrap().to_string();
+
+    let create_voice_a = json!({
+        "name": "Voice A",
+        "channel_type": "voice",
+    })
+    .to_string();
+    let create_voice_a_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/channels"),
+        &create_voice_a,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&create_voice_a_res), 201);
+    let voice_a_json: serde_json::Value =
+        serde_json::from_str(response_body(&create_voice_a_res)).unwrap();
+    let voice_a_slug = voice_a_json["data"]["slug"].as_str().unwrap().to_string();
+
+    let create_voice_b = json!({
+        "name": "Voice B",
+        "channel_type": "voice",
+    })
+    .to_string();
+    let create_voice_b_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/channels"),
+        &create_voice_b,
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&create_voice_b_res), 201);
+    let voice_b_json: serde_json::Value =
+        serde_json::from_str(response_body(&create_voice_b_res)).unwrap();
+    let voice_b_slug = voice_b_json["data"]["slug"].as_str().unwrap().to_string();
+
+    let (mut stream, response) = websocket_connect(&addr, "/ws", Some(&owner_token)).await;
+    assert_eq!(response_status(&response), 101);
+    let _ = websocket_read_json_with_op(&mut stream, "hello", 1_500).await;
+    websocket_send_text_frame(
+        &mut stream,
+        &json!({
+            "op": "c_subscribe",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_a_slug.as_str(),
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let _ = websocket_read_json_with_op(&mut stream, "channel_update", 1_500).await;
+
+    websocket_send_text_frame(
+        &mut stream,
+        &json!({
+            "op": "c_voice_join",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_a_slug.as_str(),
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let _ = websocket_read_json_with_op(&mut stream, "voice_connection_state", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut stream, "voice_offer", 1_500).await;
+    let _ = websocket_read_json_with_op(&mut stream, "voice_ice_candidate", 1_500).await;
+    let first_snapshot = websocket_read_json_with_op(&mut stream, "voice_state_update", 1_500)
+        .await
+        .expect("first voice join should emit participant snapshot");
+    assert_eq!(
+        first_snapshot["d"]["channel_slug"],
+        json!(voice_a_slug.as_str())
+    );
+    assert_eq!(first_snapshot["d"]["participant_count"], json!(1));
+
+    websocket_send_text_frame(
+        &mut stream,
+        &json!({
+            "op": "c_voice_join",
+            "d": {
+                "guild_slug": guild_slug.as_str(),
+                "channel_slug": voice_b_slug.as_str(),
+            }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let switched_connecting =
+        websocket_read_json_with_op(&mut stream, "voice_connection_state", 1_500)
+            .await
+            .expect("voice switch should emit connecting state for target channel");
+    assert_eq!(
+        switched_connecting["d"]["channel_slug"],
+        json!(voice_b_slug.as_str())
+    );
+    let switched_offer = websocket_read_json_with_op(&mut stream, "voice_offer", 1_500)
+        .await
+        .expect("voice switch should emit target offer");
+    assert_eq!(switched_offer["d"]["sdp_type"], json!("offer"));
+    let switched_candidate = websocket_read_json_with_op(&mut stream, "voice_ice_candidate", 1_500)
+        .await
+        .expect("voice switch should emit target ICE candidate");
+    assert!(
+        switched_candidate["d"]["candidate"]
+            .as_str()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false),
+        "switch voice candidate should not be empty"
+    );
+
+    let mut voice_a_count: Option<u64> = None;
+    let mut voice_b_count: Option<u64> = None;
+    for _ in 0..4 {
+        let snapshot = websocket_read_json_with_op(&mut stream, "voice_state_update", 1_500)
+            .await
+            .expect("voice switch should emit rebroadcast snapshots");
+        let channel_slug = snapshot["d"]["channel_slug"].as_str().unwrap_or_default();
+        let participant_count = snapshot["d"]["participant_count"]
+            .as_u64()
+            .unwrap_or_default();
+        if channel_slug == voice_a_slug {
+            voice_a_count = Some(participant_count);
+        }
+        if channel_slug == voice_b_slug {
+            voice_b_count = Some(participant_count);
+        }
+        if voice_a_count.is_some() && voice_b_count.is_some() {
+            break;
+        }
+    }
+    assert_eq!(
+        voice_a_count,
+        Some(0),
+        "previous channel should be rebroadcast with zero participants after switch"
+    );
+    assert_eq!(
+        voice_b_count,
+        Some(1),
+        "target channel should be rebroadcast with one participant after switch"
+    );
+}
+
+#[tokio::test]
 async fn websocket_voice_join_rejects_text_channels_and_invalid_payloads() {
     use serde_json::json;
 
