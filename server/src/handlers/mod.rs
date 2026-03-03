@@ -202,6 +202,7 @@ pub fn router(state: AppState) -> Router {
             "/users/me/profile",
             get(users::get_profile).patch(users::update_profile),
         )
+        .route("/users/me", delete(users::delete_account))
         .route(
             "/users/me/recovery-email",
             get(users::get_recovery_email).post(users::start_recovery_email),

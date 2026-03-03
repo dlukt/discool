@@ -54,6 +54,16 @@ let exportProgressVisible = $state(false)
 let exportProgressTimerId = $state<number | null>(null)
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let exportErrorMessage = $state<string | null>(null)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let deleteDialogOpen = $state(false)
+let deleteConfirmUsername = $state('')
+let deletePending = $state(false)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let deleteErrorMessage = $state<string | null>(null)
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+let deleteCanConfirm = $derived(
+  sessionUser !== null && deleteConfirmUsername === sessionUser.username,
+)
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 let blockedUsers = $derived.by(() => {
@@ -316,6 +326,52 @@ async function onDataExportSubmit(event: SubmitEvent) {
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function openDeleteDialog() {
+  if (!sessionUser) return
+  deleteConfirmUsername = ''
+  deleteErrorMessage = null
+  deleteDialogOpen = true
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+function closeDeleteDialog() {
+  if (deletePending) return
+  deleteDialogOpen = false
+  deleteConfirmUsername = ''
+  deleteErrorMessage = null
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
+async function confirmDeleteAccount() {
+  if (!sessionUser || deletePending) return
+  if (deleteConfirmUsername !== sessionUser.username) {
+    deleteErrorMessage = 'Type your username exactly to confirm deletion.'
+    return
+  }
+
+  deletePending = true
+  deleteErrorMessage = null
+  try {
+    await identityState.deleteAccount(deleteConfirmUsername)
+    deleteDialogOpen = false
+    toastState.show({
+      variant: 'success',
+      message: 'Account deleted from this instance',
+    })
+  } catch (err) {
+    if (err instanceof ApiError) {
+      deleteErrorMessage = err.message
+    } else if (err instanceof Error) {
+      deleteErrorMessage = err.message
+    } else {
+      deleteErrorMessage = 'Failed to delete your account.'
+    }
+  } finally {
+    deletePending = false
+  }
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: Used in Svelte markup; Biome doesn't detect template usage.
 function blockedAtLabel(blockedAt: string): string {
   const parsed = new Date(blockedAt)
   if (Number.isNaN(parsed.getTime())) return blockedAt
@@ -548,7 +604,7 @@ async function unblockFromSettings(userId: string, displayName: string) {
       <header class="mb-3 space-y-1">
         <h3 class="text-sm font-semibold">Privacy</h3>
         <p class="text-sm text-muted-foreground">
-          Export your personal data as a JSON file.
+          Export your personal data as a JSON file or permanently delete your account from this instance.
         </p>
       </header>
 
@@ -576,6 +632,20 @@ async function unblockFromSettings(userId: string, displayName: string) {
           {/if}
         </button>
       </form>
+
+      <div class="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-3">
+        <h4 class="text-sm font-semibold text-destructive">Danger zone</h4>
+        <p class="mt-1 text-sm text-muted-foreground">
+          Permanently delete this account from this instance.
+        </p>
+        <button
+          type="button"
+          class="mt-3 inline-flex items-center justify-center rounded-md bg-destructive px-4 py-2 text-sm font-medium text-destructive-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+          onclick={openDeleteDialog}
+        >
+          Delete my account
+        </button>
+      </div>
     </section>
 
     <section class="mt-6 rounded-md border border-border bg-muted p-4">
@@ -636,4 +706,63 @@ async function unblockFromSettings(userId: string, displayName: string) {
       {/if}
     </section>
   </div>
+
+  {#if deleteDialogOpen && sessionUser}
+    <div
+      class="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4"
+      role="presentation"
+    >
+      <div
+        class="w-full max-w-md rounded-md border border-border bg-card p-4 shadow-lg"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Delete my account confirmation"
+        data-testid="delete-account-dialog"
+      >
+        <h3 class="text-base font-semibold text-foreground">Delete my account</h3>
+        <p class="mt-2 text-sm text-muted-foreground">
+          This will permanently delete your identity and all associated data from this instance. This cannot be undone.
+        </p>
+
+        <label class="mt-3 block space-y-1 text-xs text-muted-foreground">
+          <span class="font-medium text-foreground">
+            Type <code class="rounded bg-background px-1 py-0.5">{sessionUser.username}</code> to confirm
+          </span>
+          <input
+            type="text"
+            class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            bind:value={deleteConfirmUsername}
+            autocomplete="off"
+            data-testid="delete-account-confirm-input"
+          />
+        </label>
+
+        {#if deleteErrorMessage}
+          <p class="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive" role="alert">
+            {deleteErrorMessage}
+          </p>
+        {/if}
+
+        <div class="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            class="rounded-md border border-border bg-background px-3 py-2 text-sm font-medium text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+            onclick={closeDeleteDialog}
+            disabled={deletePending}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="rounded-md bg-destructive px-3 py-2 text-sm font-medium text-destructive-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+            onclick={() => void confirmDeleteAccount()}
+            disabled={!deleteCanConfirm || deletePending}
+            data-testid="delete-account-confirm-button"
+          >
+            {deletePending ? 'Deleting...' : 'Delete account'}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 {/if}

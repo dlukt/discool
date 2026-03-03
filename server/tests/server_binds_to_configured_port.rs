@@ -319,8 +319,19 @@ async fn http_post(addr: &str, path: &str, json_body: &str) -> String {
 
     let req = format!(
         "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
-        json_body.as_bytes().len(),
+        json_body.len(),
     );
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    String::from_utf8_lossy(&buf).to_string()
+}
+
+async fn http_delete(addr: &str, path: &str) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    let req = format!("DELETE {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).await.unwrap();
 
     let mut buf = Vec::new();
@@ -346,7 +357,7 @@ async fn http_post_with_bearer(addr: &str, path: &str, json_body: &str, token: &
 
     let req = format!(
         "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
-        json_body.as_bytes().len(),
+        json_body.len(),
     );
     stream.write_all(req.as_bytes()).await.unwrap();
 
@@ -360,7 +371,7 @@ async fn http_patch_with_bearer(addr: &str, path: &str, json_body: &str, token: 
 
     let req = format!(
         "PATCH {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
-        json_body.as_bytes().len(),
+        json_body.len(),
     );
     stream.write_all(req.as_bytes()).await.unwrap();
 
@@ -374,7 +385,7 @@ async fn http_put_with_bearer(addr: &str, path: &str, json_body: &str, token: &s
 
     let req = format!(
         "PUT {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
-        json_body.as_bytes().len(),
+        json_body.len(),
     );
     stream.write_all(req.as_bytes()).await.unwrap();
 
@@ -388,6 +399,25 @@ async fn http_delete_with_bearer(addr: &str, path: &str, token: &str) -> String 
 
     let req = format!(
         "DELETE {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    String::from_utf8_lossy(&buf).to_string()
+}
+
+async fn http_delete_with_bearer_and_json(
+    addr: &str,
+    path: &str,
+    json_body: &str,
+    token: &str,
+) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    let req = format!(
+        "DELETE {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
+        json_body.len(),
     );
     stream.write_all(req.as_bytes()).await.unwrap();
 
@@ -426,7 +456,7 @@ async fn http_post_bytes_with_bearer(
 
     let req = format!(
         "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
-        json_body.as_bytes().len(),
+        json_body.len(),
     );
     stream.write_all(req.as_bytes()).await.unwrap();
 
@@ -4158,6 +4188,381 @@ async fn users_data_export_requires_authentication() {
         value,
         json!({ "error": { "code": "UNAUTHORIZED", "message": "Missing Authorization header", "details": {} } })
     );
+}
+
+#[tokio::test]
+async fn users_account_delete_requires_authentication() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let res = http_delete(&addr, "/api/v1/users/me").await;
+    assert_eq!(response_status(&res), 401);
+
+    let value: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    assert_eq!(
+        value,
+        json!({ "error": { "code": "UNAUTHORIZED", "message": "Missing Authorization header", "details": {} } })
+    );
+}
+
+#[tokio::test]
+async fn users_account_delete_deletes_account_data_and_invalidates_session() {
+    use serde_json::json;
+    use std::io::Write;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    let db_path = dir.join("discool.db");
+    fs::write(&db_path, "").unwrap();
+    let cfg_path = dir.join("config.toml");
+    write_server_config_with_db_url(&cfg_path, "127.0.0.1", port, None, "sqlite://./discool.db");
+    let mut cfg = fs::OpenOptions::new().append(true).open(&cfg_path).unwrap();
+    cfg.write_all(
+        b"\n[attachments]\nupload_dir = \"./attachments-test\"\nmax_size_bytes = 1048576\n",
+    )
+    .unwrap();
+
+    let mut server = spawn_server(&dir, |_| {});
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let owner_token = register_and_authenticate(&addr, "delete-owner", [212u8; 32]).await;
+    let delete_token = register_and_authenticate(&addr, "delete-user", [213u8; 32]).await;
+    let peer_token = register_and_authenticate(&addr, "delete-peer", [214u8; 32]).await;
+
+    let owner_profile =
+        http_response_with_bearer(&addr, "/api/v1/users/me/profile", &owner_token).await;
+    assert_eq!(response_status(&owner_profile), 200);
+    let owner_profile_json: serde_json::Value =
+        serde_json::from_str(response_body(&owner_profile)).unwrap();
+    let owner_user_id = owner_profile_json["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let delete_profile =
+        http_response_with_bearer(&addr, "/api/v1/users/me/profile", &delete_token).await;
+    assert_eq!(response_status(&delete_profile), 200);
+    let delete_profile_json: serde_json::Value =
+        serde_json::from_str(response_body(&delete_profile)).unwrap();
+    let delete_user_id = delete_profile_json["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let peer_profile =
+        http_response_with_bearer(&addr, "/api/v1/users/me/profile", &peer_token).await;
+    assert_eq!(response_status(&peer_profile), 200);
+    let peer_profile_json: serde_json::Value =
+        serde_json::from_str(response_body(&peer_profile)).unwrap();
+    let peer_user_id = peer_profile_json["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let guild_res = http_post_with_bearer(
+        &addr,
+        "/api/v1/guilds",
+        &json!({ "name": "Account Delete Test Guild" }).to_string(),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_id = guild_json["data"]["id"].as_str().unwrap().to_string();
+    let guild_slug = guild_json["data"]["slug"].as_str().unwrap().to_string();
+
+    let invite_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/invites"),
+        &json!({ "type": "reusable" }).to_string(),
+        &owner_token,
+    )
+    .await;
+    assert_eq!(response_status(&invite_res), 201);
+    let invite_json: serde_json::Value = serde_json::from_str(response_body(&invite_res)).unwrap();
+    let invite_code = invite_json["data"]["code"].as_str().unwrap().to_string();
+
+    let join_res = http_post_with_bearer(
+        &addr,
+        &format!("/api/v1/invites/{invite_code}/join"),
+        "{}",
+        &delete_token,
+    )
+    .await;
+    assert_eq!(response_status(&join_res), 200);
+
+    let create_block_res = http_post_with_bearer(
+        &addr,
+        "/api/v1/users/me/blocks",
+        &json!({ "blocked_user_id": peer_user_id }).to_string(),
+        &delete_token,
+    )
+    .await;
+    assert_eq!(response_status(&create_block_res), 200);
+
+    let boundary = "----discool-delete-account-boundary";
+    let mut attachment_body = Vec::new();
+    attachment_body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"delete-me.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    attachment_body.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x01]);
+    attachment_body.extend_from_slice(
+        format!(
+            "\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"content\"\r\n\r\ndelete me"
+        )
+        .as_bytes(),
+    );
+    attachment_body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let attachment_res = http_post_multipart_with_bearer(
+        &addr,
+        &format!("/api/v1/guilds/{guild_slug}/channels/general/messages/attachments"),
+        boundary,
+        &attachment_body,
+        &delete_token,
+    )
+    .await;
+    assert_eq!(response_status(&attachment_res), 201);
+
+    let db_url = format!("sqlite://{}", db_path.display());
+    let pool = sqlx::SqlitePool::connect(&db_url).await.unwrap();
+
+    let channel_id: String = sqlx::query_scalar(
+        "SELECT id FROM channels WHERE guild_id = ?1 AND slug = 'general' LIMIT 1",
+    )
+    .bind(&guild_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let seeded_message_id = "delete-story-seeded-message";
+    sqlx::query(
+        "INSERT INTO messages (id, guild_id, channel_id, author_user_id, content, is_system, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )
+    .bind(seeded_message_id)
+    .bind(&guild_id)
+    .bind(&channel_id)
+    .bind(&owner_user_id)
+    .bind("owner message")
+    .bind(0_i64)
+    .bind("2026-03-02T00:00:00Z")
+    .bind("2026-03-02T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO message_reactions (message_id, user_id, emoji, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(seeded_message_id)
+    .bind(&delete_user_id)
+    .bind(":fire:")
+    .bind("2026-03-02T00:00:01Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (dm_low_id, dm_high_id) = if delete_user_id < peer_user_id {
+        (delete_user_id.as_str(), peer_user_id.as_str())
+    } else {
+        (peer_user_id.as_str(), delete_user_id.as_str())
+    };
+    sqlx::query(
+        "INSERT INTO dm_channels (id, slug, user_low_id, user_high_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )
+    .bind("delete-account-dm-channel")
+    .bind("delete-account-dm-channel")
+    .bind(dm_low_id)
+    .bind(dm_high_id)
+    .bind("2026-03-02T00:00:02Z")
+    .bind("2026-03-02T00:00:02Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO dm_messages (id, dm_channel_id, author_user_id, content, is_system, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )
+    .bind("delete-account-dm-message")
+    .bind("delete-account-dm-channel")
+    .bind(&delete_user_id)
+    .bind("dm content")
+    .bind(0_i64)
+    .bind("2026-03-02T00:00:03Z")
+    .bind("2026-03-02T00:00:03Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO user_recovery_email (
+             user_id,
+             normalized_email,
+             email_masked,
+             verified_at,
+             encrypted_private_key,
+             encryption_algorithm,
+             encryption_version,
+             key_nonce,
+             created_at,
+             updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+    )
+    .bind(&delete_user_id)
+    .bind("delete-user@example.com")
+    .bind("d***@example.com")
+    .bind(Some("2026-03-02T00:00:00Z"))
+    .bind(Some("ciphertext"))
+    .bind(Some("aes-256-gcm"))
+    .bind(Some(1_i64))
+    .bind(Some("nonce"))
+    .bind("2026-03-02T00:00:00Z")
+    .bind("2026-03-02T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let attachment_storage_key: String = sqlx::query_scalar(
+        "SELECT ma.storage_key
+         FROM message_attachments ma
+         JOIN messages m ON m.id = ma.message_id
+         WHERE m.author_user_id = ?1
+         LIMIT 1",
+    )
+    .bind(&delete_user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let attachment_path = dir.join("attachments-test").join(&attachment_storage_key);
+    assert!(attachment_path.exists());
+
+    let delete_res = http_delete_with_bearer_and_json(
+        &addr,
+        "/api/v1/users/me",
+        &json!({ "confirm_username": "delete-user" }).to_string(),
+        &delete_token,
+    )
+    .await;
+    assert_eq!(response_status(&delete_res), 204);
+
+    let stale_token_profile =
+        http_response_with_bearer(&addr, "/api/v1/users/me/profile", &delete_token).await;
+    assert_eq!(response_status(&stale_token_profile), 401);
+
+    let users_remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ?1")
+        .bind(&delete_user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let sessions_remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE user_id = ?1")
+            .bind(&delete_user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let guild_memberships_remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM guild_members WHERE user_id = ?1")
+            .bind(&delete_user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let messages_remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE author_user_id = ?1")
+            .bind(&delete_user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let dm_messages_remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM dm_messages WHERE author_user_id = ?1")
+            .bind(&delete_user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let reactions_remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM message_reactions WHERE user_id = ?1")
+            .bind(&delete_user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let blocks_remaining: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM user_blocks WHERE owner_user_id = ?1 OR blocked_user_id = ?1",
+    )
+    .bind(&delete_user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let recovery_remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM user_recovery_email WHERE user_id = ?1")
+            .bind(&delete_user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    assert_eq!(users_remaining, 0);
+    assert_eq!(sessions_remaining, 0);
+    assert_eq!(guild_memberships_remaining, 0);
+    assert_eq!(messages_remaining, 0);
+    assert_eq!(dm_messages_remaining, 0);
+    assert_eq!(reactions_remaining, 0);
+    assert_eq!(blocks_remaining, 0);
+    assert_eq!(recovery_remaining, 0);
+    assert!(!attachment_path.exists());
+}
+
+#[tokio::test]
+async fn users_account_delete_returns_conflict_for_owned_guilds() {
+    use serde_json::json;
+
+    let port = pick_free_port();
+    let dir = new_temp_dir();
+    write_server_config(&dir.join("config.toml"), "127.0.0.1", port, None);
+    let mut server = spawn_server(&dir, |_| {});
+
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_http_status(&mut server.child, &addr, "/readyz", 200).await;
+
+    let token = register_and_authenticate(&addr, "owner-delete", [215u8; 32]).await;
+    let guild_res = http_post_with_bearer(
+        &addr,
+        "/api/v1/guilds",
+        &json!({ "name": "Owned Guild" }).to_string(),
+        &token,
+    )
+    .await;
+    assert_eq!(response_status(&guild_res), 201);
+    let guild_json: serde_json::Value = serde_json::from_str(response_body(&guild_res)).unwrap();
+    let guild_slug = guild_json["data"]["slug"].as_str().unwrap();
+
+    let delete_res = http_delete_with_bearer_and_json(
+        &addr,
+        "/api/v1/users/me",
+        &json!({ "confirm_username": "owner-delete" }).to_string(),
+        &token,
+    )
+    .await;
+    assert_eq!(response_status(&delete_res), 409);
+    let delete_json: serde_json::Value = serde_json::from_str(response_body(&delete_res)).unwrap();
+    assert_eq!(delete_json["error"]["code"], json!("CONFLICT"));
+    assert!(
+        delete_json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(guild_slug)
+    );
+
+    let profile_res = http_response_with_bearer(&addr, "/api/v1/users/me/profile", &token).await;
+    assert_eq!(response_status(&profile_res), 200);
 }
 
 #[tokio::test]

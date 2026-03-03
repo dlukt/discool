@@ -9,6 +9,7 @@ import {
   signChallenge,
 } from './crypto'
 import {
+  deleteMyAccount as deleteMyAccountApi,
   getProfile as getProfileApi,
   getRecoveryEmailStatus as getRecoveryEmailStatusApi,
   logout as logoutApi,
@@ -538,6 +539,32 @@ export const identityState = $state({
     identityState.crossInstanceJoining = false
     identityState.crossInstanceJoinError = null
     await identityState.authenticate()
+  },
+
+  deleteAccount: async (confirmUsername: string): Promise<void> => {
+    const session = identityState.session
+    if (!session) {
+      throw new Error('No active session')
+    }
+    if (confirmUsername !== session.user.username) {
+      throw new Error('Username confirmation must match your username exactly')
+    }
+
+    await deleteMyAccountApi({ confirmUsername })
+
+    authEpoch++
+    identityState.session = null
+    identityState.authenticating = false
+    identityState.authError = 'Account deleted.'
+    identityState.identityNotRegistered = false
+    identityState.crossInstanceJoining = false
+    identityState.crossInstanceJoinError = null
+    identityState.recoveryEmailStatus = null
+    identityState.recoveryEmailLoading = false
+    identityState.recoveryEmailError = null
+    safeRemoveSessionFromStorage()
+    clearLastLocation()
+    setSessionToken(null)
   },
 
   dismissRecoveryNudge: () => {

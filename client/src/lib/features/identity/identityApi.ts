@@ -3,6 +3,7 @@ import { ApiError, apiFetch } from '$lib/api'
 import {
   type AuthSession,
   type CrossInstanceChallengeInput,
+  type DeleteAccountInput,
   type IdentityRecoveryStartResponse,
   type IdentityRecoveryStartResponseWire,
   type PersonalDataExport,
@@ -14,6 +15,7 @@ import {
   type RegisteredUser,
   type RegisteredUserWire,
   type StartRecoveryEmailInput,
+  toDeleteAccountInputWire,
   toIdentityRecoveryStartResponse,
   toPersonalDataExport,
   toRecoveryEmailStatus,
@@ -158,6 +160,16 @@ export function logout(token: string): Promise<void> {
   return apiFetch<void>('/api/v1/auth/logout', {
     method: 'DELETE',
     headers: { authorization: `Bearer ${token}` },
+  })
+}
+
+export function deleteMyAccount(input: DeleteAccountInput): Promise<void> {
+  if (!input.confirmUsername?.trim()) {
+    throw new ApiError('VALIDATION_ERROR', 'confirmUsername is required')
+  }
+  return apiFetch<void>('/api/v1/users/me', {
+    method: 'DELETE',
+    body: JSON.stringify(toDeleteAccountInputWire(input)),
   })
 }
 

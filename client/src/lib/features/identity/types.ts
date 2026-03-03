@@ -37,6 +37,10 @@ export type UpdateProfileInput = {
   avatarColor?: string | null
 }
 
+export type DeleteAccountInput = {
+  confirmUsername: string
+}
+
 export type CrossInstanceChallengeInput = {
   username: string
   displayName?: string | null
@@ -277,6 +281,10 @@ export type UpdateProfileInputWire = {
   avatar_color?: string | null
 }
 
+export type DeleteAccountInputWire = {
+  confirm_username: string
+}
+
 export function toRegisteredUser(wire: RegisteredUserWire): RegisteredUser {
   return {
     id: wire.id,
@@ -300,6 +308,14 @@ export function toUpdateProfileInputWire(
     wire.avatar_color = input.avatarColor ?? null
   }
   return wire
+}
+
+export function toDeleteAccountInputWire(
+  input: DeleteAccountInput,
+): DeleteAccountInputWire {
+  return {
+    confirm_username: input.confirmUsername,
+  }
 }
 
 export function toRecoveryEmailStatus(

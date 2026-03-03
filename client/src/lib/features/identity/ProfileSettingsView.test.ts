@@ -12,11 +12,13 @@ type BlockedUserRecord = {
 }
 
 const {
+  deleteAccount,
   saveProfile,
   startRecoveryEmailAssociation,
   requestPersonalDataExport,
   identityState,
 } = vi.hoisted(() => {
+  const deleteAccount = vi.fn()
   const saveProfile = vi.fn()
   const startRecoveryEmailAssociation = vi.fn()
   const requestPersonalDataExport = vi.fn()
@@ -34,6 +36,7 @@ const {
         createdAt: '2026-02-24T00:00:00.000Z',
       },
     },
+    deleteAccount,
     saveProfile,
     startRecoveryEmailAssociation,
     requestPersonalDataExport,
@@ -46,6 +49,7 @@ const {
     recoveryEmailLoading: false,
   }
   return {
+    deleteAccount,
     saveProfile,
     startRecoveryEmailAssociation,
     requestPersonalDataExport,
@@ -91,6 +95,7 @@ describe('ProfileSettingsView', () => {
     }
     identityState.recoveryEmailStatus = null
     identityState.recoveryEmailLoading = false
+    deleteAccount.mockReset()
     requestPersonalDataExport.mockReset()
     blockState.version = 0
     blockState.blockedUsers.mockReset()
@@ -382,5 +387,69 @@ describe('ProfileSettingsView', () => {
       expect(blockState.unblockUser).toHaveBeenCalledWith('user-2')
     })
     expect(getByText('Unblocked Bob.')).toBeInTheDocument()
+  })
+
+  it('requires exact username confirmation before enabling account deletion', async () => {
+    const { getByRole, getByText, getByTestId } = render(ProfileSettingsView)
+
+    await fireEvent.click(getByRole('button', { name: 'Delete my account' }))
+    expect(
+      getByText(
+        'This will permanently delete your identity and all associated data from this instance. This cannot be undone.',
+      ),
+    ).toBeInTheDocument()
+
+    const confirmButton = getByTestId('delete-account-confirm-button')
+    expect(confirmButton).toBeDisabled()
+
+    await fireEvent.input(getByTestId('delete-account-confirm-input'), {
+      target: { value: 'Alice' },
+    })
+    expect(confirmButton).toBeDisabled()
+
+    await fireEvent.input(getByTestId('delete-account-confirm-input'), {
+      target: { value: 'alice' },
+    })
+    expect(confirmButton).not.toBeDisabled()
+  })
+
+  it('deletes account and shows success toast', async () => {
+    deleteAccount.mockResolvedValue(undefined)
+    const { getByRole, getByTestId } = render(ProfileSettingsView)
+
+    await fireEvent.click(getByRole('button', { name: 'Delete my account' }))
+    await fireEvent.input(getByTestId('delete-account-confirm-input'), {
+      target: { value: 'alice' },
+    })
+    await fireEvent.click(getByTestId('delete-account-confirm-button'))
+
+    await waitFor(() => {
+      expect(deleteAccount).toHaveBeenCalledWith('alice')
+    })
+    expect(toastState.show).toHaveBeenCalledWith({
+      variant: 'success',
+      message: 'Account deleted from this instance',
+    })
+  })
+
+  it('shows deletion API errors in the confirmation dialog', async () => {
+    deleteAccount.mockRejectedValue(
+      new ApiError(
+        'CONFLICT',
+        'Transfer ownership or delete owned guilds first',
+      ),
+    )
+    const { getByRole, getByTestId, findByRole } = render(ProfileSettingsView)
+
+    await fireEvent.click(getByRole('button', { name: 'Delete my account' }))
+    await fireEvent.input(getByTestId('delete-account-confirm-input'), {
+      target: { value: 'alice' },
+    })
+    await fireEvent.click(getByTestId('delete-account-confirm-button'))
+
+    const alert = await findByRole('alert')
+    expect(alert).toHaveTextContent(
+      'Transfer ownership or delete owned guilds first',
+    )
   })
 })

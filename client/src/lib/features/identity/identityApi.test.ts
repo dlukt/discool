@@ -2,11 +2,21 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('$lib/api', () => ({
   apiFetch: vi.fn(),
+  ApiError: class ApiError extends Error {
+    code: string
+
+    constructor(code: string, message: string) {
+      super(message)
+      this.name = 'ApiError'
+      this.code = code
+    }
+  },
 }))
 
 import { apiFetch } from '$lib/api'
 import {
   addUserBlock,
+  deleteMyAccount,
   getProfile,
   getRecoveryEmailStatus,
   listUserBlocks,
@@ -175,6 +185,26 @@ describe('identityApi', () => {
       method: 'DELETE',
       headers: { authorization: 'Bearer token-2' },
     })
+  })
+
+  it('deleteMyAccount sends confirm_username payload', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(undefined)
+
+    await deleteMyAccount({ confirmUsername: 'alice' })
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/users/me', {
+      method: 'DELETE',
+      body: JSON.stringify({
+        confirm_username: 'alice',
+      }),
+    })
+  })
+
+  it('deleteMyAccount rejects blank confirm_username before request', () => {
+    expect(() => deleteMyAccount({ confirmUsername: '   ' })).toThrow(
+      'confirmUsername is required',
+    )
+    expect(apiFetch).not.toHaveBeenCalled()
   })
 
   it('getProfile maps profile payload', async () => {

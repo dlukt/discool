@@ -134,5 +134,5 @@ development_status:
   8-8-user-content-reporting: done
   8-9-report-queue-and-lifecycle: done
   8-10-personal-data-export-gdpr: done
-  8-11-account-deletion-gdpr: backlog
+  8-11-account-deletion-gdpr: done
   epic-8-retrospective: optional

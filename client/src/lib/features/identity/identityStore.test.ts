@@ -11,6 +11,7 @@ vi.mock('./crypto', () => ({
 }))
 
 vi.mock('./identityApi', () => ({
+  deleteMyAccount: vi.fn(),
   getRecoveryEmailStatus: vi.fn(),
   getProfile: vi.fn(),
   logout: vi.fn(),
@@ -31,6 +32,7 @@ import {
   signChallenge,
 } from './crypto'
 import {
+  deleteMyAccount,
   getRecoveryEmailStatus,
   logout,
   recoverIdentityByToken,
@@ -329,6 +331,64 @@ describe('identityStore session persistence', () => {
 
     expect(localStorage.getItem('discool-session')).toBeNull()
     expect(logout).toHaveBeenCalledWith('token-5')
+  })
+
+  it('deleteAccount clears only session state and keeps stored identity', async () => {
+    localStorage.setItem(
+      'discool-session',
+      JSON.stringify({
+        token: 'token-delete',
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        user: {
+          id: 'user-delete',
+          didKey: 'did:key:z6Mk-test',
+          username: 'alice',
+          displayName: 'alice',
+          avatarColor: null,
+          avatarUrl: null,
+          createdAt: '2026-02-24T00:00:00.000Z',
+        },
+      }),
+    )
+    identityState.identity = {
+      publicKey: new Uint8Array(32).fill(1),
+      didKey: 'did:key:z6Mk-test',
+      username: 'alice',
+      avatarColor: null,
+      registeredAt: '2026-02-24T00:00:00.000Z',
+    }
+    identityState.session = JSON.parse(
+      localStorage.getItem('discool-session') ?? 'null',
+    )
+    vi.mocked(deleteMyAccount).mockResolvedValue(undefined)
+
+    await identityState.deleteAccount('alice')
+
+    expect(deleteMyAccount).toHaveBeenCalledWith({ confirmUsername: 'alice' })
+    expect(identityState.session).toBeNull()
+    expect(identityState.identity?.didKey).toBe('did:key:z6Mk-test')
+    expect(localStorage.getItem('discool-session')).toBeNull()
+  })
+
+  it('deleteAccount rejects username mismatches without API call', async () => {
+    identityState.session = {
+      token: 'token-10',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      user: {
+        id: 'user-10',
+        didKey: 'did:key:z6Mk-test',
+        username: 'alice',
+        displayName: 'alice',
+        avatarColor: null,
+        avatarUrl: null,
+        createdAt: '2026-02-24T00:00:00.000Z',
+      },
+    }
+
+    await expect(identityState.deleteAccount('Alice')).rejects.toThrow(
+      'Username confirmation must match your username exactly',
+    )
+    expect(deleteMyAccount).not.toHaveBeenCalled()
   })
 
   it('keeps successful profile updates in session when avatar upload fails', async () => {

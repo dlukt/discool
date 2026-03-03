@@ -13,7 +13,8 @@ use crate::{
     AppError, AppState,
     middleware::auth::AuthenticatedUser,
     services::{
-        email_service, recovery_email_service, user_block_service, user_data_export_service,
+        email_service, recovery_email_service, user_account_deletion_service, user_block_service,
+        user_data_export_service,
         user_profile_service::{self, UpdateProfileInput},
     },
 };
@@ -45,6 +46,11 @@ pub struct BlockUserRequest {
     pub blocked_user_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DeleteAccountRequest {
+    pub confirm_username: Option<String>,
+}
+
 pub async fn get_profile(
     State(state): State<AppState>,
     user: AuthenticatedUser,
@@ -60,6 +66,33 @@ pub async fn create_data_export(
     let export =
         user_data_export_service::build_user_data_export(&state.pool, &user.user_id).await?;
     Ok((StatusCode::OK, Json(json!({ "data": export }))).into_response())
+}
+
+pub async fn delete_account(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    payload: Result<Json<DeleteAccountRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) =
+        payload.map_err(|_| AppError::ValidationError("Invalid request body".to_string()))?;
+    let confirm_username = req
+        .confirm_username
+        .ok_or_else(|| AppError::ValidationError("confirm_username is required".to_string()))?;
+    if confirm_username != user.username {
+        return Err(AppError::ValidationError(
+            "confirm_username must match your username exactly".to_string(),
+        ));
+    }
+
+    user_account_deletion_service::delete_user_account(
+        &state.pool,
+        &state.config.avatar,
+        &state.config.attachments,
+        &user.user_id,
+    )
+    .await?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 pub async fn update_profile(
@@ -419,6 +452,79 @@ mod tests {
         assert!(value["data"]["uploaded_files"].is_array());
         assert!(value["data"]["block_list"].is_array());
         assert!(value["data"]["exported_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn delete_account_returns_422_when_confirm_username_missing() {
+        let state = test_state().await;
+        let user = insert_user(&state).await;
+
+        let err = delete_account(
+            State(state),
+            user,
+            Ok(Json(DeleteAccountRequest {
+                confirm_username: None,
+            })),
+        )
+        .await
+        .unwrap_err();
+
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn delete_account_returns_422_when_confirm_username_mismatches() {
+        let state = test_state().await;
+        let user = insert_user(&state).await;
+
+        let err = delete_account(
+            State(state),
+            user,
+            Ok(Json(DeleteAccountRequest {
+                confirm_username: Some("not-liam".to_string()),
+            })),
+        )
+        .await
+        .unwrap_err();
+
+        let res = err.into_response();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn delete_account_returns_204_and_removes_user_row() {
+        let state = test_state().await;
+        let user = insert_user(&state).await;
+
+        let res = delete_account(
+            State(state.clone()),
+            user.clone(),
+            Ok(Json(DeleteAccountRequest {
+                confirm_username: Some(user.username.clone()),
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let remaining: i64 = match &state.pool {
+            crate::db::DbPool::Postgres(pool) => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = $1")
+                    .bind(&user.user_id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap()
+            }
+            crate::db::DbPool::Sqlite(pool) => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ?1")
+                    .bind(&user.user_id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(remaining, 0);
     }
 
     #[tokio::test]
