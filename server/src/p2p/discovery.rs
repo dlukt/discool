@@ -4,7 +4,7 @@ use chrono::Utc;
 use libp2p::multiaddr::Protocol;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{Multiaddr, PeerId, StreamProtocol, gossipsub, identify, kad};
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 use crate::db::DbPool;

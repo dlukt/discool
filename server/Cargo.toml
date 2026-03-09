@@ -11,7 +11,7 @@ chrono = { version = "0.4", features = ["serde"] }
 config = { version = "0.15", features = ["toml"] }
 ed25519-dalek = { version = "2", features = ["alloc"] }
 dashmap = "6"
-rand = "0.9"
+rand = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "macros", "postgres", "sqlite", "migrate", "uuid", "chrono", "json"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
@@ -27,7 +27,7 @@ lettre = { version = "0.11", default-features = false, features = ["builder", "s
 libp2p = { version = "0.56", features = ["gossipsub", "identify", "kad", "macros", "noise", "tcp", "tokio", "yamux"] }
 sha2 = "0.10"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-scraper = "0.24"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+scraper = "0.25"
 url = "2"
 webrtc = "0.17.1"

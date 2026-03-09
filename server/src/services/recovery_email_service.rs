@@ -6,7 +6,7 @@ use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Duration, Utc};
 use lettre::Address;
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 
 use crate::{

@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use rand::Rng;
+use rand::RngExt;
 
 #[derive(Debug, Clone)]
 pub struct CrossInstanceOnboarding {
