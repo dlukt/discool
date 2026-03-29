@@ -34,6 +34,10 @@ impl Config {
         self.metrics.as_ref().is_some_and(|m| m.enabled)
     }
 
+    pub fn uses_insecure_default_email_server_secret(&self) -> bool {
+        self.email.server_secret.trim() == DEFAULT_EMAIL_SERVER_SECRET.trim()
+    }
+
     pub fn validate(&self) -> Result<(), ConfigValidationError> {
         if self.server.host.trim().is_empty() {
             return Err(ConfigValidationError::new(
@@ -961,8 +965,10 @@ fn default_email_verify_rate_limit_per_hour() -> u32 {
     20
 }
 
+const DEFAULT_EMAIL_SERVER_SECRET: &str = "change-me-in-production";
+
 fn default_email_server_secret() -> String {
-    "change-me-in-production".to_string()
+    DEFAULT_EMAIL_SERVER_SECRET.to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1181,6 +1187,21 @@ mod tests {
     #[test]
     fn metrics_config_defaults_disabled() {
         assert!(!MetricsConfig::default().enabled);
+    }
+
+    #[test]
+    fn default_config_reports_insecure_default_email_server_secret() {
+        let cfg = Config::default();
+
+        assert!(cfg.uses_insecure_default_email_server_secret());
+    }
+
+    #[test]
+    fn custom_email_server_secret_is_not_reported_as_insecure_default() {
+        let mut cfg = Config::default();
+        cfg.email.server_secret = "super-secret-and-unique".to_string();
+
+        assert!(!cfg.uses_insecure_default_email_server_secret());
     }
 
     #[test]

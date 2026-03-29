@@ -229,5 +229,6 @@
 # Per-IP verification attempt limit (default: 20 per hour)
 # verify_rate_limit_per_hour = 20
 #
-# Secret used to derive server-side recovery encryption keys (required in production)
+# Secret used to derive server-side recovery encryption keys (required in production;
+# leaving the example value in place will trigger a startup warning)
 # server_secret = "change-me-in-production"

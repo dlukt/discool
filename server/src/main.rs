@@ -22,6 +22,12 @@ async fn main() {
         std::process::exit(1);
     }
 
+    if config.uses_insecure_default_email_server_secret() {
+        tracing::warn!(
+            "email.server_secret is using the example default; change it before enabling recovery email in production"
+        );
+    }
+
     config.log_summary();
 
     let config = std::sync::Arc::new(config);
