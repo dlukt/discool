@@ -35,7 +35,7 @@ impl Config {
     }
 
     pub fn uses_insecure_default_email_server_secret(&self) -> bool {
-        self.email.server_secret.trim() == DEFAULT_EMAIL_SERVER_SECRET
+        self.email.server_secret.trim() == DEFAULT_EMAIL_SERVER_SECRET.trim()
     }
 
     pub fn validate(&self) -> Result<(), ConfigValidationError> {
