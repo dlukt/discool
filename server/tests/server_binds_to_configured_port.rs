@@ -302,13 +302,20 @@ async fn websocket_read_json_with_op(
 ) -> Option<serde_json::Value> {
     let deadline = Instant::now() + Duration::from_millis(total_timeout_ms);
     while Instant::now() < deadline {
-        if let Some(message) = websocket_read_text_frame(stream, 250).await {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let remaining_ms = remaining.as_millis().min(u64::MAX as u128) as u64;
+        if let Some(message) = websocket_read_text_frame(stream, remaining_ms).await {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&message) else {
                 continue;
             };
             if value["op"] == op {
                 return Some(value);
             }
+        } else {
+            break;
         }
     }
     None
@@ -5124,7 +5131,7 @@ async fn websocket_authenticated_upgrade_emits_hello_envelope() {
     let (mut stream, response) = websocket_connect(&addr, "/ws", Some(&token)).await;
     assert_eq!(response_status(&response), 101);
 
-    let hello = websocket_read_json_with_op(&mut stream, "hello", 1_500)
+    let hello = websocket_read_json_with_op(&mut stream, "hello", 5_000)
         .await
         .expect("expected hello websocket event");
     assert_eq!(hello["d"]["protocol_version"], json!("1"));

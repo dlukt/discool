@@ -32,7 +32,7 @@ jobs:
         run: cd server && cargo clippy -- -D warnings
 
       - name: cargo test
-        run: cd server && cargo test
+        run: cd server && RUST_TEST_THREADS=1 cargo test
 
   client:
     runs-on: ubuntu-latest
