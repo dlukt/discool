@@ -4,9 +4,9 @@ Date: 2026-03-29
 
 ## Scope
 
-- Svelte SPA client served from the Rust backend (`/home/runner/work/discool/discool/client/src/main.ts`)
-- Axum HTTP + WebSocket server (`/home/runner/work/discool/discool/server/src/handlers/mod.rs`)
-- SQLx-backed persistence, local avatar/attachment storage, libp2p, and WebRTC (`/home/runner/work/discool/discool/server/src`)
+- Svelte SPA client served from the Rust backend (`client/src/main.ts`)
+- Axum HTTP + WebSocket server (`server/src/handlers/mod.rs`)
+- SQLx-backed persistence, local avatar/attachment storage, libp2p, and WebRTC (`server/src`)
 
 ## System Summary
 
