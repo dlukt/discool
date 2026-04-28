@@ -71,8 +71,16 @@ fn spawn_server(dir: &Path, configure: impl FnOnce(&mut Command)) -> TestServer 
     }
 }
 
+fn startup_wait_timeout() -> Duration {
+    if std::env::var_os("CI").is_some() {
+        Duration::from_secs(15)
+    } else {
+        Duration::from_secs(5)
+    }
+}
+
 async fn wait_for_bind(child: &mut Child, addr: &str) {
-    let mut remaining = Duration::from_secs(5);
+    let mut remaining = startup_wait_timeout();
     loop {
         if let Ok(stream) = TcpStream::connect(addr).await {
             drop(stream);
@@ -545,7 +553,7 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 }
 
 async fn wait_for_http_status(child: &mut Child, addr: &str, path: &str, expected: u16) {
-    let mut remaining = Duration::from_secs(5);
+    let mut remaining = startup_wait_timeout();
     loop {
         match try_http_status(addr, path).await {
             Ok(status) if status == expected => break,
