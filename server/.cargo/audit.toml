@@ -1,5 +1,8 @@
 [advisories]
 # RUSTSEC-2023-0071 (rsa Marvin Attack) has no fixed upgrade available.
 # It's pulled in via `sqlx-mysql` but Discool only supports Postgres + SQLite.
-ignore = ["RUSTSEC-2023-0071"]
-
+# RUSTSEC-2026-0118 and RUSTSEC-2026-0119 are in `hickory-proto` pulled in by
+# optional libp2p DNS/mDNS crates in libp2p 0.56.0's lock resolution.
+# We do not use DNS/mDNS behaviour, and we're waiting for an upstream libp2p
+# release that updates the affected hickory dependency line.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0118", "RUSTSEC-2026-0119"]
