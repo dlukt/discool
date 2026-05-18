@@ -1,10 +1,15 @@
 [advisories]
-# RUSTSEC-2023-0071 (rsa Marvin Attack) has no fixed upgrade available.
-# It's pulled in via `sqlx-mysql` but Discool only supports Postgres + SQLite.
-# RUSTSEC-2026-0118 and RUSTSEC-2026-0119 are in `hickory-proto` pulled in by
-# optional libp2p DNS/mDNS crates in libp2p 0.56.0's lock resolution.
-# We do not use DNS/mDNS behaviour, and we're waiting for an upstream libp2p
-# release that updates the affected hickory dependency line.
-# RUSTSEC-2024-0436 (paste) is a compile-time proc-macro, unmaintained but
-# no vulnerability. Pulled by netlink-packet-core → if-watch → libp2p.
+# RUSTSEC-2023-0071: rsa 0.9.10 (Marvin Attack). No fixed upgrade.
+# Pulled by sqlx-mysql → sqlx-macros-core (compile-time macro expansion only).
+# Discool enables only postgres+sqlite (default-features = false).
+# Verified: not in `cargo tree --target x86_64-unknown-linux-gnu`.
+
+# RUSTSEC-2026-0118: hickory-proto 0.25.2 NSEC3 unbounded loop. No fix available.
+# RUSTSEC-2026-0119: hickory-proto 0.25.2 CPU exhaustion. Fix in >=0.26.1,
+# but blocked by libp2p-mdns 0.48 which pins ^0.25.2.
+# Both pulled by libp2p-mdns / libp2p-dns — platform-specific deps NOT compiled
+# for x86_64-unknown-linux-gnu. Verified via `cargo tree`.
+
+# RUSTSEC-2024-0436: paste 1.0.15 unmaintained (compile-time proc-macro, no vuln).
+# Pulled by netlink-packet-core 0.8.1 → rtnetlink → if-watch → libp2p.
 ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0118", "RUSTSEC-2026-0119", "RUSTSEC-2024-0436"]
