@@ -314,7 +314,7 @@ async fn websocket_read_json_with_op(
         if remaining.is_zero() {
             break;
         }
-        let remaining_ms = remaining.as_millis().min(u64::MAX as u128) as u64;
+        let remaining_ms = (remaining.as_millis().min(u64::MAX as u128) as u64).max(250);
         if let Some(message) = websocket_read_text_frame(stream, remaining_ms).await {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&message) else {
                 continue;
@@ -322,8 +322,6 @@ async fn websocket_read_json_with_op(
             if value["op"] == op {
                 return Some(value);
             }
-        } else {
-            break;
         }
     }
     None
