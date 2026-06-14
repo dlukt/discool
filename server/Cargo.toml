@@ -31,3 +31,8 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 scraper = "0.25"
 url = "2"
 webrtc = "0.17.1"
+
+[patch.crates-io]
+# Patched to drop the vulnerable yamux 0.12.x line (CVE-2026-32314).
+# See server/patches/libp2p-yamux/README.md for details.
+libp2p-yamux = { path = "patches/libp2p-yamux" }
