@@ -1,6 +1,7 @@
 <script lang="ts">
 // biome-ignore-all lint/correctness/noUnusedVariables: Svelte template usage isn't detected reliably.
 // biome-ignore-all lint/correctness/noUnusedImports: Svelte template usage isn't detected reliably.
+import { untrack } from 'svelte'
 import { ApiError } from '$lib/api'
 
 import { guildState } from '$lib/features/guild/guildStore.svelte'
@@ -913,16 +914,22 @@ $effect(() => {
   activePanel = 'members'
   const guildSlug = activeGuild
 
-  void guildState
-    .loadMembers(guildSlug, true)
-    .catch((err: unknown) => {
-      if (activeGuild !== guildSlug) return
-      errorMessage = messageFromError(err, 'Failed to load members.')
-    })
-    .finally(() => {
-      if (activeGuild !== guildSlug) return
-      loading = false
-    })
+  // untrack: loadMembers reads guildState.memberRoleDataByGuild (the && left
+  // operand of its cache check) and writes it, so tracking it would re-fire
+  // this effect on every load completion and continuously reset
+  // selectedMemberId/activePanel (member menu vanishing, tabs snapping back).
+  untrack(() =>
+    guildState
+      .loadMembers(guildSlug, true)
+      .catch((err: unknown) => {
+        if (activeGuild !== guildSlug) return
+        errorMessage = messageFromError(err, 'Failed to load members.')
+      })
+      .finally(() => {
+        if (activeGuild !== guildSlug) return
+        loading = false
+      }),
+  )
 })
 
 $effect(() => {
