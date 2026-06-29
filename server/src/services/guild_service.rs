@@ -136,6 +136,7 @@ pub async fn update_guild(
     let record = load_guild_with_manage_access(pool, user_id, guild_slug).await?;
     let mut name = record.name.clone();
     let mut description = record.description.clone();
+    let name_provided = input.name.is_some();
 
     if let Some(name_input) = input.name {
         let Some(value) = name_input else {
@@ -148,6 +149,28 @@ pub async fn update_guild(
         description = normalize_description(description_input.as_deref())?;
     }
 
+    // When the name changes, re-derive the slug with the same de-duplication as
+    // create_guild (lobby, lobby-2, ...), excluding this guild's own row.
+    let mut new_slug = record.slug.clone();
+    if name_provided {
+        let base_slug = slugify(&name);
+        let mut resolved: Option<String> = None;
+        for attempt in 0..MAX_GUILD_SLUG_ATTEMPTS {
+            let candidate = slug_for_attempt(&base_slug, attempt);
+            let taken_by_other = guild::find_guild_by_slug(pool, &candidate)
+                .await?
+                .map(|other| other.id != record.id)
+                .unwrap_or(false);
+            if !taken_by_other {
+                resolved = Some(candidate);
+                break;
+            }
+        }
+        new_slug = resolved.ok_or_else(|| {
+            AppError::Conflict("Guild name is already in use".to_string())
+        })?;
+    }
+
     let updated_at = Utc::now().to_rfc3339();
     let rows =
         guild::update_guild_profile(pool, &record.id, &name, description.as_deref(), &updated_at)
@@ -156,7 +179,14 @@ pub async fn update_guild(
         return Err(AppError::NotFound);
     }
 
-    let updated = guild::find_guild_by_slug(pool, guild_slug)
+    if new_slug != record.slug {
+        let slug_rows = guild::update_guild_slug(pool, &record.id, &new_slug, &updated_at).await?;
+        if slug_rows == 0 {
+            return Err(AppError::NotFound);
+        }
+    }
+
+    let updated = guild::find_guild_by_slug(pool, &new_slug)
         .await?
         .ok_or(AppError::NotFound)?;
     Ok(GuildResponse::from_guild(updated, user_id))

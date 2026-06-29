@@ -390,4 +390,82 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.into_response().status(), StatusCode::NOT_FOUND);
     }
+
+    #[tokio::test]
+    async fn update_guild_changes_slug_when_renamed() {
+        let state = test_state().await;
+        let owner = insert_user(&state, "owner").await;
+        insert_guild(&state, &owner.user_id, "my-guild", "My Guild").await;
+
+        let updated = guild_service::update_guild(
+            &state.pool,
+            &owner.user_id,
+            "my-guild",
+            UpdateGuildInput {
+                name: Some(Some("Renamed Guild".to_string())),
+                description: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated.slug, "renamed-guild");
+        assert!(
+            crate::models::guild::find_guild_by_slug(&state.pool, "my-guild")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            crate::models::guild::find_guild_by_slug(&state.pool, "renamed-guild")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn update_guild_dedups_slug_on_collision() {
+        let state = test_state().await;
+        let owner = insert_user(&state, "owner").await;
+        insert_guild(&state, &owner.user_id, "lobby", "Lobby").await;
+        insert_guild(&state, &owner.user_id, "lobby-2", "Lobby Two").await;
+
+        // Rename lobby-2 to "Lobby": base slug "lobby" is taken by the other
+        // guild, so it falls back to its own "lobby-2".
+        let updated = guild_service::update_guild(
+            &state.pool,
+            &owner.user_id,
+            "lobby-2",
+            UpdateGuildInput {
+                name: Some(Some("Lobby".to_string())),
+                description: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.name, "Lobby");
+        assert_eq!(updated.slug, "lobby-2");
+    }
+
+    #[tokio::test]
+    async fn update_guild_keeps_slug_when_only_description_changes() {
+        let state = test_state().await;
+        let owner = insert_user(&state, "owner").await;
+        insert_guild(&state, &owner.user_id, "my-guild", "My Guild").await;
+
+        let updated = guild_service::update_guild(
+            &state.pool,
+            &owner.user_id,
+            "my-guild",
+            UpdateGuildInput {
+                name: None,
+                description: Some(Some("new description".to_string())),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.slug, "my-guild");
+        assert_eq!(updated.description.as_deref(), Some("new description"));
+    }
 }

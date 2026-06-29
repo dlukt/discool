@@ -3647,6 +3647,12 @@ async fn guild_permission_bitflags_authorize_member_mutations_and_invalidate_cac
     )
     .await;
     assert_eq!(response_status(&res), 200);
+    // Renaming the guild updates its slug, so rebind guild_slug to the new one
+    // returned in the response for all subsequent requests, and recompute the
+    // paths that were captured before the rename.
+    let updated_guild: serde_json::Value = serde_json::from_str(response_body(&res)).unwrap();
+    let guild_slug = updated_guild["data"]["slug"].as_str().unwrap().to_string();
+    let role_update_path = format!("/api/v1/guilds/{guild_slug}/roles/{manager_role_id}");
 
     let create_channel_body = json!({ "name": "Operations", "channel_type": "text" }).to_string();
     let res = http_post_with_bearer(

@@ -20,10 +20,11 @@ const allowedIconTypes = new Set(['image/png', 'image/jpeg', 'image/webp'])
 type Props = {
   open: boolean
   guildSlug: string
+  activeChannel?: string
   onClose?: () => void | Promise<void>
 }
 
-let { open, guildSlug, onClose }: Props = $props()
+let { open, guildSlug, activeChannel = '', onClose }: Props = $props()
 let guild = $derived(guildState.bySlug(guildSlug))
 let canEditGuild = $derived(Boolean(guild?.isOwner))
 let roles = $derived(guildState.rolesForGuild(guildSlug))
@@ -232,6 +233,7 @@ function onIconChange(event: Event) {
 async function handleSubmit(event: SubmitEvent) {
   event.preventDefault()
   if (saving || !guild || !canEditGuild) return
+  const previousSlug = guild.slug
 
   errorMessage = null
   statusMessage = null
@@ -240,8 +242,8 @@ async function handleSubmit(event: SubmitEvent) {
 
   saving = true
   try {
-    await guildState.updateGuild(
-      guild.slug,
+    const updated = await guildState.updateGuild(
+      previousSlug,
       {
         name: name.trim(),
         description: description.trim() ? description.trim() : null,
@@ -250,6 +252,11 @@ async function handleSubmit(event: SubmitEvent) {
     )
     selectedIcon = null
     statusMessage = 'Guild settings saved.'
+    // Renaming changes the slug, so the /:guild/:channel URL must follow it or
+    // the shell would treat the old slug as unknown and bounce to home.
+    if (updated.slug !== previousSlug && activeChannel) {
+      await goto(`/${updated.slug}/${activeChannel}`)
+    }
   } catch (err) {
     errorMessage = messageFromError(err, 'Failed to save guild settings.')
   } finally {

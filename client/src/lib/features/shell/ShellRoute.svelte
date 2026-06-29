@@ -1483,6 +1483,7 @@ $effect(() => {
 <GuildSettings
   open={guildSettingsOpen}
   guildSlug={activeGuild}
+  activeChannel={activeChannel}
   onClose={handleCloseGuildSettings}
 />
 <InviteModal

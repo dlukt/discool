@@ -77,7 +77,9 @@ function applyGuildOrder(guilds: Guild[], order = getGuildOrder()): Guild[] {
 }
 
 function upsertGuild(guild: Guild): void {
-  const index = guildState.guilds.findIndex((item) => item.slug === guild.slug)
+  // Match by id, not slug: renaming a guild changes its slug, and matching by
+  // slug would append a duplicate instead of updating the existing entry.
+  const index = guildState.guilds.findIndex((item) => item.id === guild.id)
   let nextGuilds: Guild[]
   if (index >= 0) {
     nextGuilds = [...guildState.guilds]

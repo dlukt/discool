@@ -197,6 +197,36 @@ describe('GuildSettings', () => {
     expect(getByText('Guild settings saved.')).toBeInTheDocument()
   })
 
+  it('navigates to the new slug when a rename changes it', async () => {
+    guildState.updateGuild.mockResolvedValue({
+      ...ownerGuild(),
+      slug: 'renamed-hub',
+      name: 'Renamed Hub',
+    })
+    const { getByLabelText, getByRole, getByText } = render(GuildSettings, {
+      open: true,
+      guildSlug: 'makers-hub',
+      activeChannel: 'general',
+    })
+
+    await fireEvent.input(getByLabelText('Guild name'), {
+      target: { value: 'Renamed Hub' },
+    })
+    await fireEvent.click(getByRole('button', { name: 'Save Guild' }))
+
+    await waitFor(() =>
+      expect(guildState.updateGuild).toHaveBeenCalledWith(
+        'makers-hub',
+        expect.objectContaining({ name: 'Renamed Hub' }),
+        null,
+      ),
+    )
+    await waitFor(() =>
+      expect(goto).toHaveBeenCalledWith('/renamed-hub/general'),
+    )
+    expect(getByText('Guild settings saved.')).toBeInTheDocument()
+  })
+
   it('renders role hierarchy and supports create/edit/delete flows', async () => {
     const { getByRole, getByText, getByLabelText, findByText } = render(
       GuildSettings,

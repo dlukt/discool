@@ -220,6 +220,37 @@ pub async fn update_guild_profile(
     Ok(rows)
 }
 
+pub async fn update_guild_slug(
+    pool: &DbPool,
+    id: &str,
+    slug: &str,
+    updated_at: &str,
+) -> Result<u64, AppError> {
+    let rows = match pool {
+        DbPool::Postgres(pool) => {
+            sqlx::query("UPDATE guilds SET slug = $1, updated_at = $2 WHERE id = $3")
+                .bind(slug)
+                .bind(updated_at)
+                .bind(id)
+                .execute(pool)
+                .await
+                .map(|r| r.rows_affected())
+        }
+        DbPool::Sqlite(pool) => {
+            sqlx::query("UPDATE guilds SET slug = ?1, updated_at = ?2 WHERE id = ?3")
+                .bind(slug)
+                .bind(updated_at)
+                .bind(id)
+                .execute(pool)
+                .await
+                .map(|r| r.rows_affected())
+        }
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(rows)
+}
+
 pub async fn update_default_channel_slug(
     pool: &DbPool,
     guild_id: &str,
