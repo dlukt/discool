@@ -193,7 +193,10 @@ pub fn router(state: AppState) -> Router {
             "/guilds/{guild_slug}/members/{member_user_id}/roles",
             patch(roles::update_member_roles),
         )
-        .route("/guilds/{guild_slug}", patch(guilds::update_guild))
+        .route(
+            "/guilds/{guild_slug}",
+            patch(guilds::update_guild).delete(guilds::delete_guild),
+        )
         .route(
             "/guilds/{guild_slug}/icon",
             get(guilds::get_guild_icon).post(guilds::upload_guild_icon),

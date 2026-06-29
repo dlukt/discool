@@ -1,6 +1,8 @@
 <script lang="ts">
 // biome-ignore-all lint/correctness/noUnusedVariables: Svelte template usage isn't detected reliably.
+import { goto } from '@mateothegreat/svelte5-router'
 import { ApiError } from '$lib/api'
+import { toastState } from '$lib/feedback/toastStore.svelte'
 
 import { guildState } from './guildStore.svelte'
 import {
@@ -71,6 +73,14 @@ let deleteRoleTarget = $state<GuildRole | null>(null)
 let deleteRoleError = $state<string | null>(null)
 let deleteRoleSubmitting = $state(false)
 
+let deleteGuildDialogOpen = $state(false)
+let deleteGuildConfirmInput = $state('')
+let deleteGuildError = $state<string | null>(null)
+let deleteGuildSubmitting = $state(false)
+let deleteGuildConfirmed = $derived(
+  guild !== null && deleteGuildConfirmInput.trim() === guild.name,
+)
+
 let permissionsDialogOpen = $state(false)
 let permissionsRoleTarget = $state<GuildRole | null>(null)
 let permissionsBitflag = $state(0)
@@ -140,6 +150,10 @@ function resetRoleDialogs() {
   deleteRoleDialogOpen = false
   deleteRoleTarget = null
   deleteRoleError = null
+
+  deleteGuildDialogOpen = false
+  deleteGuildConfirmInput = ''
+  deleteGuildError = null
 
   permissionsDialogOpen = false
   permissionsRoleTarget = null
@@ -442,6 +456,39 @@ async function confirmDeleteRole() {
     deleteRoleError = messageFromError(err, 'Failed to delete role.')
   } finally {
     deleteRoleSubmitting = false
+  }
+}
+
+function openDeleteGuildDialog() {
+  if (!canEditGuild) return
+  deleteGuildConfirmInput = ''
+  deleteGuildError = null
+  deleteGuildDialogOpen = true
+}
+
+function closeDeleteGuildDialog() {
+  deleteGuildDialogOpen = false
+  deleteGuildConfirmInput = ''
+  deleteGuildError = null
+}
+
+async function confirmDeleteGuild() {
+  if (deleteGuildSubmitting || !guild || !canEditGuild || !deleteGuildConfirmed)
+    return
+
+  const deletedSlug = guild.slug
+  deleteGuildSubmitting = true
+  deleteGuildError = null
+  try {
+    await guildState.deleteGuild(deletedSlug)
+    closeDeleteGuildDialog()
+    await onClose?.()
+    toastState.show({ variant: 'success', message: 'Guild deleted.' })
+    await goto('/')
+  } catch (err) {
+    deleteGuildError = messageFromError(err, 'Failed to delete guild.')
+  } finally {
+    deleteGuildSubmitting = false
   }
 }
 
@@ -848,6 +895,36 @@ async function handleClose() {
             </ul>
           {/if}
         </section>
+
+        <section
+          class="mt-6 border-t border-border pt-5"
+          aria-labelledby="guild-danger-zone-heading"
+        >
+          <h3
+            id="guild-danger-zone-heading"
+            class="text-base font-semibold text-destructive"
+          >
+            Danger Zone
+          </h3>
+          <div
+            class="mt-3 flex flex-col gap-3 rounded-md border border-destructive/30 bg-destructive/5 p-4 sm:flex-row sm:items-center sm:justify-between"
+          >
+            <div>
+              <p class="text-sm font-medium text-foreground">Delete guild</p>
+              <p class="text-sm text-muted-foreground">
+                Permanently deletes this guild and all of its channels,
+                messages, roles, and members. This cannot be undone.
+              </p>
+            </div>
+            <button
+              type="button"
+              class="rounded-md bg-destructive px-3 py-2 text-sm font-medium text-destructive-foreground hover:opacity-90"
+              onclick={openDeleteGuildDialog}
+            >
+              Delete guild
+            </button>
+          </div>
+        </section>
       {/if}
     </div>
   </div>
@@ -1105,6 +1182,75 @@ async function handleClose() {
             disabled={deleteRoleSubmitting}
           >
             {deleteRoleSubmitting ? 'Deleting...' : 'Delete role'}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if deleteGuildDialogOpen && guild}
+    <div
+      class="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
+      role="presentation"
+    >
+      <div
+        class="w-full max-w-md rounded-lg border border-border bg-card p-6 shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Delete guild"
+      >
+        <header class="mb-4">
+          <h3 class="text-lg font-semibold text-destructive">
+            Delete {guild.name}
+          </h3>
+        </header>
+
+        <p class="mb-3 text-sm text-foreground">
+          This permanently deletes <strong>{guild.name}</strong> and all of its
+          channels, messages, roles, and members.
+        </p>
+        <p class="mb-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+          This action is irreversible.
+        </p>
+
+        <p class="mb-2 text-sm text-foreground">
+          Type <strong>{guild.name}</strong> to confirm:
+        </p>
+        <input
+          type="text"
+          class="mb-4 w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground"
+          bind:value={deleteGuildConfirmInput}
+          placeholder={guild.name}
+          aria-label={`Type ${guild.name} to confirm`}
+          autocomplete="off"
+          disabled={deleteGuildSubmitting}
+        />
+
+        {#if deleteGuildError}
+          <p
+            class="mb-4 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive"
+            role="alert"
+          >
+            {deleteGuildError}
+          </p>
+        {/if}
+
+        <div class="flex items-center justify-end gap-2">
+          <button
+            type="button"
+            class="rounded-md bg-muted px-3 py-2 text-sm text-foreground hover:opacity-90"
+            onclick={closeDeleteGuildDialog}
+            disabled={deleteGuildSubmitting}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="rounded-md bg-destructive px-3 py-2 text-sm font-medium text-destructive-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+            onclick={() => void confirmDeleteGuild()}
+            disabled={deleteGuildSubmitting || !deleteGuildConfirmed}
+          >
+            {deleteGuildSubmitting ? 'Deleting...' : 'Delete guild'}
           </button>
         </div>
       </div>

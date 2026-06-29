@@ -294,3 +294,23 @@ pub async fn update_guild_icon(
 
     Ok(rows)
 }
+
+pub async fn delete_guild(pool: &DbPool, guild_id: &str) -> Result<u64, AppError> {
+    // A single DELETE cascades to all child rows (channels, categories,
+    // messages, members, roles, bans, etc.) via ON DELETE CASCADE FKs.
+    let rows = match pool {
+        DbPool::Postgres(pool) => sqlx::query("DELETE FROM guilds WHERE id = $1")
+            .bind(guild_id)
+            .execute(pool)
+            .await
+            .map(|r| r.rows_affected()),
+        DbPool::Sqlite(pool) => sqlx::query("DELETE FROM guilds WHERE id = ?1")
+            .bind(guild_id)
+            .execute(pool)
+            .await
+            .map(|r| r.rows_affected()),
+    }
+    .map_err(|err| AppError::Internal(err.to_string()))?;
+
+    Ok(rows)
+}

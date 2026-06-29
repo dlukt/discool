@@ -14,13 +14,21 @@ const { guildState } = vi.hoisted(() => {
     updateRole: vi.fn(),
     deleteRole: vi.fn(),
     reorderRoles: vi.fn(),
+    deleteGuild: vi.fn(),
   }
   return { guildState }
 })
 
+const { goto } = vi.hoisted(() => ({ goto: vi.fn() }))
+const { toastState } = vi.hoisted(() => ({
+  toastState: { show: vi.fn() },
+}))
+
 vi.mock('./guildStore.svelte', () => ({
   guildState,
 }))
+vi.mock('@mateothegreat/svelte5-router', () => ({ goto }))
+vi.mock('$lib/feedback/toastStore.svelte', () => ({ toastState }))
 
 import GuildSettings from './GuildSettings.svelte'
 
@@ -157,6 +165,9 @@ describe('GuildSettings', () => {
       removedAssignmentCount: 1,
     })
     guildState.reorderRoles.mockResolvedValue(ownerRoles())
+    guildState.deleteGuild.mockResolvedValue(undefined)
+    goto.mockReset()
+    goto.mockResolvedValue(undefined)
   })
 
   it('saves owner edits for guild name and description', async () => {
@@ -445,5 +456,59 @@ describe('GuildSettings', () => {
     ).not.toBeInTheDocument()
     expect(queryByLabelText('Edit role Moderators')).not.toBeInTheDocument()
     expect(queryByLabelText('Delete role Moderators')).not.toBeInTheDocument()
+  })
+
+  it('deletes the guild after typing its name to confirm', async () => {
+    const onClose = vi.fn()
+    const { getByRole, getByLabelText } = render(GuildSettings, {
+      open: true,
+      guildSlug: 'makers-hub',
+      onClose,
+    })
+
+    // Danger Zone lives in the owner-only block.
+    await fireEvent.click(getByRole('button', { name: 'Delete guild' }))
+    const dialog = getByRole('dialog', { name: 'Delete guild' })
+    const confirmButton = within(dialog).getByRole('button', {
+      name: 'Delete guild',
+    })
+
+    // Confirm is disabled until the typed name matches exactly.
+    expect(confirmButton).toBeDisabled()
+    await fireEvent.input(getByLabelText('Type Makers Hub to confirm'), {
+      target: { value: 'Makers Hub' },
+    })
+    expect(confirmButton).not.toBeDisabled()
+
+    await fireEvent.click(confirmButton)
+
+    await waitFor(() => {
+      expect(guildState.deleteGuild).toHaveBeenCalledWith('makers-hub')
+    })
+    await waitFor(() => expect(onClose).toHaveBeenCalled())
+    await waitFor(() => expect(goto).toHaveBeenCalledWith('/'))
+    expect(toastState.show).toHaveBeenCalledWith({
+      variant: 'success',
+      message: 'Guild deleted.',
+    })
+  })
+
+  it('keeps the delete-guild confirm button disabled on a mismatched name', async () => {
+    const { getByRole, getByLabelText } = render(GuildSettings, {
+      open: true,
+      guildSlug: 'makers-hub',
+    })
+
+    await fireEvent.click(getByRole('button', { name: 'Delete guild' }))
+    const dialog = getByRole('dialog', { name: 'Delete guild' })
+    const confirmButton = within(dialog).getByRole('button', {
+      name: 'Delete guild',
+    })
+
+    await fireEvent.input(getByLabelText('Type Makers Hub to confirm'), {
+      target: { value: 'makers hub' },
+    })
+    expect(confirmButton).toBeDisabled()
+    expect(guildState.deleteGuild).not.toHaveBeenCalled()
   })
 })

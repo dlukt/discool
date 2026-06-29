@@ -7,6 +7,7 @@ import type { WsEnvelope } from '$lib/ws/protocol'
 import {
   createGuild as createGuildApi,
   createRole as createRoleApi,
+  deleteGuild as deleteGuildApi,
   deleteRole as deleteRoleApi,
   listBans as listBansApi,
   listGuilds as listGuildsApi,
@@ -345,6 +346,26 @@ export const guildState = $state({
     } catch (err) {
       guildState.error =
         err instanceof Error ? err.message : 'Failed to delete role'
+      throw err
+    } finally {
+      guildState.saving = false
+    }
+  },
+
+  deleteGuild: async (guildSlug: string): Promise<void> => {
+    guildState.saving = true
+    guildState.error = null
+    try {
+      await deleteGuildApi(guildSlug)
+      guildState.guilds = guildState.guilds.filter(
+        (guild) => guild.slug !== guildSlug,
+      )
+      delete guildState.rolesByGuild[guildSlug]
+      delete guildState.memberRoleDataByGuild[guildSlug]
+      delete guildState.bansByGuild[guildSlug]
+    } catch (err) {
+      guildState.error =
+        err instanceof Error ? err.message : 'Failed to delete guild'
       throw err
     } finally {
       guildState.saving = false

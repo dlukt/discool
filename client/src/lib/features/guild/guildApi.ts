@@ -133,6 +133,12 @@ export function deleteRole(
   ).then(toDeleteGuildRoleResult)
 }
 
+export function deleteGuild(guildSlug: string): Promise<void> {
+  return apiFetch<void>(`/api/v1/guilds/${encodeURIComponent(guildSlug)}`, {
+    method: 'DELETE',
+  })
+}
+
 export function reorderRoles(
   guildSlug: string,
   input: ReorderGuildRolesInput,

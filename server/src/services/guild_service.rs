@@ -258,6 +258,37 @@ pub async fn save_guild_icon(
     Ok(GuildResponse::from_guild(updated, user_id))
 }
 
+pub async fn delete_guild(
+    pool: &DbPool,
+    avatar_config: &AvatarConfig,
+    user_id: &str,
+    guild_slug: &str,
+) -> Result<(), AppError> {
+    let record = load_owned_guild(pool, user_id, guild_slug).await?;
+    let rows = guild::delete_guild(pool, &record.id).await?;
+    if rows == 0 {
+        return Err(AppError::NotFound);
+    }
+
+    // Best-effort icon cleanup; the row is already gone and cascades applied.
+    if let Some(icon_key) = record.icon_storage_key
+        && storage_key_is_safe(&icon_key)
+    {
+        let path = guild_icon_file_path(&avatar_config.upload_dir, &icon_key);
+        if let Err(err) = fs::remove_file(&path).await
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                error = %err,
+                path = %path.display(),
+                "Failed to remove guild icon file during guild deletion"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn load_guild_icon(
     pool: &DbPool,
     avatar_config: &AvatarConfig,

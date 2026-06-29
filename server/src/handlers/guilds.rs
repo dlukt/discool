@@ -77,6 +77,16 @@ pub async fn update_guild(
     Ok((StatusCode::OK, Json(json!({ "data": guild }))).into_response())
 }
 
+pub async fn delete_guild(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(guild_slug): Path<String>,
+) -> Result<Response, AppError> {
+    guild_service::delete_guild(&state.pool, &state.config.avatar, &user.user_id, &guild_slug)
+        .await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 pub async fn upload_guild_icon(
     State(state): State<AppState>,
     user: AuthenticatedUser,
@@ -141,4 +151,243 @@ pub async fn get_guild_icon(
         header::HeaderValue::from_static("private, max-age=0, must-revalidate"),
     );
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use dashmap::DashMap;
+    use uuid::Uuid;
+
+    use crate::db::DbPool;
+
+    use super::*;
+
+    async fn test_state() -> AppState {
+        let mut cfg = crate::config::Config::default();
+        cfg.database = Some(crate::config::DatabaseConfig {
+            url: "sqlite::memory:".to_string(),
+            max_connections: 1,
+        });
+        let pool = crate::db::init_pool(cfg.database.as_ref().unwrap())
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        AppState {
+            config: Arc::new(cfg),
+            pool,
+            start_time: Instant::now(),
+            challenges: Arc::new(DashMap::new()),
+            p2p_metadata: Arc::new(std::sync::RwLock::new(
+                crate::p2p::P2pMetadata::default(),
+            )),
+            voice_runtime: Arc::new(crate::webrtc::voice_channel::VoiceRuntime::new(
+                crate::config::VoiceConfig::default(),
+            )),
+        }
+    }
+
+    async fn insert_user(state: &AppState, username: &str) -> AuthenticatedUser {
+        let user_id = Uuid::new_v4().to_string();
+        let did_key = format!("did:key:{}", Uuid::new_v4());
+        let now = chrono::Utc::now().to_rfc3339();
+        match &state.pool {
+            DbPool::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO users (id, did_key, public_key_multibase, username, avatar_color, created_at, updated_at) VALUES ($1, $2, $3, $4, NULL, $5, $6)",
+                )
+                .bind(&user_id)
+                .bind(&did_key)
+                .bind("z6Mk-test")
+                .bind(username)
+                .bind(&now)
+                .bind(&now)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            DbPool::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO users (id, did_key, public_key_multibase, username, avatar_color, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+                )
+                .bind(&user_id)
+                .bind(&did_key)
+                .bind("z6Mk-test")
+                .bind(username)
+                .bind(&now)
+                .bind(&now)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+        AuthenticatedUser {
+            user_id,
+            session_id: "session-id".to_string(),
+            username: username.to_string(),
+            did_key,
+        }
+    }
+
+    async fn insert_guild(state: &AppState, owner_id: &str, slug: &str, name: &str) -> String {
+        let guild_id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        match &state.pool {
+            DbPool::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO guilds (id, slug, name, owner_id, default_channel_slug, created_at, updated_at) VALUES ($1, $2, $3, $4, 'general', $5, $6)",
+                )
+                .bind(&guild_id)
+                .bind(slug)
+                .bind(name)
+                .bind(owner_id)
+                .bind(&now)
+                .bind(&now)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            DbPool::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO guilds (id, slug, name, owner_id, default_channel_slug, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'general', ?5, ?6)",
+                )
+                .bind(&guild_id)
+                .bind(slug)
+                .bind(name)
+                .bind(owner_id)
+                .bind(&now)
+                .bind(&now)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+        guild_id
+    }
+
+    async fn insert_channel(state: &AppState, guild_id: &str, slug: &str) {
+        let channel_id = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        match &state.pool {
+            DbPool::Postgres(pool) => {
+                sqlx::query(
+                    "INSERT INTO channels (id, guild_id, slug, name, channel_type, position, created_at, updated_at) VALUES ($1, $2, $3, $3, 'text', 0, $4, $5)",
+                )
+                .bind(&channel_id)
+                .bind(guild_id)
+                .bind(slug)
+                .bind(&now)
+                .bind(&now)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            DbPool::Sqlite(pool) => {
+                sqlx::query(
+                    "INSERT INTO channels (id, guild_id, slug, name, channel_type, position, created_at, updated_at) VALUES (?1, ?2, ?3, ?3, 'text', 0, ?4, ?5)",
+                )
+                .bind(&channel_id)
+                .bind(guild_id)
+                .bind(slug)
+                .bind(&now)
+                .bind(&now)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+    }
+
+    async fn count_guilds_by_id(state: &AppState, guild_id: &str) -> i64 {
+        match &state.pool {
+            DbPool::Postgres(pool) => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM guilds WHERE id = $1")
+                    .bind(guild_id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap()
+            }
+            DbPool::Sqlite(pool) => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM guilds WHERE id = ?1")
+                    .bind(guild_id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap()
+            }
+        }
+    }
+
+    async fn count_channels_by_guild(state: &AppState, guild_id: &str) -> i64 {
+        match &state.pool {
+            DbPool::Postgres(pool) => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE guild_id = $1")
+                    .bind(guild_id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap()
+            }
+            DbPool::Sqlite(pool) => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE guild_id = ?1")
+                    .bind(guild_id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_guild_returns_204_and_cascades_to_channels() {
+        let state = test_state().await;
+        let owner = insert_user(&state, "owner").await;
+        let guild_id = insert_guild(&state, &owner.user_id, "my-guild", "My Guild").await;
+        insert_channel(&state, &guild_id, "general").await;
+        assert_eq!(
+            count_channels_by_guild(&state, &guild_id).await,
+            1
+        );
+
+        let res = delete_guild(
+            State(state.clone()),
+            owner.clone(),
+            Path("my-guild".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        assert_eq!(count_guilds_by_id(&state, &guild_id).await, 0);
+        assert_eq!(count_channels_by_guild(&state, &guild_id).await, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_guild_returns_403_for_non_owner() {
+        let state = test_state().await;
+        let owner = insert_user(&state, "owner").await;
+        let intruder = insert_user(&state, "intruder").await;
+        let guild_id = insert_guild(&state, &owner.user_id, "owner-guild", "Owner Guild").await;
+
+        let err = delete_guild(
+            State(state.clone()),
+            intruder,
+            Path("owner-guild".to_string()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+        assert_eq!(count_guilds_by_id(&state, &guild_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_guild_returns_404_for_unknown_slug() {
+        let state = test_state().await;
+        let owner = insert_user(&state, "owner").await;
+
+        let err = delete_guild(State(state), owner, Path("does-not-exist".to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.into_response().status(), StatusCode::NOT_FOUND);
+    }
 }
