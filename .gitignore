@@ -1,5 +1,6 @@
 /server/target/
 /server/patches/libp2p-yamux/target/
+/server/data/
 /client/node_modules/
 /client/dist/
 
