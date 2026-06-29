@@ -25,9 +25,11 @@ services:
     ports:
       - '3000:3000'
       - '5173:5173'
+    # NOTE: use `bash -c`, not `bash -lc`. A login shell (-l) sources /etc/profile,
+    # which resets PATH and drops /usr/local/cargo/bin — breaking `cargo`.
     command:
       - bash
-      - -lc
+      - -c
       - |
           set -euo pipefail
 
