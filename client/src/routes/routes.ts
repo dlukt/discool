@@ -9,7 +9,8 @@ const DM_LOCATION_RE = /^\/dm\/[^/]+$/
 // when the loader's constructor.name === "AsyncFunction". A plain `() => import`
 // is a "Function", so the router would assign the loader itself as the component
 // and render nothing.
-const shellComponent = async () => import('$lib/features/shell/ShellRoute.svelte')
+const shellComponent = async () =>
+  import('$lib/features/shell/ShellRoute.svelte')
 
 function normalizePath(path: string): string {
   const [pathname] = path.trim().split('?')
@@ -75,8 +76,13 @@ export function createAuthenticatedRoutes(isAdmin: boolean): RouteConfig[] {
   const routes = [
     shellRoute(/^\/(?<fallback>.*)$/, 'home'),
     shellRoute('/', 'home'),
-    shellRoute('/:guild/:channel', 'channel'),
-    shellRoute('/dm/:dm', 'dm'),
+    // Regex named groups, not ":param": @mateothegreat/svelte5-router treats a
+    // string path as a literal (or regex if it has metacharacters); ":guild" has
+    // no metacharacters, so "/:guild/:channel" would only match that exact
+    // literal and never a real path like /lobby-2/general. Named groups are
+    // populated into route.params (guild/channel/dm) by the regexp evaluator.
+    shellRoute(/^\/(?<guild>[^/]+)\/(?<channel>[^/]+)$/, 'channel'),
+    shellRoute(/^\/dm\/(?<dm>[^/]+)$/, 'dm'),
     shellRoute('/settings', 'settings'),
   ]
 

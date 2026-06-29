@@ -38,9 +38,23 @@ describe('routes', () => {
 
     expect(adminRoutes.some((route) => route.path === '/admin')).toBe(true)
     expect(memberRoutes.some((route) => route.path === '/admin')).toBe(false)
-    expect(adminRoutes.some((route) => route.path === '/:guild/:channel')).toBe(
-      true,
-    )
-    expect(adminRoutes.some((route) => route.path === '/dm/:dm')).toBe(true)
+
+    // guild/channel and dm routes use regex named groups: this router does not
+    // treat ":param" in string paths as parameters, so verify the routes match
+    // real paths and capture the params ShellRoute reads (guild/channel/dm).
+    const byMode = (mode: string) =>
+      adminRoutes.find(
+        (route) =>
+          route.path instanceof RegExp &&
+          (route as { props?: { mode?: string } }).props?.mode === mode,
+      ) as { path: RegExp } | undefined
+
+    expect(byMode('channel')?.path.exec('/lobby/general')?.groups).toEqual({
+      guild: 'lobby',
+      channel: 'general',
+    })
+    expect(byMode('dm')?.path.exec('/dm/abc123')?.groups).toEqual({
+      dm: 'abc123',
+    })
   })
 })
