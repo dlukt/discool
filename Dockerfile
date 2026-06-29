@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.93-bookworm AS chef
+FROM rust:1.96-trixie AS chef
 
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -38,23 +38,24 @@ WORKDIR /app/server
 COPY server/ ./
 RUN cargo build --release
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-# libssl3 is included for compatibility with common Rust deps; pg_dump is required for backup support.
+# ca-certificates provides the root CAs that rustls-native-certs reads at runtime; pg_dump (v18,
+# matching the postgres:18 server) is required for backup support. No libssl needed: the binary is
+# rustls-only (no openssl-sys), and openssl-probe (via rustls-native-certs) only locates the cert bundle.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gnupg \
-    libssl3 \
   && install -d -m 0755 /etc/apt/keyrings \
   && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     | gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg \
-  && echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+  && echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" \
     > /etc/apt/sources.list.d/postgresql-pgdg.list \
   && apt-get update \
-  && apt-get install -y --no-install-recommends postgresql-client-16 \
+  && apt-get install -y --no-install-recommends postgresql-client-18 \
   && apt-get purge -y --auto-remove curl gnupg \
   && rm -rf /var/lib/apt/lists/*
 

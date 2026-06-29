@@ -20,7 +20,7 @@ services:
     #   - ./config.toml:/etc/discool/config.toml:ro
 
   postgres:
-    image: postgres:16-bookworm
+    image: postgres:18-trixie
     environment:
       POSTGRES_USER: discool
       POSTGRES_PASSWORD: discool
