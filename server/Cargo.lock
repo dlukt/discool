@@ -997,7 +997,6 @@ dependencies = [
  "ed25519-dalek",
  "lettre",
  "libp2p",
- "quinn-proto",
  "rand 0.10.1",
  "regex",
  "reqwest",
