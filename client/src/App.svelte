@@ -289,7 +289,10 @@ $effect(() => {
   if (
     !identityState.session ||
     typeof window === 'undefined' ||
-    initialRouteResolved ||
+    // Read untracked: we write initialRouteResolved below, and reading it
+    // tracked would re-run this effect, whose cleanup cancels the dismiss
+    // timer — leaving shellBootstrapping stuck on ("Loading workspace…").
+    untrack(() => initialRouteResolved) ||
     inviteCode
   )
     return
