@@ -5,7 +5,11 @@ export type ShellMode = 'home' | 'channel' | 'dm' | 'settings' | 'admin'
 const CHANNEL_LOCATION_RE = /^\/(?!dm\/)([^/]+)\/([^/]+)$/
 const DM_LOCATION_RE = /^\/dm\/[^/]+$/
 
-const shellComponent = () => import('$lib/features/shell/ShellRoute.svelte')
+// Must be `async`: @mateothegreat/svelte5-router only awaits the dynamic import
+// when the loader's constructor.name === "AsyncFunction". A plain `() => import`
+// is a "Function", so the router would assign the loader itself as the component
+// and render nothing.
+const shellComponent = async () => import('$lib/features/shell/ShellRoute.svelte')
 
 function normalizePath(path: string): string {
   const [pathname] = path.trim().split('?')
@@ -64,7 +68,11 @@ export function createAuthenticatedRoutes(isAdmin: boolean): RouteConfig[] {
     shellRoute('/settings', 'settings'),
     shellRoute('/dm/:dm', 'dm'),
     shellRoute('/:guild/:channel', 'channel'),
-    shellRoute(/^\/$/, 'home'),
+    // Use a plain "/" (not a /^\/$/ regex) so the router recognizes this as its
+    // default route: with no basePath, the router normalizes "/" to "" before
+    // matching, no regex matches "", and a non-string path isn't in the
+    // router's default-route list — so "/" would otherwise render nothing.
+    shellRoute('/', 'home'),
     shellRoute(/^\/(?<fallback>.*)$/, 'home'),
   ]
 

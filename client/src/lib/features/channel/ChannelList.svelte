@@ -2,7 +2,7 @@
 // biome-ignore-all lint/correctness/noUnusedVariables: Svelte template usage isn't detected reliably.
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import { goto, route as routerLink } from '@mateothegreat/svelte5-router'
-import { onMount, tick } from 'svelte'
+import { onMount, tick, untrack } from 'svelte'
 
 import { ApiError } from '$lib/api'
 import { guildState } from '$lib/features/guild/guildStore.svelte'
@@ -151,16 +151,27 @@ onMount(() => {
 $effect(() => {
   if (!activeGuild) return
   loadError = null
-  void channelState.loadChannels(activeGuild).catch((err: unknown) => {
-    loadError = messageFromError(err, 'Failed to load channels.')
-  })
+  // untrack: loadChannels reads/writes channelState (loading, activeGuild,
+  // caches) synchronously, which this effect would otherwise subscribe to —
+  // causing it to re-fire on every write and spam GET /guilds/:g/channels.
+  // We only want to reload when the activeGuild prop changes.
+  untrack(() =>
+    channelState.loadChannels(activeGuild).catch((err: unknown) => {
+      loadError = messageFromError(err, 'Failed to load channels.')
+    }),
+  )
 })
 
 $effect(() => {
   if (!activeGuild || guild?.isOwner) return
-  void guildState.loadMembers(activeGuild).catch(() => {
-    // Member role data is loaded opportunistically for channel permission gating.
-  })
+  // untrack: same reason as loadChannels above — loadMembers reads/writes
+  // guildState and would re-fire this effect (spamming the members endpoint)
+  // until the guild is cached, or forever if the guild 404s.
+  untrack(() =>
+    guildState.loadMembers(activeGuild).catch(() => {
+      // Member role data is loaded opportunistically for channel permission gating.
+    }),
+  )
 })
 
 $effect(() => {
