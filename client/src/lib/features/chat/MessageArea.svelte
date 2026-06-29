@@ -1,7 +1,7 @@
 <script lang="ts">
 // biome-ignore-all lint/correctness/noUnusedVariables: Svelte template usage isn't detected reliably.
 // biome-ignore-all lint/correctness/noUnusedImports: Svelte template usage isn't detected reliably.
-import { onMount, tick } from 'svelte'
+import { onMount, tick, untrack } from 'svelte'
 import AdminPanel from '$lib/components/AdminPanel.svelte'
 import { guildState } from '$lib/features/guild/guildStore.svelte'
 import {
@@ -1301,14 +1301,20 @@ $effect(() => {
 
 $effect(() => {
   if (!isChannelMode || !activeGuild || activeGuildRecord?.isOwner) return
-  void guildState.loadMembers(activeGuild).catch(() => {
-    // Member role data is loaded opportunistically for attachment permission gating.
-  })
+  // untrack: loadMembers reads/writes guildState.memberRoleDataByGuild, which
+  // would re-fire this effect (member data loop) for non-owners.
+  untrack(() =>
+    guildState.loadMembers(activeGuild).catch(() => {
+      // Member role data is loaded opportunistically for attachment permission gating.
+    }),
+  )
 })
 
 $effect(() => {
   if (!isChannelMode || !activeGuild) return
-  void muteStatusState.refresh(activeGuild).catch(() => {})
+  // untrack: refresh reads/writes muteStatusState (loading/status/version),
+  // which would re-fire this effect in a loop.
+  untrack(() => muteStatusState.refresh(activeGuild).catch(() => {}))
 })
 
 $effect(() => {
