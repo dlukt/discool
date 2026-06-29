@@ -1,7 +1,7 @@
 <script lang="ts">
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
 import { goto, Router } from '@mateothegreat/svelte5-router'
-import { onMount } from 'svelte'
+import { onMount, untrack } from 'svelte'
 import { ApiError, getInstanceStatus, type InstanceStatus } from '$lib/api'
 
 // biome-ignore lint/correctness/noUnusedImports: Used in Svelte markup; Biome doesn't detect template usage.
@@ -260,17 +260,29 @@ $effect(() => {
 
 $effect(() => {
   if (identityState.session) return
-  guildState.clear()
-  channelState.clear()
-  dmState.clearAll()
-  blockState.clearAll()
-  initialRouteResolved = false
-  shellBootstrapping = true
+  // The store clears (e.g. dmState.clearAll's unconditional version bump) read
+  // and write state this effect must not track, or it loops forever
+  // (effect_update_depth_exceeded). Untrack so this effect only depends on the
+  // session guard above.
+  untrack(() => {
+    guildState.clear()
+    channelState.clear()
+    dmState.clearAll()
+    blockState.clearAll()
+    initialRouteResolved = false
+    shellBootstrapping = true
+  })
 })
 
 $effect(() => {
   const userId = identityState.session?.user.id ?? null
   void blockState.initialize(userId)
+})
+
+$effect(() => {
+  const blockVersion = blockState.version
+  void blockVersion
+  dmState.refreshVisibleConversations()
 })
 
 $effect(() => {

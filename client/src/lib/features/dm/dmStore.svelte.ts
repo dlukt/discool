@@ -235,9 +235,3 @@ export const dmState = $state({
     dmState.version += 1
   },
 })
-
-$effect(() => {
-  const _blockVersion = blockState.version
-  void _blockVersion
-  dmState.refreshVisibleConversations()
-})

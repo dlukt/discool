@@ -86,7 +86,11 @@ pub async fn init_pool(config: &DatabaseConfig) -> Result<DbPool, sqlx::Error> {
             .acquire_timeout(Duration::from_secs(15))
             .idle_timeout(idle_timeout)
             .max_lifetime(max_lifetime)
-            .connect_with(SqliteConnectOptions::from_str(&config.url)?.pragma("foreign_keys", "ON"))
+            .connect_with(
+                SqliteConnectOptions::from_str(&config.url)?
+                    .create_if_missing(true)
+                    .pragma("foreign_keys", "ON"),
+            )
             .await
             .map(DbPool::Sqlite),
     }
