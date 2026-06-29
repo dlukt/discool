@@ -569,8 +569,13 @@ let currentPath = $derived(
 let params = $derived(
   (route?.result?.path?.params ?? {}) as Record<string, string | undefined>,
 )
-let activeGuild = $derived(params.guild ?? 'lobby')
-let activeChannel = $derived(params.channel ?? 'general')
+// No hardcoded guild/channel fallback: a fresh instance has no guilds, and
+// non-channel views (home/settings/dm/admin) have no guild param. Falling back
+// to a fake slug (e.g. 'lobby') made every such view 404 while loading. Empty
+// keeps the prop types as strings while letting the load guards
+// (if (!activeGuild) return) and store guards (if (!guildSlug)) skip the loads.
+let activeGuild = $derived(params.guild ?? '')
+let activeChannel = $derived(params.channel ?? '')
 let activeDm = $derived(params.dm ?? null)
 let voiceStatusMessage = $derived(
   shellMode === 'channel'
@@ -1270,8 +1275,16 @@ $effect(() => {
         <p class="text-sm text-muted-foreground">
           {#if shellMode === 'dm' && activeDm}
             DM / {activeDm}
-          {:else}
+          {:else if activeGuild && activeChannel}
             {activeGuild} / {activeChannel}
+          {:else if shellMode === 'settings'}
+            Settings
+          {:else if shellMode === 'admin'}
+            Administration
+          {:else if shellMode === 'dm'}
+            Direct Messages
+          {:else}
+            Home
           {/if}
         </p>
         <div class="flex items-center gap-2">

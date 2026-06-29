@@ -64,20 +64,24 @@ export function parsePersistedChannelLocation(
 }
 
 export function createAuthenticatedRoutes(isAdmin: boolean): RouteConfig[] {
+  // @mateothegreat/svelte5-router resolves the LAST matching route — its match
+  // loop tests every route and overwrites the candidate without breaking, so
+  // the final match wins. A catch-all regex matches every path, so if it's last
+  // it silently overrides /settings, /dm/:dm, /:guild/:channel (everything
+  // resolves to home). Order routes generic -> specific: the catch-all is first
+  // (overwritten by anything more specific that also matches), patterns next
+  // (/:guild/:channel before /dm/:dm so /dm/x resolves to dm), and exact routes
+  // last so they win. Admin is pushed (last), not unshifted.
   const routes = [
-    shellRoute('/settings', 'settings'),
-    shellRoute('/dm/:dm', 'dm'),
-    shellRoute('/:guild/:channel', 'channel'),
-    // Use a plain "/" (not a /^\/$/ regex) so the router recognizes this as its
-    // default route: with no basePath, the router normalizes "/" to "" before
-    // matching, no regex matches "", and a non-string path isn't in the
-    // router's default-route list — so "/" would otherwise render nothing.
-    shellRoute('/', 'home'),
     shellRoute(/^\/(?<fallback>.*)$/, 'home'),
+    shellRoute('/', 'home'),
+    shellRoute('/:guild/:channel', 'channel'),
+    shellRoute('/dm/:dm', 'dm'),
+    shellRoute('/settings', 'settings'),
   ]
 
   if (isAdmin) {
-    routes.unshift(shellRoute('/admin', 'admin'))
+    routes.push(shellRoute('/admin', 'admin'))
   }
 
   return routes
