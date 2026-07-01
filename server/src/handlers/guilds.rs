@@ -82,8 +82,13 @@ pub async fn delete_guild(
     user: AuthenticatedUser,
     Path(guild_slug): Path<String>,
 ) -> Result<Response, AppError> {
-    guild_service::delete_guild(&state.pool, &state.config.avatar, &user.user_id, &guild_slug)
-        .await?;
+    guild_service::delete_guild(
+        &state.pool,
+        &state.config.avatar,
+        &user.user_id,
+        &guild_slug,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -180,9 +185,7 @@ mod tests {
             pool,
             start_time: Instant::now(),
             challenges: Arc::new(DashMap::new()),
-            p2p_metadata: Arc::new(std::sync::RwLock::new(
-                crate::p2p::P2pMetadata::default(),
-            )),
+            p2p_metadata: Arc::new(std::sync::RwLock::new(crate::p2p::P2pMetadata::default())),
             voice_runtime: Arc::new(crate::webrtc::voice_channel::VoiceRuntime::new(
                 crate::config::VoiceConfig::default(),
             )),
@@ -309,13 +312,11 @@ mod tests {
                     .await
                     .unwrap()
             }
-            DbPool::Sqlite(pool) => {
-                sqlx::query_scalar("SELECT COUNT(*) FROM guilds WHERE id = ?1")
-                    .bind(guild_id)
-                    .fetch_one(pool)
-                    .await
-                    .unwrap()
-            }
+            DbPool::Sqlite(pool) => sqlx::query_scalar("SELECT COUNT(*) FROM guilds WHERE id = ?1")
+                .bind(guild_id)
+                .fetch_one(pool)
+                .await
+                .unwrap(),
         }
     }
 
@@ -344,10 +345,7 @@ mod tests {
         let owner = insert_user(&state, "owner").await;
         let guild_id = insert_guild(&state, &owner.user_id, "my-guild", "My Guild").await;
         insert_channel(&state, &guild_id, "general").await;
-        assert_eq!(
-            count_channels_by_guild(&state, &guild_id).await,
-            1
-        );
+        assert_eq!(count_channels_by_guild(&state, &guild_id).await, 1);
 
         let res = delete_guild(
             State(state.clone()),

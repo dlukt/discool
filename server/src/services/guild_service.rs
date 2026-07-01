@@ -166,9 +166,8 @@ pub async fn update_guild(
                 break;
             }
         }
-        new_slug = resolved.ok_or_else(|| {
-            AppError::Conflict("Guild name is already in use".to_string())
-        })?;
+        new_slug = resolved
+            .ok_or_else(|| AppError::Conflict("Guild name is already in use".to_string()))?;
     }
 
     let updated_at = Utc::now().to_rfc3339();
