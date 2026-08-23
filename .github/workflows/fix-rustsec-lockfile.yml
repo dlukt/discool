@@ -3,6 +3,8 @@ name: fix-rustsec-lockfile
 on:
   push:
     branches: [fix/rustsec-2026-0204-0233]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
@@ -13,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: fix/rustsec-2026-0204-0233
 
       - name: Install repository Rust toolchain
         run: rustup show
@@ -40,4 +44,4 @@ jobs:
           git add server/Cargo.lock
           git diff --cached --exit-code && exit 1 || true
           git commit -m "fix(server): update vulnerable Rust dependencies"
-          git push
+          git push origin HEAD:fix/rustsec-2026-0204-0233
