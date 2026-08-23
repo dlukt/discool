@@ -1,0 +1,43 @@
+name: fix-rustsec-lockfile
+
+on:
+  push:
+    branches: [fix/rustsec-2026-0204-0233]
+
+permissions:
+  contents: write
+
+jobs:
+  update-lockfile:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install repository Rust toolchain
+        run: rustup show
+
+      - name: Update vulnerable transitive crates
+        working-directory: server
+        run: |
+          cargo update -p crossbeam-epoch --precise 0.9.20
+          cargo update -p rkyv --precise 0.8.17
+
+      - name: Verify server builds
+        working-directory: server
+        run: cargo check --locked
+
+      - name: Verify RustSec audit
+        run: |
+          cargo install cargo-audit --locked
+          cd server
+          cargo audit
+
+      - name: Commit regenerated lockfile
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server/Cargo.lock
+          git diff --cached --exit-code && exit 1 || true
+          git commit -m "fix(server): update vulnerable Rust dependencies"
+          git push
