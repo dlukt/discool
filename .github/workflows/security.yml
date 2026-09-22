@@ -18,19 +18,47 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+      # cargo-audit compiles from source in ~3 min. Cache the binary so only
+      # the first run after a key bump pays for it. The advisory database is
+      # cloned fresh on every run, so a cached binary never means stale
+      # advisories -- bump the key suffix to pick up a newer cargo-audit.
+      - name: Cache cargo-audit
+        id: cache-cargo-audit
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-v1
 
-      - name: cargo audit
-        run: cd server && cargo audit
+      - name: Install cargo-audit
+        if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --locked
 
       - name: Install Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
 
       - name: npm ci
         run: cd client && npm ci
 
+      # Both audits run to completion and are gated below, so a Rust finding
+      # no longer hides the JS findings (or vice versa).
+      - name: cargo audit
+        id: cargo_audit
+        continue-on-error: true
+        run: cd server && cargo audit
+
       - name: npm audit (high+)
+        id: npm_audit
+        continue-on-error: true
         run: cd client && npm audit --audit-level=high
+
+      - name: Report audit results
+        if: steps.cargo_audit.outcome == 'failure' || steps.npm_audit.outcome == 'failure'
+        run: |
+          echo "cargo audit: ${{ steps.cargo_audit.outcome }}"
+          echo "npm audit:   ${{ steps.npm_audit.outcome }}"
+          echo "::error::Dependency audit reported findings; see the step logs above."
+          exit 1

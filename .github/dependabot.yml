@@ -1,0 +1,144 @@
+version: 2
+
+# Weekly version updates land on Monday 06:00 UTC, after the `security`
+# workflow's Monday 03:00 audit cron, so a week's advisories and a week's
+# dependency PRs show up together.
+#
+# Updates are grouped aggressively on purpose: every PR runs the full `ci`
+# workflow, and this repo keeps Actions usage low (see the note in
+# release.yml). One grouped PR per ecosystem beats a dozen single-crate ones.
+#
+# `cooldown` applies to version updates ONLY -- Dependabot ignores it for
+# security updates, so advisory fixes are never delayed by it.
+
+updates:
+  # --- Rust server -------------------------------------------------------
+  # This is the gap that let RUSTSEC-2026-0285 (rustls) sit unnoticed: with
+  # no cargo entry here, Dependabot never opened a PR for it.
+  - package-ecosystem: cargo
+    directory: /server
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      cargo-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      cargo-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
+  # --- Svelte client -----------------------------------------------------
+  - package-ecosystem: npm
+    directory: /client
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+    labels:
+      - dependencies
+      - javascript
+    commit-message:
+      prefix: chore
+      prefix-development: chore
+      include: scope
+    # Order matters: a dependency joins the FIRST group it matches, so the
+    # lockstep groups below must precede the catch-all npm-minor-patch.
+    groups:
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      # `@vitest/coverage-v8` peer-depends on an EXACT vitest version, so a
+      # solo vitest bump fails `npm ci` with ERESOLVE. This is what broke
+      # PR #16 (vitest -> 5.0.1, coverage-v8 left on 4.x).
+      vitest:
+        applies-to: version-updates
+        patterns:
+          - vitest
+          - "@vitest/*"
+      # @sveltejs/vite-plugin-svelte pins both `vite` and `svelte`;
+      # svelte-check pins svelte + typescript.
+      svelte-toolchain:
+        applies-to: version-updates
+        patterns:
+          - svelte
+          - svelte-check
+          - "@sveltejs/*"
+          - vite
+      npm-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
+  # --- GitHub Actions ----------------------------------------------------
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions-all:
+        applies-to: version-updates
+        patterns:
+          - "*"
+
+  # --- Container images --------------------------------------------------
+  # Covers the root Dockerfile (rust:*, debian:*) and docker-compose.yml
+  # (postgres:*).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      docker-all:
+        applies-to: version-updates
+        patterns:
+          - "*"
+    ignore:
+      # Published by this repo's own release workflow, not an upstream dep.
+      - dependency-name: ghcr.io/dlukt/discool
