@@ -424,7 +424,7 @@ fn encrypt_private_key_payload(
         .map_err(|_| AppError::Internal("Failed to initialize recovery encryption".to_string()))?;
     let nonce: [u8; 12] = rand::rng().random();
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), payload.as_bytes())
+        .encrypt(&Nonce::from(nonce), payload.as_bytes())
         .map_err(|_| AppError::Internal("Failed to encrypt recovery payload".to_string()))?;
     Ok((BASE64.encode(ciphertext), BASE64.encode(nonce)))
 }
@@ -442,20 +442,16 @@ fn decrypt_private_key_payload(
     let nonce_bytes = BASE64
         .decode(key_nonce)
         .map_err(|_| AppError::Internal("Stored recovery key nonce is invalid".to_string()))?;
-    if nonce_bytes.len() != 12 {
-        return Err(AppError::Internal(
-            "Stored recovery key nonce is invalid".to_string(),
-        ));
-    }
+    // TryFrom enforces the 12-byte length that an explicit check used to cover.
+    let nonce = Nonce::try_from(nonce_bytes.as_slice())
+        .map_err(|_| AppError::Internal("Stored recovery key nonce is invalid".to_string()))?;
 
     let ciphertext = BASE64
         .decode(encrypted_payload)
         .map_err(|_| AppError::Internal("Stored recovery payload is invalid base64".to_string()))?;
-    let decrypted = cipher
-        .decrypt(Nonce::from_slice(&nonce_bytes), ciphertext.as_ref())
-        .map_err(|_| {
-            AppError::Internal("Stored recovery payload cannot be decrypted".to_string())
-        })?;
+    let decrypted = cipher.decrypt(&nonce, ciphertext.as_ref()).map_err(|_| {
+        AppError::Internal("Stored recovery payload cannot be decrypted".to_string())
+    })?;
 
     String::from_utf8(decrypted)
         .map_err(|_| AppError::Internal("Stored recovery payload is invalid UTF-8".to_string()))

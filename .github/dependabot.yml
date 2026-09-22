@@ -92,6 +92,13 @@ updates:
           - "@vitest/*"
       # @sveltejs/vite-plugin-svelte pins both `vite` and `svelte`;
       # svelte-check pins svelte + typescript.
+      #
+      # `typescript` belongs here for the reason the line above already states,
+      # but was missing from the patterns until now. That is what let PR #37
+      # open a solo bump to typescript 7.0.2, which fails `npm ci` with
+      # ERESOLVE: svelte-check 4.7.6 peers `typescript@^5.0.0 || ^6.0.0`.
+      # Grouped, typescript moves only alongside the svelte-check that can
+      # accept it.
       svelte-toolchain:
         applies-to: version-updates
         patterns:
@@ -99,6 +106,7 @@ updates:
           - svelte-check
           - "@sveltejs/*"
           - vite
+          - typescript
       npm-minor-patch:
         applies-to: version-updates
         update-types:
