@@ -1,7 +1,7 @@
 [toolchain]
-# Single source of truth for the Rust version. Keep in sync with the `rust:`
-# base image in /Dockerfile and the `dtolnay/rust-toolchain@` ref in the CI
-# workflows -- a mismatch still builds, but makes rustup download a second
-# toolchain on every run.
-channel = "1.98.1"
+# Track current stable rather than a frozen version -- a hardcoded number here
+# is what let this file rot to 1.93.0 while the Dockerfile said 1.96. The other
+# two places that select a toolchain follow the same channel: `rust:trixie` in
+# /Dockerfile and `dtolnay/rust-toolchain@stable` in the CI workflows.
+channel = "stable"
 components = ["rustfmt", "clippy"]

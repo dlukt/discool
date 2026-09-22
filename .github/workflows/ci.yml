@@ -11,11 +11,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Pinned to match server/rust-toolchain.toml; `@stable` would install a
-      # toolchain that rustup then replaces with the pinned one on first cargo
-      # invocation.
+      # `stable` matches `channel` in server/rust-toolchain.toml, so cargo uses
+      # the toolchain this step installs instead of fetching a second one.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.98.1
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 

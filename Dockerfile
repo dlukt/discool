@@ -1,11 +1,18 @@
 # syntax=docker/dockerfile:1
 
-# Keep this tag in sync with `channel` in server/rust-toolchain.toml, otherwise
-# rustup downloads a second toolchain inside the build and the image's
-# preinstalled one goes unused.
-FROM rust:1.98.1-trixie AS chef
+# Floating tag: always the current stable Rust on trixie, matching
+# `channel = "stable"` in server/rust-toolchain.toml.
+FROM rust:trixie AS chef
 
 ARG DEBIAN_FRONTEND=noninteractive
+
+# The image ships its toolchain named for the version (`1.98.1-<host>`), but
+# server/rust-toolchain.toml asks for `stable`, which rustup treats as a
+# different toolchain and would auto-install on the first cargo call in the
+# builder stage -- a fresh download on every build. Installing it here instead
+# puts it in this cached base layer. Same compiler, so the cargo-chef
+# dependency cache is unaffected.
+RUN rustup toolchain install stable --profile minimal --component rustfmt --component clippy
 
 # Install Node.js 24 LTS + cargo-chef for fast dependency caching.
 RUN apt-get update && apt-get install -y --no-install-recommends \

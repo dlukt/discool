@@ -15,9 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Pinned to match server/rust-toolchain.toml (see the note in ci.yml).
+      # `stable` matches `channel` in server/rust-toolchain.toml (see ci.yml).
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.98.1
+        uses: dtolnay/rust-toolchain@stable
 
       # cargo-audit compiles from source in ~3 min. Cache the binary so only
       # the first run after a key bump pays for it. The advisory database is
