@@ -22,7 +22,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 aes-gcm = { version = "0.10", features = ["aes"] }
-base64 = "0.22"
+base64 = "0.23"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls"] }
 libp2p = { version = "0.56", features = ["gossipsub", "identify", "kad", "macros", "noise", "tcp", "tokio", "yamux"] }
 sha2 = "0.10"
