@@ -24,7 +24,7 @@ aes-gcm = { version = "0.10", features = ["aes"] }
 base64 = "0.23"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls"] }
 libp2p = { version = "0.56", features = ["gossipsub", "identify", "kad", "macros", "noise", "tcp", "tokio", "yamux"] }
-sha2 = "0.10"
+sha2 = "0.11"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 scraper = "0.27"
