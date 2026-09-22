@@ -1,0 +1,41 @@
+name: ci-client
+
+# Split out of the old combined `ci` workflow -- see the note in ci-server.yml.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'client/**'
+      - '.github/workflows/ci-client.yml'
+  pull_request:
+    paths:
+      - 'client/**'
+      - '.github/workflows/ci-client.yml'
+
+jobs:
+  client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: npm ci
+        run: cd client && npm ci
+
+      - name: npm run lint
+        run: cd client && npm run lint
+
+      - name: npm run check
+        run: cd client && npm run check
+
+      - name: npm run test
+        run: cd client && npm run test
+
+      - name: npm run build
+        run: cd client && npm run build
