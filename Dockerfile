@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.96-trixie AS chef
+# Keep this tag in sync with `channel` in server/rust-toolchain.toml, otherwise
+# rustup downloads a second toolchain inside the build and the image's
+# preinstalled one goes unused.
+FROM rust:1.98.1-trixie AS chef
 
 ARG DEBIAN_FRONTEND=noninteractive
 

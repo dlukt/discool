@@ -11,8 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Pinned to match server/rust-toolchain.toml; `@stable` would install a
+      # toolchain that rustup then replaces with the pinned one on first cargo
+      # invocation.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
 
