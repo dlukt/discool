@@ -13,7 +13,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -24,7 +24,7 @@ jobs:
       # advisories -- bump the key suffix to pick up a newer cargo-audit.
       - name: Cache cargo-audit
         id: cache-cargo-audit
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/cargo-audit
           key: ${{ runner.os }}-cargo-audit-v1
@@ -34,7 +34,7 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Install Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
