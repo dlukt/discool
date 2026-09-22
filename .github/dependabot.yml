@@ -62,6 +62,16 @@ updates:
       prefix: chore
       prefix-development: chore
       include: scope
+    ignore:
+      # `@types/node`'s major tracks the Node release line, so it must match the
+      # runtime -- Node 24, set by `node-version` in .github/workflows/ci.yml and
+      # security.yml and by the NodeSource setup in /Dockerfile. A major bump
+      # type-checks the client against APIs this runtime does not ship (this is
+      # what PR #21 proposed: 24.x -> 26.x). Minor/patch still flow through the
+      # npm-minor-patch group. Drop this entry when the runtime moves to 26.
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
     # Order matters: a dependency joins the FIRST group it matches, so the
     # lockstep groups below must precede the catch-all npm-minor-patch.
     groups:

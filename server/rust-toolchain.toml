@@ -1,3 +1,7 @@
 [toolchain]
-channel = "1.93.0"
+# Track current stable rather than a frozen version -- a hardcoded number here
+# is what let this file rot to 1.93.0 while the Dockerfile said 1.96. The other
+# two places that select a toolchain follow the same channel: `rust:trixie` in
+# /Dockerfile and `dtolnay/rust-toolchain@stable` in the CI workflows.
+channel = "stable"
 components = ["rustfmt", "clippy"]

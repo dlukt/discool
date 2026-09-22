@@ -11,6 +11,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # `stable` matches `channel` in server/rust-toolchain.toml, so cargo uses
+      # the toolchain this step installs instead of fetching a second one.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
