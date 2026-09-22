@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.96-trixie AS chef
+FROM rust:1.97-trixie AS chef
 
 ARG DEBIAN_FRONTEND=noninteractive
 
