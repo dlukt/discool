@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+async-trait = "0.1"
 axum = { version = "0.8", features = ["ws", "multipart"] }
 axum-prometheus = "0.10"
 bs58 = "0.5"
@@ -23,15 +24,16 @@ uuid = { version = "1", features = ["v4", "serde"] }
 aes-gcm = { version = "0.11", features = ["aes"] }
 base64 = "0.23"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls"] }
-libp2p = { version = "0.56", features = ["gossipsub", "identify", "kad", "macros", "noise", "tcp", "tokio", "yamux"] }
+# libp2p-swarm 0.48 pins `wasm-bindgen-futures = "=0.4.58"` (wasm targets
+# only), and Cargo.lock resolves for every target, so it holds the
+# wasm-bindgen family and futures-timer 3.0.3 below their latest. No effect
+# on this native build: the wasm crates are never compiled, and 3.0.4's
+# overflow guard in `Delay::new` only matters for huge durations, which
+# nothing here passes (libp2p-swarm guards its idle timeout itself).
+libp2p = { version = "0.57", features = ["gossipsub", "identify", "kad", "macros", "noise", "tcp", "tokio", "yamux"] }
 sha2 = "0.11"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 scraper = "0.27"
 url = "2"
-webrtc = "0.17.1"
-
-[patch.crates-io]
-# Patched to drop the vulnerable yamux 0.12.x line (CVE-2026-32314).
-# See server/patches/libp2p-yamux/README.md for details.
-libp2p-yamux = { path = "patches/libp2p-yamux" }
+webrtc = "0.21"

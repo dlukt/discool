@@ -1,4 +1,4 @@
-use webrtc::ice_transport::ice_server::RTCIceServer;
+use webrtc::peer_connection::RTCIceServer;
 
 use crate::config::{VoiceConfig, VoiceTurnConfig};
 

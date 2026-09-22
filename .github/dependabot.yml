@@ -75,6 +75,17 @@ updates:
       - dependency-name: "@types/node"
         update-types:
           - version-update:semver-major
+      # TypeScript 7 (the Go port) ships no compiler API: `typescript@7`'s main
+      # export is only `lib/version.cjs`. svelte-check and svelte2tsx are built
+      # on that API, so they cannot run on 7 at all -- this is not just a stale
+      # peer range (svelte-check 4.7.6 peers `^5.0.0 || ^6.0.0`). PRs #37 and
+      # #43 both proposed 7.0.2 and both died in `npm ci` with ERESOLVE.
+      # svelte-check's `--tsgo` mode can use TS 7, but only installed
+      # *alongside* TS 6 under an npm alias, so `typescript` itself still stays
+      # on 6. Drop this entry once a svelte-check release peers `typescript@^7`.
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
     # Order matters: a dependency joins the FIRST group it matches, so the
     # lockstep groups below must precede the catch-all npm-minor-patch.
     groups:
@@ -93,12 +104,12 @@ updates:
       # @sveltejs/vite-plugin-svelte pins both `vite` and `svelte`;
       # svelte-check pins svelte + typescript.
       #
-      # `typescript` belongs here for the reason the line above already states,
-      # but was missing from the patterns until now. That is what let PR #37
-      # open a solo bump to typescript 7.0.2, which fails `npm ci` with
-      # ERESOLVE: svelte-check 4.7.6 peers `typescript@^5.0.0 || ^6.0.0`.
-      # Grouped, typescript moves only alongside the svelte-check that can
-      # accept it.
+      # `typescript` is here for the reason the line above states, so its
+      # minors land in the same PR as the svelte-check that type-checks with
+      # them. Grouping does NOT stop an incompatible major: Dependabot does not
+      # check peer ranges across a group, and PR #43 bumped typescript to 7.0.2
+      # inside this group with svelte-check left behind. The `ignore` entry
+      # above is what holds typescript on 6.
       svelte-toolchain:
         applies-to: version-updates
         patterns:

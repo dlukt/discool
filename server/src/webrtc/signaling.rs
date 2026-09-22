@@ -1,5 +1,5 @@
 use serde::Serialize;
-use webrtc::ice_transport::ice_server::RTCIceServer;
+use webrtc::peer_connection::RTCIceServer;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VoiceOfferPayload {

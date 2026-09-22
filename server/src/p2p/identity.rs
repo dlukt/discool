@@ -189,6 +189,37 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// A throwaway key file written by libp2p-identity 0.2.14. The node's
+    /// PeerId is derived from this file, so a dependency bump that changes
+    /// how it decodes (0.3.0 swapped its protobuf library) would give every
+    /// existing instance a new network identity, or stop it from booting.
+    #[test]
+    fn loads_key_file_written_by_libp2p_identity_0_2() {
+        const KEY_FILE: [u8; 68] = [
+            0x08, 0x01, 0x12, 0x40, 0x2c, 0x91, 0x61, 0x9b, 0xc7, 0x51, 0x76, 0x1e, 0xaf, 0xc0,
+            0x7b, 0x14, 0x59, 0x5d, 0xf2, 0xd2, 0x00, 0x9e, 0x9f, 0x5b, 0xf0, 0xf2, 0x25, 0x2d,
+            0xc1, 0x94, 0x86, 0x6a, 0xd6, 0x23, 0x88, 0x24, 0x61, 0xef, 0x5d, 0xc1, 0xd0, 0x1f,
+            0x59, 0x4e, 0x1b, 0x53, 0x93, 0x4a, 0xbd, 0x71, 0x0a, 0x3c, 0x52, 0x2c, 0x24, 0x3b,
+            0x7a, 0x79, 0xf9, 0xf5, 0x3a, 0xba, 0x4d, 0x1a, 0x4b, 0x85, 0x65, 0x90,
+        ];
+        let dir = new_temp_dir();
+        let identity_path = dir.join("identity.key");
+        fs::write(&identity_path, KEY_FILE).unwrap();
+
+        let identity = load_or_create_identity(&identity_path).unwrap();
+
+        assert_eq!(
+            identity.peer_id.to_string(),
+            "12D3KooWGQfQrvPnvNBnVLX2CLgTJHAezh3eeaDJ7YPN3jB3GyBu"
+        );
+        assert_eq!(
+            identity.keypair.to_protobuf_encoding().unwrap(),
+            KEY_FILE,
+            "re-encoding must reproduce the file, so a rollback can still read it"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn rejects_malformed_key_file() {
         let dir = new_temp_dir();
