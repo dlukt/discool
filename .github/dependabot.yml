@@ -4,9 +4,11 @@ version: 2
 # workflow's Monday 03:00 audit cron, so a week's advisories and a week's
 # dependency PRs show up together.
 #
-# Updates are grouped aggressively on purpose: every PR runs the full `ci`
-# workflow, and this repo keeps Actions usage low (see the note in
-# release.yml). One grouped PR per ecosystem beats a dozen single-crate ones.
+# Updates are grouped aggressively on purpose: this repo keeps Actions usage
+# low (see the note in release.yml), and one grouped PR per ecosystem beats a
+# dozen single-crate ones. `ci-server` and `ci-client` are path-filtered, so a
+# cargo PR no longer drags the client suite along (or vice versa), but a group
+# still costs one run rather than ten.
 #
 # `cooldown` applies to version updates ONLY -- Dependabot ignores it for
 # security updates, so advisory fixes are never delayed by it.
@@ -64,8 +66,9 @@ updates:
       include: scope
     ignore:
       # `@types/node`'s major tracks the Node release line, so it must match the
-      # runtime -- Node 24, set by `node-version` in .github/workflows/ci.yml and
-      # security.yml and by the NodeSource setup in /Dockerfile. A major bump
+      # runtime -- Node 24, set by `node-version` in .github/workflows/
+      # ci-client.yml and security.yml and by the NodeSource setup in
+      # /Dockerfile. A major bump
       # type-checks the client against APIs this runtime does not ship (this is
       # what PR #21 proposed: 24.x -> 26.x). Minor/patch still flow through the
       # npm-minor-patch group. Drop this entry when the runtime moves to 26.

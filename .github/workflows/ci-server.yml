@@ -1,9 +1,22 @@
-name: ci
+name: ci-server
 
+# Split out of the old combined `ci` workflow so a client-only change does not
+# pay for a ~5 minute Rust build. GitHub has no per-job `paths` filter, so one
+# workflow per side is the only way to get this without a third-party
+# changed-files action.
+#
+# Nothing under client/ can affect this job: server/build.rs only requires
+# client/dist/index.html for *release* builds, and CI builds the dev profile.
 on:
   push:
     branches: [main]
+    paths:
+      - 'server/**'
+      - '.github/workflows/ci-server.yml'
   pull_request:
+    paths:
+      - 'server/**'
+      - '.github/workflows/ci-server.yml'
 
 jobs:
   server:
@@ -35,30 +48,3 @@ jobs:
 
       - name: cargo test
         run: cd server && RUST_TEST_THREADS=1 cargo test
-
-  client:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: client/package-lock.json
-
-      - name: npm ci
-        run: cd client && npm ci
-
-      - name: npm run lint
-        run: cd client && npm run lint
-
-      - name: npm run check
-        run: cd client && npm run check
-
-      - name: npm run test
-        run: cd client && npm run test
-
-      - name: npm run build
-        run: cd client && npm run build
