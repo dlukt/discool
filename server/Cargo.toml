@@ -29,7 +29,7 @@ regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 scraper = "0.27"
 url = "2"
-webrtc = "0.17.1"
+webrtc = "0.20.5"
 
 [patch.crates-io]
 # Patched to drop the vulnerable yamux 0.12.x line (CVE-2026-32314).
