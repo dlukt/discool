@@ -1,20 +1,16 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     sync::Arc,
+    time::Duration,
 };
 
 use dashmap::DashMap;
-use webrtc::{
-    api::{
-        APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
-    },
-    ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer},
-    interceptor::registry::Registry,
-    peer_connection::{
-        RTCPeerConnection, configuration::RTCConfiguration,
-        sdp::session_description::RTCSessionDescription,
-    },
-    rtp_transceiver::rtp_codec::RTPCodecType,
+use tokio::sync::Notify;
+use webrtc::peer_connection::{
+    MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
+    RTCConfigurationBuilder, RTCIceCandidateInit, RTCIceGatheringState, RTCIceServer,
+    RTCSessionDescription, Registry, register_default_interceptors,
 };
 
 use crate::config::VoiceConfig;
@@ -24,15 +20,49 @@ use super::{
     turn::ice_servers_from_config,
 };
 
-#[derive(Debug, Clone)]
+/// How long an offer waits for ICE gathering before it goes out with the
+/// candidates found so far, so a STUN or TURN server that never answers cannot
+/// stall a join.
+const ICE_GATHERING_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone)]
 struct VoiceSession {
-    peer_connection: Arc<RTCPeerConnection>,
+    peer_connection: Arc<dyn PeerConnection>,
     user_id: String,
     guild_slug: String,
     channel_slug: String,
     is_muted: bool,
     is_deafened: bool,
     is_speaking: bool,
+}
+
+// Hand-written because `dyn PeerConnection` has no `Debug` impl.
+impl fmt::Debug for VoiceSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VoiceSession")
+            .field("user_id", &self.user_id)
+            .field("guild_slug", &self.guild_slug)
+            .field("channel_slug", &self.channel_slug)
+            .field("is_muted", &self.is_muted)
+            .field("is_deafened", &self.is_deafened)
+            .field("is_speaking", &self.is_speaking)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Relays the one peer-connection event signaling waits on. webrtc 0.21
+/// reports events through a handler; 0.17 had `gathering_complete_promise`.
+struct VoiceEventHandler {
+    gathering_complete: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl PeerConnectionEventHandler for VoiceEventHandler {
+    async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
+        if state == RTCIceGatheringState::Complete {
+            self.gathering_complete.notify_one();
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -87,29 +117,29 @@ impl VoiceRuntime {
         self.close_sessions_for_connection_guild(connection_id, guild_slug)
             .await;
         let key = session_key(connection_id, guild_slug, channel_slug);
-        let peer_connection = create_peer_connection(ice_servers_from_config(&self.config)).await?;
-        peer_connection
-            .add_transceiver_from_kind(RTPCodecType::Audio, None)
-            .await
-            .map_err(|error| format!("failed to configure server audio transceiver: {error}"))?;
-        let offer = peer_connection
-            .create_offer(None)
-            .await
-            .map_err(|error| format!("failed to create voice offer: {error}"))?;
-        peer_connection
-            .set_local_description(offer)
-            .await
-            .map_err(|error| format!("failed to set voice local description: {error}"))?;
-        let mut gathering_complete = peer_connection.gathering_complete_promise().await;
-        let _ = gathering_complete.recv().await;
-        let local_description = peer_connection
-            .local_description()
-            .await
-            .ok_or_else(|| "voice offer SDP is unavailable".to_string())?;
+        let gathering_complete = Arc::new(Notify::new());
+        let peer_connection = create_peer_connection(
+            ice_servers_from_config(&self.config),
+            Arc::clone(&gathering_complete),
+        )
+        .await?;
+        let local_description =
+            match create_gathered_offer(peer_connection.as_ref(), &gathering_complete).await {
+                Ok(local_description) => local_description,
+                Err(error) => {
+                    // Dropping a peer connection leaves its driver task and sockets
+                    // running; only `close` stops them.
+                    if let Err(close_error) = peer_connection.close().await {
+                        tracing::debug!(
+                            %connection_id,
+                            error = %close_error,
+                            "Failed to close voice peer connection"
+                        );
+                    }
+                    return Err(error);
+                }
+            };
         let offer_sdp = local_description.sdp.trim().to_string();
-        if offer_sdp.is_empty() {
-            return Err("voice offer SDP is empty".to_string());
-        }
 
         self.sessions.insert(
             key,
@@ -192,7 +222,7 @@ impl VoiceRuntime {
             candidate: trimmed_candidate.to_string(),
             sdp_mid: sdp_mid.map(ToString::to_string),
             sdp_mline_index,
-            username_fragment: None,
+            ..Default::default()
         };
         peer_connection
             .add_ice_candidate(candidate)
@@ -367,26 +397,72 @@ impl VoiceRuntime {
 
 async fn create_peer_connection(
     ice_servers: Vec<RTCIceServer>,
-) -> Result<Arc<RTCPeerConnection>, String> {
+    gathering_complete: Arc<Notify>,
+) -> Result<Arc<dyn PeerConnection>, String> {
     let mut media_engine = MediaEngine::default();
     media_engine
         .register_default_codecs()
         .map_err(|error| format!("failed to register voice codecs: {error}"))?;
-    let mut interceptor_registry = Registry::new();
-    interceptor_registry =
-        register_default_interceptors(interceptor_registry, &mut media_engine)
-            .map_err(|error| format!("failed to register voice interceptors: {error}"))?;
-    let api = APIBuilder::new()
+    let interceptor_registry = register_default_interceptors(Registry::new(), &mut media_engine)
+        .map_err(|error| format!("failed to register voice interceptors: {error}"))?;
+    let peer_connection = PeerConnectionBuilder::new()
+        .with_configuration(
+            RTCConfigurationBuilder::new()
+                .with_ice_servers(ice_servers)
+                .build(),
+        )
         .with_media_engine(media_engine)
         .with_interceptor_registry(interceptor_registry)
-        .build();
-    api.new_peer_connection(RTCConfiguration {
-        ice_servers,
-        ..Default::default()
-    })
-    .await
-    .map(Arc::new)
-    .map_err(|error| format!("failed to create voice peer connection: {error}"))
+        .with_handler(Arc::new(VoiceEventHandler { gathering_complete }))
+        // webrtc 0.17 gathered on every interface by itself; 0.21 binds only
+        // what it is given. The wildcard expands to one socket per usable IPv4
+        // interface. `[::]:0` stays out: on a host with no usable IPv6 address
+        // (Docker's default bridge) it is bound verbatim, which either logs a
+        // bind error on every join or advertises `::` as a host candidate.
+        .with_udp_addrs(vec!["0.0.0.0:0"])
+        .build()
+        .await
+        .map_err(|error| format!("failed to create voice peer connection: {error}"))?;
+    Ok(Arc::new(peer_connection))
+}
+
+/// Creates the audio offer and waits for ICE gathering, so the returned SDP
+/// already carries the server's candidates.
+async fn create_gathered_offer(
+    peer_connection: &dyn PeerConnection,
+    gathering_complete: &Notify,
+) -> Result<RTCSessionDescription, String> {
+    // `RtpCodecKind` comes from `rtc`, which webrtc depends on privately and
+    // does not re-export, so it is built from its W3C kind string instead.
+    peer_connection
+        .add_transceiver_from_kind("audio".into(), None)
+        .await
+        .map_err(|error| format!("failed to configure server audio transceiver: {error}"))?;
+    let offer = peer_connection
+        .create_offer(None)
+        .await
+        .map_err(|error| format!("failed to create voice offer: {error}"))?;
+    peer_connection
+        .set_local_description(offer)
+        .await
+        .map_err(|error| format!("failed to set voice local description: {error}"))?;
+    if tokio::time::timeout(ICE_GATHERING_TIMEOUT, gathering_complete.notified())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            timeout_secs = ICE_GATHERING_TIMEOUT.as_secs(),
+            "ICE gathering did not complete in time; sending the voice offer with the candidates gathered so far"
+        );
+    }
+    let local_description = peer_connection
+        .local_description()
+        .await
+        .ok_or_else(|| "voice offer SDP is unavailable".to_string())?;
+    if local_description.sdp.trim().is_empty() {
+        return Err("voice offer SDP is empty".to_string());
+    }
+    Ok(local_description)
 }
 
 fn extract_candidates(
@@ -428,7 +504,111 @@ fn connection_id_from_session_key(session_key: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::mpsc;
+    use webrtc::peer_connection::{RTCPeerConnectionIceEvent, RTCPeerConnectionState};
+
     use super::*;
+
+    /// Plays the browser: forwards its gathered candidates for trickling and
+    /// reports when the connection comes up.
+    struct BrowserPeerHandler {
+        candidates: mpsc::UnboundedSender<RTCIceCandidateInit>,
+        connected: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerConnectionEventHandler for BrowserPeerHandler {
+        async fn on_ice_candidate(&self, event: RTCPeerConnectionIceEvent) {
+            if let Ok(candidate) = event.candidate.to_json() {
+                let _ = self.candidates.send(candidate);
+            }
+        }
+
+        async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+            if state == RTCPeerConnectionState::Connected {
+                self.connected.notify_one();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn answer_and_trickled_candidates_complete_the_handshake() {
+        // No STUN: host candidates suffice on one machine, and the test must
+        // not depend on reaching a public server.
+        let runtime = VoiceRuntime::new(VoiceConfig {
+            stun_urls: Vec::new(),
+            ..VoiceConfig::default()
+        });
+        let start = runtime
+            .start_signaling("conn-1", "user-1", "guild", "voice-room")
+            .await
+            .expect("voice signaling should start");
+
+        let (candidate_tx, mut candidate_rx) = mpsc::unbounded_channel();
+        let connected = Arc::new(Notify::new());
+        let mut media_engine = MediaEngine::default();
+        media_engine
+            .register_default_codecs()
+            .expect("browser codecs should register");
+        let browser = PeerConnectionBuilder::new()
+            .with_media_engine(media_engine)
+            .with_handler(Arc::new(BrowserPeerHandler {
+                candidates: candidate_tx,
+                connected: Arc::clone(&connected),
+            }))
+            .with_udp_addrs(vec!["0.0.0.0:0"])
+            .build()
+            .await
+            .expect("browser peer connection should build");
+        browser
+            .set_remote_description(
+                RTCSessionDescription::offer(start.offer.sdp).expect("server offer should parse"),
+            )
+            .await
+            .expect("browser should accept the server offer");
+        let answer = browser
+            .create_answer(None)
+            .await
+            .expect("browser should create an answer");
+        let answer_sdp = answer.sdp.clone();
+        browser
+            .set_local_description(answer)
+            .await
+            .expect("browser should apply its answer");
+
+        // Like a browser, answer before gathering finishes, so the server only
+        // learns the browser's candidates by trickle.
+        runtime
+            .apply_answer("conn-1", "guild", "voice-room", &answer_sdp)
+            .await
+            .expect("server should accept the browser answer");
+        let handshake = async {
+            loop {
+                tokio::select! {
+                    () = connected.notified() => return,
+                    Some(candidate) = candidate_rx.recv() => {
+                        runtime
+                            .apply_remote_candidate(
+                                "conn-1",
+                                "guild",
+                                "voice-room",
+                                &candidate.candidate,
+                                Some("0"),
+                                Some(0),
+                            )
+                            .await
+                            .expect("server should accept a trickled candidate");
+                    }
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), handshake)
+            .await
+            .expect("browser should connect to the server peer");
+
+        let _ = browser.close().await;
+        runtime.leave_session("conn-1", "guild", "voice-room").await;
+    }
 
     #[tokio::test]
     async fn start_signaling_returns_offer_and_connecting_state() {
