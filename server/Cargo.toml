@@ -28,7 +28,7 @@ libp2p = { version = "0.56", features = ["gossipsub", "identify", "kad", "macros
 sha2 = "0.10"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-scraper = "0.25"
+scraper = "0.27"
 url = "2"
 webrtc = "0.17.1"
 
