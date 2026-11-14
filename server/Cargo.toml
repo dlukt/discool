@@ -37,3 +37,8 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 scraper = "0.27"
 url = "2"
 webrtc = "0.21"
+
+[patch.crates-io]
+# sqlx 0.9.0 caps libsqlite3-sys at <0.38. The copy under patches/ is that
+# crate with the unpublished <0.40 bound, so 0.39.1 (RUSTSEC-2026-0459) resolves.
+sqlx-sqlite = { path = "patches/sqlx-sqlite" }
