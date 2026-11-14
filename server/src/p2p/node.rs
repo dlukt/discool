@@ -107,10 +107,11 @@ pub async fn bootstrap(
             yamux::Config::default,
         )
         .map_err(|err| NodeError::Transport(err.to_string()))?
+        // Constructor returns the behaviour directly, so this error is `!`.
+        // rustc 1.100 denies calling methods on that value (`err.to_string()`).
         .with_behaviour(move |keypair| {
             build_discovery_behaviour(keypair.clone(), gossip_mesh_settings)
-        })
-        .map_err(|err| NodeError::Discovery(err.to_string()))?
+        })?
         .build();
 
     swarm
