@@ -99,7 +99,10 @@ pub async fn bootstrap(
         .parse()
         .map_err(|err: libp2p::multiaddr::Error| NodeError::AddressParse(err.to_string()))?;
 
-    let mut swarm = SwarmBuilder::with_existing_identity(identity.keypair)
+    // Behaviour constructor is infallible (`Result<_, !>`). rustc 1.100 denies
+    // both `err.to_string()` and `?` (`From<!>` is not implemented); `let Ok`
+    // is the exhaustive form for that error.
+    let Ok(built) = SwarmBuilder::with_existing_identity(identity.keypair)
         .with_tokio()
         .with_tcp(
             tcp::Config::default(),
@@ -107,12 +110,10 @@ pub async fn bootstrap(
             yamux::Config::default,
         )
         .map_err(|err| NodeError::Transport(err.to_string()))?
-        // Constructor returns the behaviour directly, so this error is `!`.
-        // rustc 1.100 denies calling methods on that value (`err.to_string()`).
         .with_behaviour(move |keypair| {
             build_discovery_behaviour(keypair.clone(), gossip_mesh_settings)
-        })?
-        .build();
+        });
+    let mut swarm = built.build();
 
     swarm
         .listen_on(listen_addr.clone())
