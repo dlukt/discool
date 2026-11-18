@@ -14,13 +14,16 @@ ARG DEBIAN_FRONTEND=noninteractive
 # dependency cache is unaffected.
 RUN rustup toolchain install stable --profile minimal --component rustfmt --component clippy
 
-# Install Node.js 24 LTS + cargo-chef for fast dependency caching.
+# Install Node.js 26 LTS, current npm, and cargo-chef for fast dependency
+# caching. Node 26's bundled npm is 11; the client lockfile is written by
+# npm 12, and `npm ci` on 11 does not install the same tree.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gnupg \
-  && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+  && curl -fsSL https://deb.nodesource.com/setup_26.x | bash - \
   && apt-get install -y --no-install-recommends nodejs \
+  && npm install -g npm@12.2.3 \
   && cargo install cargo-chef --locked \
   && rm -rf /var/lib/apt/lists/*
 

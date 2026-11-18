@@ -65,16 +65,6 @@ updates:
       prefix-development: chore
       include: scope
     ignore:
-      # `@types/node`'s major tracks the Node release line, so it must match the
-      # runtime -- Node 24, set by `node-version` in .github/workflows/
-      # ci-client.yml and security.yml and by the NodeSource setup in
-      # /Dockerfile. A major bump
-      # type-checks the client against APIs this runtime does not ship (this is
-      # what PR #21 proposed: 24.x -> 26.x). Minor/patch still flow through the
-      # npm-minor-patch group. Drop this entry when the runtime moves to 26.
-      - dependency-name: "@types/node"
-        update-types:
-          - version-update:semver-major
       # TypeScript 7 (the Go port) ships no compiler API: `typescript@7`'s main
       # export is only `lib/version.cjs`. svelte-check and svelte2tsx are built
       # on that API, so they cannot run on 7 at all -- this is not just a stale
