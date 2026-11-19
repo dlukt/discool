@@ -36,6 +36,9 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 WORKDIR /app/server
+# recipe.json keeps the absolute path patch from prepare. Cook resolves it
+# before the real server tree is copied, so the patch crate has to be here.
+COPY server/patches/ ./patches/
 COPY --from=planner /app/server/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
